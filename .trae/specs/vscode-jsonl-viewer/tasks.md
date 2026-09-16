@@ -1,0 +1,45 @@
+# Tasks
+
+- [x] Task 1: 搭建扩展工程骨架（TypeScript + esbuild + Webview UI Toolkit）
+  - [x] SubTask 1.1: 配置 package.json（扩展清单、engines、activationEvents、contributes、keywords）
+  - [x] SubTask 1.2: 配置 tsconfig 与 build.mjs（esbuild 打包扩展主进程与 webview bundle、tree-shaking）
+  - [x] SubTask 1.3: 安装 @vscode/webview-ui-toolkit 与必要依赖（pnpm）
+  - [x] SubTask 1.4: 编写 extension.ts，完成 extend 激活注册、Webview View/Custom Editor 打开入口与命令注册
+- [x] Task 2: 实现行偏移索引与按需惰性解析（性能核心）
+  - [x] SubTask 2.1: lineIndex.ts 实现流式顺序扫描生成「行号→字节偏移」索引，支持二分定位任意行
+  - [x] SubTask 2.2: jsonParser.ts 基于偏移按行惰性解析，逐行 JSON 校验并返回错误行/定位
+  - [x] SubTask 2.3: rpc.ts 定义扩展主进程与 webview 之间的消息协议（请求可见区行、返回解析结果等）
+  - [x] SubTask 2.4: 单元测试：多行/混入坏行/跨 block 行定位正确性
+- [x] Task 3: 实现字段推断抽样与校验/报错定位
+  - [x] SubTask 3.1: inferFields.ts 抽样前 N 行推断字段集合、类型与出现频率
+  - [x] SubTask 3.2: 集成校验结果（坏行集合）到列表渲染，红标错误行
+  - [x] SubTask 3.3: 报错定位：点击坏行跳转到源文件对应行（revealRange）
+- [x] Task 4: 实现 webview 前端：记录列表 + 虚拟滚动
+  - [x] SubTask 4.1: 虚拟滚动列表，仅渲染可视区卡片，配合对象池
+  - [x] SubTask 4.2: 摘要卡片渲染（基于字段定制与推断的字段）
+  - [x] SubTask 4.3: 顶部概要栏：文件名称、总行数、已解析行、打开耗时
+  - [x] SubTask 4.4: 搜索结果/过滤态同步到列表
+- [x] Task 5: 实现 JSON 树详情面板（适配深层嵌套）
+  - [x] SubTask 5.1: 选中记录时按需解析并向 webview 发送该记录完整 JSON
+  - [x] SubTask 5.2: 可折叠 JSON 树组件：逐层折叠、全部展开/折叠、语法高亮、类型着色
+  - [x] SubTask 5.3: 路径面包屑：展示当前值在 JSON 中的路径，支持点击导航
+  - [x] SubTask 5.4: 空值/长字符串/大数组的折叠提示与性能保护
+- [x] Task 6: 实现字段筛选、搜索与字段显示定制
+  - [x] SubTask 6.1: 全文/字段级搜索：输入即过滤+高亮，支持按字段限定与区间跳转
+  - [x] SubTask 6.2: 字段值过滤器：选择字段+条件，列表实时过滤
+  - [x] SubTask 6.3: 字段显示定制面板：显隐、排序、固定字段
+  - [x] SubTask 6.4: 偏好持久化：状态保存/恢复（workspaceState/globalState）
+- [x] Task 7: 性能与稳定优化、调试体验
+  - [x] SubTask 7.1: 对超大文件（数 GB）做打开耗时、内存、滚动帧率验证与调优
+  - [x] SubTask 7.2: 取消/中断长解析、防抖搜索与过滤，避免 UI 卡顿
+  - [x] SubTask 7.3: 打包产物瘦身验证、错误处理与用户友好提示
+  - [x] SubTask 7.4: 编写 README（安装、构建、使用、性能说明）
+
+# Task Dependencies
+- [Task 2] 依赖 [Task 1]
+- [Task 3] 依赖 [Task 2]
+- [Task 4] 依赖 [Task 1, Task 2, Task 3]
+- [Task 5] 依赖 [Task 2]
+- [Task 6] 依赖 [Task 3, Task 4]
+- [Task 7] 依赖 [Task 4, Task 5, Task 6]
+- [Task 1] 为独立基础任务；Task 4 与 Task 4.4 依赖搜索但整体可并行推进

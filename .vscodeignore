@@ -1,0 +1,17 @@
+.vscode/**
+.git/**
+.gitignore
+.trae/**
+node_modules/**
+out/**
+src/**
+**/*.map
+**/*.ts
+build.mjs
+tsconfig.json
+pnpm-lock.yaml
+pnpm-workspace.yaml
+package-lock.json
+dist/**
+!dist/extension.js
+!dist/webview.js

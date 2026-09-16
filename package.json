@@ -1,0 +1,92 @@
+{
+  "name": "jsonl-viewer",
+  "displayName": "JSONL Viewer",
+  "description": "High-performance viewer for .jsonl / .ndjson / .jsonlines files: record list + collapsible JSON tree detail, lazy indexing & on-demand parsing for multi-GB files.",
+  "version": "1.0.0",
+  "publisher": "jsonl-viewer",
+  "license": "ISC",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/GaussAA/jsonl-viewer"
+  },
+  "keywords": [
+    "jsonl",
+    "ndjson",
+    "jsonlines",
+    "viewer",
+    "webview",
+    "big-file",
+    "lazy-loading",
+    "vscode-extension"
+  ],
+  "categories": [
+    "Visualization",
+    "Other"
+  ],
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onCommand:jsonlViewer.open"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "jsonlViewer.open",
+        "title": "JSONL Viewer: Open as JSONL Viewer",
+        "category": "JSONL Viewer"
+      }
+    ],
+    "customEditors": [
+      {
+        "viewType": "jsonlViewer.customEditor",
+        "displayName": "JSONL Viewer",
+        "priority": "default",
+        "selector": [
+          {
+            "filenamePattern": "*.jsonl"
+          },
+          {
+            "filenamePattern": "*.ndjson"
+          },
+          {
+            "filenamePattern": "*.jsonlines"
+          }
+        ]
+      }
+    ],
+    "configuration": {
+      "title": "JSONL Viewer",
+      "properties": {
+        "jsonlViewer.sampleLines": {
+          "type": "number",
+          "default": 200,
+          "minimum": 1,
+          "description": "Number of leading lines sampled for field inference and summary cards. Larger files keep scanning to a minimum."
+        },
+        "jsonlViewer.autoOpenCustomEditor": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically open JSONL files in the JSONL Viewer custom editor instead of the default text editor."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "node build.mjs",
+    "watch": "node build.mjs --watch",
+    "build": "node build.mjs --minify",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test \"src/**/*.test.ts\""
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^4.0.0",
+    "@vscode/webview-ui-toolkit": "^1.4.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.4.0"
+  },
+  "packageManager": "pnpm@12.4.2"
+}

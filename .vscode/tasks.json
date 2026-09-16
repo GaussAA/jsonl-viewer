@@ -1,0 +1,11 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "type": "npm",
+      "script": "compile",
+      "group": { "kind": "build", "isDefault": true },
+      "problemMatcher": { "owner": "typescript", "pattern": { "regexp": "^([^\\s].*)\\((\\d+),(\\d+)\\): (error) (.*)$" } }
+    }
+  ]
+}
