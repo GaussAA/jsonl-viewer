@@ -63,16 +63,17 @@ html, body, #app { height: 100%; margin: 0; }
   min-width: 160px; color-scheme: inherit;
 }
 
-/* 主体：列表 + 详情占位 */
+/* 主体：左侧记录列表（目录态，窄栏） + 右侧 JSON 树主显示区（真正主体，占据剩余宽度） */
 .jlv-body { flex: 1 1 0; display: flex; min-height: 0; }
 
-/* 虚拟滚动容器 */
+/* 虚拟滚动容器（记录列表 = 左侧窄栏，作用相当于“目录”/摘要） */
 .jlv-scroll {
-  flex: 1 1 auto;
+  flex: 0 0 300px;
   overflow-y: auto;
   position: relative;
   min-width: 0;
   contain: strict;
+  border-right: 1px solid var(--jlv-border);
 }
 .jlv-inner { position: relative; width: 100%; }
 
@@ -129,10 +130,11 @@ html, body, #app { height: 100%; margin: 0; }
 .jlv-banner-text { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .jlv-banner-action { white-space: nowrap; }
 
-/* 详情面板（JSON 树，Task 5） */
+/* 详情面板（JSON 树，Task 5）——真正的主体，占据剩余全部宽度 */
 .jlv-detail {
-  flex: 0 0 320px;
-  border-left: 1px solid var(--jlv-border);
+  flex: 1 1 auto;
+  min-width: 0;
+  border-left: none;
   background: var(--jlv-panel-bg);
   display: flex;
   flex-direction: column;

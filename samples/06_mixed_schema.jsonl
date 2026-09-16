@@ -1,0 +1,5 @@
+{"id": 1, "user": "Alice", "score": 87, "active": true, "meta": {"tier": "gold", "history": [1, 2, 3]}}
+{"id": 2, "user": "Bob", "score": "high", "active": false}
+{"id": 3, "user": "Carol", "active": true, "score": null, "meta": {"tier": 2}}
+{"id": 4, "user": "Dave", "nickname": "D", "score": 45.5, "tags": ["x"]}
+{"id": 5, "user": "Eve", "score": true, "meta": {"tier": "silver", "history": [{"a": 1}]}}

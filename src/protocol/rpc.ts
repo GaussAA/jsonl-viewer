@@ -208,15 +208,19 @@ export function isRpcMessage(msg: unknown): msg is RpcMessage {
 }
 
 export function isHostRequest(msg: unknown): msg is HostRequest {
-  return isRpcMessage(msg) && hasOwn(HostEndpoint, (msg as { type: string }).type);
+  return isRpcMessage(msg) && isHostEndpoint((msg as { type: string }).type);
+}
+
+/** 判断某 type 是否为 HostEndpoint 的某个端点值（枚举键大写、值是端点名）。 */
+function isHostEndpoint(type: string): boolean {
+  for (const key of Object.keys(HostEndpoint)) {
+    if ((HostEndpoint as Record<string, string>)[key] === type) return true;
+  }
+  return false;
 }
 
 function isObject(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null;
-}
-
-function hasOwn(obj: Record<string, string>, key: string): boolean {
-  return Object.prototype.hasOwnProperty.call(obj, key);
 }
 
 /** 校验并归一化一批待渲染记录，附带 hasMore 推断。 */

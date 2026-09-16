@@ -89,6 +89,40 @@ pnpm test           # node --test "src/**/*.test.ts"
 - **大数组树**：详情树对超大数组采用分段预览（首屏 + 加载更多），不一次性展开全部，避免 DOM 与内存失控。
 - 关闭编辑器前若仍有在途长搜索，会在 `dispose` 时释放句柄；已在途的 Host 请求自然终止/忽略。
 
+## 发布与版本管理规范
+
+版本号**单一事实来源**为 `package.json` 的 `version`（遵循语义化版本 SemVer）。
+
+发布产物统一落在 `releases/`，**不入 git**（由脚本重建），每个版本对应一个 git tag：
+
+```
+releases/
+  jsonl-viewer-<version>.vsix        # 发布产物
+  jsonl-viewer-<version>.vsix.sha256 # 该产物的 SHA-256 校验和（可追溯）
+  LATEST                             # 最新版本号（install.cmd 默认读取它）
+scripts/
+  release.mjs                        # 一键发布
+  install.cmd                        # 安装（默认最新版，可传版本号 install.cmd 1.0.4）
+```
+
+发布一个版本：
+
+```bash
+# 1) 修改 package.json 的 version（如 1.0.5）
+# 2) 先提交代码（git commit）——release 脚本会打 tag v<version>，需指向本次代码
+git add -A && git commit -m "release: v1.0.5"
+# 3) 发布（typecheck → build → 打包 → 入 releases/ → 更新 LATEST → git tag v1.0.5）
+pnpm release
+# 4) 安装（可选）
+scripts\install.cmd
+```
+
+约定：
+
+- 每个已发布的版本必须有对应的 `v<version>` git tag；
+- `releases/` 为构建产物目录，全部由 `scripts/release.mjs` 一键重建，请勿手改；
+- 遇到 TRAE 安装器的 `targetPlatform="undefined"` 缺陷时，用 `scripts/install.cmd` 安装会自动修复。
+
 ## 许可证
 
 ISC

@@ -1,0 +1,3 @@
+{"order": 1001, "customer": "Alice", "tags": ["urgent", "gift"], "total": 299.5, "items": [{"sku": "A-001", "name": "Keyboard", "qty": 1, "price": 199.5, "variants": [{"color": "black", "sizes": []}, {"color": "white", "sizes": []}]}, {"sku": "B-002", "name": "Mouse", "qty": 2, "price": 50, "variants": [{"color": "black", "sizes": ["S", "M", "L"]}]}]}
+{"order": 1002, "customer": "Bob", "tags": [], "total": 39.9, "items": [{"sku": "C-003", "name": "USB Cable", "qty": 3, "price": 13.3, "variants": [{"color": "gray", "sizes": ["1m", "2m", "3m"]}]}]}
+{"order": 1003, "customer": "Carol", "tags": ["repeat", "urgent", "gift", "VIP"], "total": 0, "items": [], "refunded": true}

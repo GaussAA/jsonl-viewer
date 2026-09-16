@@ -20,6 +20,19 @@ const WEBVIEW_SCRIPT = 'webview.js';
 /** Supported extension globs, must mirror the custom editor selector. */
 const SUPPORTED_GLOB = /\.(jsonl|ndjson|jsonlines)$/i;
 
+/** 日志输出面板：用户可在“输出 → JSONL Viewer”中查看宿主收发情况，便于排障。 */
+let output: vscode.OutputChannel;
+function hostLog(message: string): void {
+  try {
+    output.appendLine(message);
+  } catch {
+    /* OutputChannel 未创建时忽略 */
+  }
+}
+function hostErr(message: string): void {
+  hostLog(`[ERROR] ${message}`);
+}
+
 /**
  * Custom editor provider backed by `CustomTextEditorProvider`.
  *
@@ -38,6 +51,7 @@ export class JsonlCustomEditorProvider implements vscode.CustomTextEditorProvide
     webviewPanel: vscode.WebviewPanel,
     _token: vscode.CancellationToken
   ): Promise<void> {
+    hostLog(`resolveCustomTextEditor: ${document.uri.fsPath}`);
     const webview = webviewPanel.webview;
     webview.options = {
       enableScripts: true,
@@ -61,13 +75,7 @@ export class JsonlCustomEditorProvider implements vscode.CustomTextEditorProvide
   <title>JSONL Viewer</title>
 </head>
 <body>
-  <main id="app">
-    <div style="font-family: var(--vscode-font-family); padding: 1rem;">
-      <h2>JSONL Viewer — placeholder</h2>
-      <p>Loaded file: ${escapeHtml(document.uri.toString())}</p>
-      <p>The record list + JSON tree UI is implemented in a later task.</p>
-    </div>
-  </main>
+  <main id="app"></main>
   <script nonce="${nonce}" src="${scriptUri}"></script>
 </body>
 </html>`;
@@ -93,6 +101,8 @@ export class JsonlCustomEditorProvider implements vscode.CustomTextEditorProvide
 
     webviewPanel.webview.onDidReceiveMessage(
       (message: unknown) => {
+        const incoming = (message as { type?: unknown }).type;
+        hostLog(`收到消息: ${String(incoming)}`);
         void (async () => {
           let response: RpcMessage | undefined;
           try {
@@ -100,7 +110,10 @@ export class JsonlCustomEditorProvider implements vscode.CustomTextEditorProvide
               await dispatchMessage(
                 message,
                 async () => {
+                  // 诊断：确认宿主是否收到 webview 的握手消息。
+                  const st = Date.now();
                   const init = initReply(await data.getOverview());
+                  hostLog(`init 回执构建完成 (${Date.now() - st}ms)`);
                   // 随 init 主动推送一次抽样窗口的错误统计（webview 顶栏红标 / 概要）。
                   void data
                     .getErrorSummary()
@@ -151,6 +164,7 @@ export class JsonlCustomEditorProvider implements vscode.CustomTextEditorProvide
               )
             ).response;
           } catch (e) {
+            hostErr('处理消息时异常: ' + (e instanceof Error ? (e.stack || e.message) : String(e)));
             response = errReply(undefined, e instanceof Error ? e.message : String(e));
           }
           if (response) post(response);
@@ -193,6 +207,8 @@ export class JsonlCustomEditorProvider implements vscode.CustomTextEditorProvide
 }
 
 export function activate(context: vscode.ExtensionContext): void {
+  output = vscode.window.createOutputChannel('JSONL Viewer');
+  hostLog('extension 已激活');
   const provider = new JsonlCustomEditorProvider(context);
 
   context.subscriptions.push(
@@ -257,11 +273,3 @@ function getNonce(): string {
   return out;
 }
 
-function escapeHtml(value: string): string {
-  return value
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}

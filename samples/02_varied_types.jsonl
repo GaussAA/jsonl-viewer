@@ -1,0 +1,14 @@
+{"kind": "string", "value": "plain text"}
+{"kind": "integer", "value": 42}
+{"kind": "float", "value": 3.14159}
+{"kind": "negative", "value": -17}
+{"kind": "exp", "value": 6.02e23}
+{"kind": "boolean_true", "value": true}
+{"kind": "boolean_false", "value": false}
+{"kind": "null", "value": null}
+{"kind": "array", "value": [1, 2, 3]}
+{"kind": "object", "value": {"nested": "object", "deep": {"x": [true, null]}}}
+{"kind": "unicode", "value": "你好，世界 🌍 / café / Ω"}
+{"kind": "empty_string", "value": ""}
+{"kind": "long_string", "value": "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. This value is intentionally very long to test wrapping, horizontal scrolling, and value truncation in the summary card."}
+{"kind": "escaped", "value": "line 1\\nline 2\\ttab \\\"quotes\\\" \\\\ backslash"}

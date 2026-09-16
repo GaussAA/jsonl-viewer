@@ -1,0 +1,5 @@
+{"id": 1, "name": "Alice", "email": "alice@example.com", "age": 30, "active": true, "role": "admin"}
+{"id": 2, "name": "Bob", "email": "bob@example.com", "age": 25, "active": false, "role": "user"}
+{"id": 3, "name": "Carol", "email": "carol@example.com", "age": 41, "active": true, "role": "editor"}
+{"id": 4, "name": "Dave", "email": "dave@example.com", "age": 19, "active": true, "role": "viewer"}
+{"id": 5, "name": "Eve", "email": "eve@example.com", "age": 35, "active": false, "role": "user"}

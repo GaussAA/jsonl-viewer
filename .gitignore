@@ -2,5 +2,11 @@ node_modules
 dist
 out
 *.vsix
+*.vsix.sha256
 **/*.tsbuildinfo
 .vscode-test/
+# release 产物：由 scripts/release.mjs 重建，版本追踪用 git tag，不入库
+releases/
+# 大型生成样本（可由 samples/generate_samples.py 重新生成，避免仓库膨胀）
+samples/09_large_10k.jsonl
+samples/10_large_100k.jsonl

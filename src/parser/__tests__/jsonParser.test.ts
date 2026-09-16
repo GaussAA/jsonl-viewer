@@ -34,10 +34,24 @@ test('parseJsonLine：非法输入返回 error + 定位', () => {
   }
 });
 
+test('parseJsonLine：错误文案精简且不再回显整行原文', () => {
+  // V8 的原文回显形态（如非标准 JSON 值 NaN），应被裁剪为一句干净提示。
+  const r = parseJsonLine('{"id":5,"num":NaN,"regex":/\\d+/}');
+  assert.equal(r.ok, false);
+  if (!r.ok) {
+    assert.ok(!r.error.includes('NaN'), `不应回显原文: ${r.error}`);
+    assert.ok(!r.error.includes('...'), `不应带省略号回显: ${r.error}`);
+    assert.ok(r.error.length < 60);
+  }
+  // 结构化错误带位置（in JSON at position N），应保留原因与位置。
+  const s = parseJsonLine('{"a":1,,}');
+  if (!s.ok) assert.match(s.error, /字符处|at position/i);
+});
+
 test('parseJsonLine：空行拒绝', () => {
   const r = parseJsonLine('   ');
   assert.equal(r.ok, false);
-  if (!r.ok) assert.match(r.error, /empty/i);
+  if (!r.ok) assert.match(r.error, /空行|empty/i);
 });
 
 /* ------- readLineAt / 索引 + 读取器联动 ------- */

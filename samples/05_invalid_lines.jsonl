@@ -1,0 +1,9 @@
+{"id": 1, "name": "ok record", "status": "ok"}
+{"id": 2, name: "trailing garbage here"}
+{"id": 3, "name": "ok again", "status": "ok"}
+{"id": 4", "name": "broken quotes}
+[1, 2, 3, "top level array, not an object"]
+{"id": 5, "num": NaN, "regex": /\d+/}
+{"id": 6, "name": "ok three", "status": "ok"}
+{"id":7,"name":"ok with long trailing"}  {"extra":"second object on same line"}
+{"id": 8, "name": "ok last", "status": "ok"}

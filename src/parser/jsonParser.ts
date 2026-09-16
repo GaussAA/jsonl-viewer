@@ -47,17 +47,40 @@ const CR = 13;
 export function parseJsonLine(text: string): JsonParseResult {
   const trimmed = text.trim();
   if (trimmed.length === 0) {
-    return { ok: false, error: 'empty line (no JSON value)', line: 1, column: 1 };
+    return { ok: false, error: '空行（无 JSON 值）', line: 1, column: 1 };
   }
   try {
     return { ok: true, value: JSON.parse(trimmed) };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    // V8 错误形如 "Unexpected token a in JSON at position 3"，尽量还原列号。
-    const m = /position (\d+)/.exec(msg);
-    const column = m ? Number(m[1]) + 1 : 1;
-    return { ok: false, error: msg, line: 1, column };
+    // V8 错误形如：
+    //   - "Expected ... after property value in JSON at position 8 (line 1 column 9)"
+    //   - "Unexpected token 'N', ...\"5\", \"num\": NaN, ... is not valid JSON"
+    // 提取列号，并生成精简、可读的错误文案（去掉整行原文的回显，避免窄栏里一串乱码）。
+    const column = extractColumn(msg);
+    return { ok: false, error: friendlyJsonError(msg, column), line: 1, column };
   }
+}
+
+/** 从 V8 错误信息里抽取字符位置；取不到则返回 1。 */
+function extractColumn(msg: string): number {
+  const m = /position (\d+)/.exec(msg);
+  return m ? Number(m[1]) + 1 : 1;
+}
+
+/** 把 V8 的 JSON 解析错误整理成一句话：保留原因 + 位置，去掉整行原文回显。 */
+function friendlyJsonError(msg: string, column: number): string {
+  const loc = column > 1 ? `（第 ${column} 个字符处）` : '';
+  // 截断点：要么在 " at position"，要么在 V8 的原文回显标记 ", ..."，
+  // 要么在尾部 " is not valid JSON"。取最早出现处。
+  const cut = (needle: string): number => {
+    const i = msg.indexOf(needle);
+    return i === -1 ? Number.POSITIVE_INFINITY : i;
+  };
+  const stop = Math.min(cut(' at position'), cut(', ...'), cut(' is not valid JSON'));
+  let head = (stop === Number.POSITIVE_INFINITY ? msg : msg.slice(0, stop)).trim();
+  head = head.replace(/^Unexpected token /, '非法字符 ').replace(/,*$/, '');
+  return `${head || 'JSON 语法错误'}${loc}`;
 }
 
 /** 去掉原始行尾的 \n 或 \r\n（始终按多字节安全裁剪，不做额外拷贝）。 */

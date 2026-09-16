@@ -197,6 +197,22 @@ export class VirtualRecordList {
         measuredSomething = true;
       }
     }
+
+    // 2b) 重灌仍处于「加载中/占位」、但此刻数据已可从缓存取到的卡片。
+    //     此前首次渲染时缓存为空，只填了占位；数据到达后 refresh() 不会重灌已在
+    //     视图内的卡片，导致列表永远停“加载中…”。这里按需补一次真实内容。
+    for (const [d, el] of this.placed) {
+      if (el.dataset.loaded === '0') {
+        const entry = this.cb.getRecord(this.realLine(d));
+        if (entry) {
+          this.fill(el, d);
+          const h = el.offsetHeight; // 真实内容高度可能与占位不同，需重测
+          this.layout.setSize(d, h);
+          measuredSomething = true;
+        }
+      }
+    }
+
     if (measuredSomething) this.needsReposition = true;
 
     // 3) 定位所有在位卡片（测量可能已让偏移变化）
@@ -242,12 +258,15 @@ export class VirtualRecordList {
     el.appendChild(lineNo);
 
     if (!entry) {
+      el.dataset.loaded = '0'; // 仍为占位，等数据到位后由 renderOnce 2b) 重灌
       const hint = document.createElement('span');
       hint.className = 'jlv-tombstone';
       hint.textContent = '加载中…';
       el.appendChild(hint);
       return;
     }
+
+    el.dataset.loaded = '1';
 
     if (entry.ok === false) {
       el.classList.add('error');

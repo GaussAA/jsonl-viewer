@@ -20,7 +20,7 @@ import {
 } from './logic.ts';
 import type { RecordEntry } from './virtualScroll.ts';
 import { VirtualRecordList } from './virtualScroll.ts';
-import { createToolbar } from './toolbar.ts';
+import { createToolbar, ToolbarInfo } from './toolbar.ts';
 import { createDetailTree } from './detailTree.ts';
 import { createVSCodeApi, RpcBus } from './rpc.ts';
 import {
@@ -321,6 +321,23 @@ function main(): void {
   rootEl.appendChild(banner.root);
   rootEl.appendChild(body);
 
+  // 宿主返回的通用错误（如 init/索引构建失败）当前无 requestId 关联，
+  // 这里统一透出到横幅，便于定位问题。
+  bus.onError((e) => {
+    console.error('[jsonl-viewer][webview] host error:', e.message);
+    banner.show(`宿主错误：${e.message}`, undefined);
+  });
+
+  // 若发送 READY 后迟迟收不到 init（宿主异常/握手失败），给出明确提示而非静默停在“连接中…”。
+  setTimeout(() => {
+    if (!state.overview) {
+      console.warn('[jsonl-viewer][webview] no init received in 8s');
+      banner.show('未收到宿主数据响应（8s 超时）。请查看“输出→JSONL Viewer”或开发者控制台。', '重试', () => {
+        bus.post(HostEndpoint.READY);
+      });
+    }
+  }, 8000);
+
   /* ---------------- 虚拟滚动列表 ---------------- */
   const list = new VirtualRecordList({
     getRecord: (line) => state.cache.get(line),
@@ -440,16 +457,19 @@ function main(): void {
   /* ---------------- 概要栏刷新 ---------------- */
   function updateToolbar(): void {
     const ov = state.overview;
-    const range = [0, Math.max(0, (ov?.totalLines ?? 0) - 1)] as [number, number];
-    toolbar.update({
+    // 未加载概览（连接/索引构建中）时，不展示可能误导的行统计（如「当前可见 1–0 行」）。
+    const info: Partial<ToolbarInfo> & { fileName?: string } = {
       fileName: ov?.uri ?? 'JSONL Viewer',
-      totalLines: ov?.totalLines,
-      loadedLines: state.cache.size,
-      range,
-      buildMs: ov?.buildMs,
-      status: ov ? 'ready' : 'error',
-      statusText: ov ? `就绪 · ${formatCount(ov.totalLines)} 行` : '等待数据…',
-    });
+      status: ov ? 'ready' : 'connecting',
+      statusText: ov ? `就绪 · ${formatCount(ov.totalLines)} 行` : '连接中…',
+    };
+    if (ov) {
+      info.totalLines = ov.totalLines;
+      info.loadedLines = state.cache.size;
+      info.range = [0, Math.max(0, ov.totalLines - 1)] as [number, number];
+      info.buildMs = ov.buildMs;
+    }
+    toolbar.update(info);
   }
 
   /* ---------------- init / 生命周期 ---------------- */
