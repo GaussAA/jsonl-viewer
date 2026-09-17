@@ -495,7 +495,7 @@ export function createToolbar(host: HTMLElement, handlers: ToolbarHandlers = {})
       loadedEl.textContent = `已解析 ${info.loadedLines.toLocaleString('en-US')} 行`;
     }
     if (info.range) {
-      rangeEl.textContent = `当前可见 ${info.range[0] + 1}–${info.range[1]} 行`;
+      rangeEl.textContent = `当前可见 ${info.range[0] + 1}–${info.range[1] + 1} 行`;
     }
     if (info.buildMs !== undefined) {
       buildMsEl.textContent = `打开 ${formatMs(info.buildMs)}`;

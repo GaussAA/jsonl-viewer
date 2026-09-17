@@ -128,6 +128,24 @@ const CACHE_MAX_ENTRIES = 600;
 /** 搜索防抖强匹配 / 过滤结果跳过的显示上限（防御性，避免超大数组卡 UI）。 */
 const SEARCH_LIMIT = 5000;
 
+/** 左栏默认宽度与可调宽度持久化键（拖拽分栏用）。 */
+const DEFAULT_LIST_WIDTH = 320;
+const LIST_WIDTH_KEY = 'jsonlViewer.listWidth';
+
+/** 便捷：返回左栏宽度持久化键。 */
+function listWidthFromStore(): number | null {
+  const raw = localStorage.getItem(LIST_WIDTH_KEY);
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+function saveListWidth(w: number): void {
+  try {
+    localStorage.setItem(LIST_WIDTH_KEY, String(w));
+  } catch {
+    /* localStorage 不可用时忽略（不影响功能）。 */
+  }
+}
+
 /** 偏好持久化键命名空间。 */
 function stateKey(uri: string): string {
   return `jsonlViewer.state.${uri}`;
@@ -317,6 +335,45 @@ function main(): void {
   const leftCol = document.createElement('div');
   leftCol.className = 'jlv-col-list';
 
+  /* ---------------- 左右两栏分隔条（可拖拽调节宽度） ---------------- */
+  const resizer = document.createElement('div');
+  resizer.className = 'jlv-resizer';
+  resizer.title = '拖动调整左右栏宽度（双击恢复默认）';
+
+  function clampListWidth(w: number): number {
+    return Math.max(180, Math.min(w, Math.max(DEFAULT_LIST_WIDTH, window.innerWidth * 0.6)));
+  }
+  function applyListWidth(w: number): void {
+    leftCol.style.width = `${clampListWidth(w)}px`;
+  }
+  // 恢复上次拖拽宽度
+  const savedW = listWidthFromStore();
+  if (savedW !== null) applyListWidth(savedW);
+
+  let dragStartX = 0;
+  let dragStartW = 0;
+  resizer.addEventListener('pointerdown', (e) => {
+    resizer.classList.add('active');
+    dragStartX = e.clientX;
+    dragStartW = leftCol.getBoundingClientRect().width;
+    resizer.setPointerCapture(e.pointerId);
+  });
+  resizer.addEventListener('pointermove', (e) => {
+    if (!resizer.classList.contains('active')) return;
+    applyListWidth(clampListWidth(dragStartW + (e.clientX - dragStartX)));
+  });
+  const endDrag = (e: PointerEvent): void => {
+    if (!resizer.classList.contains('active')) return;
+    resizer.classList.remove('active');
+    saveListWidth(clampListWidth(dragStartW + (e.clientX - dragStartX)));
+  };
+  resizer.addEventListener('pointerup', endDrag);
+  resizer.addEventListener('pointercancel', endDrag);
+  resizer.addEventListener('dblclick', () => {
+    applyListWidth(DEFAULT_LIST_WIDTH);
+    saveListWidth(DEFAULT_LIST_WIDTH);
+  });
+
   /* ---------------- 文件变更 / 错误横幅：右上角浮层提示（不占整行） ---------------- */
   const banner = createBanner();
 
@@ -361,11 +418,18 @@ function main(): void {
       }
       scheduleFetch.push({ first: displayFirst, lastExclusive: displayLast });
     },
+    onJumpToSource: (line) => {
+      // 右键「定位到源码行」：请宿主打开源文件并定位到该行（坏行定位同通道）。
+      void bus.request(HostEndpoint.JUMP_TO_SOURCE, { line }).promise.catch(() => {});
+    },
+    onClearFilter: () => clearFilterForCond(),
   });
-  // 组装两栏：左栏放入列头(toolbar) + 虚拟列表；右栏为详情面板；横幅浮层最后挂载。
+  // 组装两栏：左栏放入列头(toolbar) + 目录列表(分页)；右栏为详情面板；横幅浮层最后挂载。
   leftCol.appendChild(toolbar.root);
   leftCol.appendChild(list.scrollEl);
+  leftCol.appendChild(list.pagerEl);
   rootEl.appendChild(leftCol);
+  rootEl.appendChild(resizer);
   rootEl.appendChild(detail.root);
   rootEl.appendChild(banner.root);
 
@@ -469,7 +533,9 @@ function main(): void {
     if (ov) {
       info.totalLines = ov.totalLines;
       info.loadedLines = state.cache.size;
-      info.range = [0, Math.max(0, ov.totalLines - 1)] as [number, number];
+      // 翻页式目录：展示当前页的真实行闭区间（1 起）；空页兜底到全量。
+      const bounds = list.getCurrentPageRealBounds();
+      info.range = bounds ?? ([0, Math.max(0, ov.totalLines - 1)] as [number, number]);
       info.buildMs = ov.buildMs;
     }
     toolbar.update(info);
