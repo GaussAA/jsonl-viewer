@@ -70,6 +70,9 @@ export const CSS_TEXT = `
 }
 
 * { box-sizing: border-box; }
+/* 覆盖 UA 的 [hidden]{display:none}：作者样式若给元素设了 display（如 .jlv-ctx/.jlv-depth__menu 的 flex）
+   会盖过低优先级的内置 hidden 规则，导致菜单设置为 hidden 后仍显示、点空白无法关闭。此处强制兜底。 */
+[hidden] { display: none !important; }
 html, body, #app { height: 100%; margin: 0; }
 #app {
   display: flex;
@@ -668,20 +671,68 @@ html, body, #app { height: 100%; margin: 0; }
 .jlv-tree-tools-group .jlv-tbtn { border: none; background: transparent; font-size: 0; padding: 3px 6px; border-radius: var(--jlv-radius-1); }
 .jlv-tree-tools-group .jlv-tbtn:hover { background: var(--jlv-card-hover); }
 .jlv-tree-tools-group .jlv-tbtn:active { transform: none; }
+/* 展开深度下拉（自绘：原生 select 弹层无法随主题染色，故自建菜单） */
 .jlv-depth {
-  padding: 2px 7px;
-  color-scheme: inherit;
-  background: var(--vscode-dropdown-background, var(--vscode-input-background, #3c3c3c));
-  color: var(--vscode-input-foreground, var(--jlv-fg));
-  border: 1px solid var(--vscode-input-border, var(--jlv-border));
-  border-radius: var(--jlv-radius-1);
+  position: relative;
+  display: inline-flex;
+  flex: none;
+}
+.jlv-depth__trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 7px;
   font-family: inherit;
   font-size: var(--jlv-font-size-sm);
+  color: var(--jlv-fg);
+  background: var(--vscode-dropdown-background, var(--vscode-input-background, #3c3c3c));
+  border: 1px solid var(--vscode-input-border, var(--jlv-border));
+  border-radius: var(--jlv-radius-1);
   cursor: pointer;
   transition: border-color var(--jlv-transition), background var(--jlv-transition);
 }
-.jlv-depth:hover { background: var(--vscode-list-hoverBackground, var(--jlv-card-hover)); border-color: var(--vscode-input-border-editorHoverDefault, var(--jlv-border)); }
-.jlv-depth:focus-visible { outline: 1px solid var(--vscode-focusBorder, #007fd4); outline-offset: -1px; }
+.jlv-depth__trigger svg {
+  color: var(--jlv-dim);
+  transition: transform var(--jlv-transition);
+}
+.jlv-depth__trigger:hover { background: var(--vscode-list-hoverBackground, var(--jlv-card-hover)); border-color: var(--vscode-input-border-editorHoverDefault, var(--jlv-border)); }
+.jlv-depth:focus-within .jlv-depth__trigger,
+.jlv-depth__trigger:focus-visible { outline: 1px solid var(--vscode-focusBorder, #007fd4); outline-offset: -1px; }
+.jlv-depth.open .jlv-depth__trigger svg { transform: rotate(180deg); }
+.jlv-depth__menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  left: auto;
+  z-index: 30;
+  min-width: 100%;
+  padding: 3px;
+  background: var(--vscode-dropdown-background, var(--vscode-menu-background, var(--jlv-panel-bg)));
+  border: 1px solid var(--vscode-dropdown-border, var(--jlv-border));
+  border-radius: var(--jlv-radius-2);
+  box-shadow: var(--jlv-shadow-2);
+  display: flex;
+  flex-direction: column;
+}
+.jlv-depth__item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px 4px 8px;
+  border: none;
+  border-radius: var(--jlv-radius-1);
+  background: transparent;
+  color: var(--vscode-dropdown-foreground, var(--jlv-fg));
+  font-family: inherit;
+  font-size: var(--jlv-font-size-sm);
+  text-align: left;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background var(--jlv-transition);
+}
+.jlv-depth__item:hover { background: var(--vscode-list-hoverBackground, var(--jlv-card-hover)); }
+.jlv-depth__item.selected { background: var(--jlv-selection); color: #ffffff; font-weight: 600; }
+.jlv-depth__item[hidden] { display: none; }
 
 /* 路径面包屑 */
 .jlv-tree-crumb {

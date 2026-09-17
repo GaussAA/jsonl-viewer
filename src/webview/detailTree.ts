@@ -86,16 +86,34 @@ export function createDetailTree(host: HTMLElement): DetailTreeController {
   btnCollapseAll.appendChild(icon('jlv-tbtn__ic', ICON_COLLAPSE));
   btnCollapseAll.appendChild(document.createTextNode('全部折叠'));
 
-  const depthSel = document.createElement('select');
-  depthSel.className = 'jlv-depth';
-  depthSel.title = '展开到第 N 层';
+  // 展开深度选择：原生 <select> 的弹层由系统绘制、无法随主题染色，故用自绘下拉替代。
+  let selectedDepth = 2; // 当前选中的「展开到第 N 层」深度
+  const depthWrap = document.createElement('div');
+  depthWrap.className = 'jlv-depth';
+  const depthTrigger = document.createElement('button');
+  depthTrigger.type = 'button';
+  depthTrigger.className = 'jlv-depth__trigger';
+  depthTrigger.title = '展开到第 N 层';
+  const depthLabel = document.createElement('span');
+  depthLabel.className = 'jlv-depth__label';
+  depthLabel.textContent = '2 层';
+  depthTrigger.appendChild(depthLabel);
+  depthTrigger.insertAdjacentHTML('beforeend', chevronSvg());
+  const depthMenu = document.createElement('div');
+  depthMenu.className = 'jlv-depth__menu';
+  depthMenu.hidden = true;
   for (let i = 1; i <= 6; i++) {
-    const opt = document.createElement('option');
-    opt.value = String(i);
-    opt.textContent = `${i} 层`;
-    depthSel.appendChild(opt);
+    const text = `${i} 层`;
+    const optBtn = document.createElement('button');
+    optBtn.type = 'button';
+    optBtn.className = 'jlv-depth__item';
+    optBtn.dataset.level = String(i);
+    optBtn.textContent = text;
+    depthMenu.appendChild(optBtn);
   }
-  depthSel.value = '2';
+  depthWrap.appendChild(depthTrigger);
+  depthWrap.appendChild(depthMenu);
+  syncDepthMenu(); // 标记默认选中的「2 层」
 
   const btnExpandLevel = document.createElement('button');
   btnExpandLevel.className = 'jlv-tbtn';
@@ -105,8 +123,8 @@ export function createDetailTree(host: HTMLElement): DetailTreeController {
 
   group.appendChild(btnExpandAll);
   group.appendChild(btnCollapseAll);
+  group.appendChild(depthWrap);
   group.appendChild(btnExpandLevel);
-  group.appendChild(depthSel);
   tools.appendChild(group);
 
   const toolsSpacer = document.createElement('div');
@@ -282,13 +300,46 @@ export function createDetailTree(host: HTMLElement): DetailTreeController {
 
   /* ---------------- 事件 ---------------- */
 
+  function syncDepthMenu(): void {
+    depthLabel.textContent = `${selectedDepth} 层`;
+    depthMenu.querySelectorAll<HTMLElement>('.jlv-depth__item').forEach((it) =>
+      it.classList.toggle('selected', Number(it.dataset.level) === selectedDepth)
+    );
+  }
+  function setDepthMenu(open: boolean): void {
+    depthMenu.hidden = !open;
+    depthWrap.classList.toggle('open', open);
+  }
+
+  depthTrigger.addEventListener('click', (e) => {
+    e.stopPropagation();
+    setDepthMenu(depthMenu.hidden);
+    if (!depthMenu.hidden) {
+      const cur = depthMenu.querySelector<HTMLElement>('.jlv-depth__item.selected');
+      cur?.scrollIntoView({ block: 'nearest' });
+    }
+  });
+  depthMenu.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const item = (e.target as HTMLElement).closest<HTMLElement>('.jlv-depth__item');
+    if (!item) return;
+    selectedDepth = Number(item.dataset.level);
+    syncDepthMenu();
+    setDepthMenu(false);
+  });
+  // 点击下拉外任意处关闭菜单。
+  document.addEventListener('click', () => setDepthMenu(false));
+  root.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !depthMenu.hidden) setDepthMenu(false);
+  });
+
   tools.addEventListener('click', (e) => {
     const btn = (e.target as HTMLElement).closest<HTMLElement>('[data-act]');
     if (!btn) return;
     const act = btn.dataset.act;
     if (act === 'expandAll') state.expandAll();
     else if (act === 'collapseAll') state.collapseAll();
-    else if (act === 'expandLevel') state.expandToLevel(Number(depthSel.value));
+    else if (act === 'expandLevel') state.expandToLevel(selectedDepth);
     render();
   });
 
