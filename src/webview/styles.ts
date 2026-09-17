@@ -557,20 +557,18 @@ html, body, #app { height: 100%; margin: 0; }
 .jlv-tree-loading { font-style: italic; }
 .jlv-tree-error { color: var(--jlv-error-fg); font-style: normal; word-break: break-all; text-align: center; }
 
-/* 树行 */
+/* 树行（header 一行；子树块在下方缩进，避免子节点横向堆积） */
 .jlv-tree-row {
-  position: relative;
   display: flex;
   align-items: baseline;
   gap: 2px;
-  padding-left: var(--indent, 0px);
+  padding-right: 8px;
   border-radius: var(--jlv-radius-1);
   white-space: nowrap;
   min-height: 20px;
   cursor: pointer;
   transition: background var(--jlv-transition);
 }
-.jlv-tree-row > .jlv-tree-children { display: block; }
 .jlv-tree-row:hover { background: var(--jlv-card-hover); }
 .jlv-tree-row.selected {
   background: color-mix(in srgb, var(--jlv-selection) 45%, transparent);
@@ -605,11 +603,17 @@ html, body, #app { height: 100%; margin: 0; }
 .jlv-tree-row .jlv-value.obj { color: var(--jlv-container); }
 .jlv-tree-row .jlv-summary { font-style: italic; }
 
-/* 子节点缩进引导线 */
-.jlv-tree-children {
-  margin-left: 4px;
-  padding-left: 4px;
+/* 子树块：每级缩进 + 左侧引导线（子节点显示在父节点下方，而非横向堆积） */
+.jlv-tree-block {
+  margin-left: 13px;
+  padding-left: 7px;
   border-left: 1px solid var(--jlv-guide);
+}
+
+/* 数组下标键：以 [n] 呈现并弱化，避免与对象键混淆 */
+.jlv-tree-row .jlv-key.jlv-index {
+  color: var(--jlv-number);
+  opacity: .8;
 }
 
 /* 大数组「加载更多」 */

@@ -188,7 +188,9 @@ export function createDetailTree(host: HTMLElement): DetailTreeController {
     }
   }
 
-  /** 递归构建单个节点及其（已展开的）子树。 */
+  /** 递归构建单个节点及其（已展开的）子树。
+   *  节点 = 块容器（.jlv-tree-node）：header 行在上、子树块（.jlv-tree-block）在其下方逐级缩进；
+   *  避免旧版「子节点作为 flex 项横向堆积到父标签右侧」造成深层嵌套水平压缩的问题。 */
   function buildNode(
     parent: HTMLElement,
     segs: PathSeg[],
@@ -198,25 +200,31 @@ export function createDetailTree(host: HTMLElement): DetailTreeController {
     const kind = jsonKindOf(value);
     const container = isContainer(value);
 
+    const node = document.createElement('div');
+    node.className = 'jlv-tree-node';
+
     const row = document.createElement('div');
     row.className = 'jlv-tree-row';
     row.dataset.depth = String(depth);
     row.dataset.container = container ? '1' : '0';
-    row.style.setProperty('--indent', `${depth * 14}px`);
     row.dataset.treeKey = pathKey(segs);
     if (segs.length > 0 && pathKey(segs) === pathKey(selectedSegs)) row.classList.add('selected');
 
     // 折叠箭头（容器才有；标量用占位对齐）
     const toggler = document.createElement('span');
     toggler.className = 'toggler';
-    if (container) {
-      toggler.innerHTML = chevronSvg();
-    }
+    if (container) toggler.innerHTML = chevronSvg();
 
-    // key
+    // key：数组下标以 [n] 呈现并弱化，避免与对象键混淆
+    const last = segs[segs.length - 1];
     const keyEl = document.createElement('span');
     keyEl.className = 'jlv-key';
-    keyEl.textContent = segs.length === 0 ? '$' : segTextKey(segs[segs.length - 1]);
+    if (segs.length === 0) {
+      keyEl.textContent = '$';
+    } else {
+      keyEl.textContent = segTextKey(last);
+      if (last.kind === 'index') keyEl.classList.add('jlv-index');
+    }
 
     const colon = document.createElement('span');
     colon.className = 'jlv-colon';
@@ -226,6 +234,8 @@ export function createDetailTree(host: HTMLElement): DetailTreeController {
     row.appendChild(keyEl);
     row.appendChild(colon);
 
+    let childrenEl: HTMLElement | null = null;
+
     if (!container) {
       const { text, title } = formatScalar(value as string | number | boolean, kind);
       const v = document.createElement('span');
@@ -233,36 +243,34 @@ export function createDetailTree(host: HTMLElement): DetailTreeController {
       v.textContent = text;
       if (title) v.title = title;
       row.appendChild(v);
-      parent.appendChild(row);
-      return;
+    } else {
+      // 容器：根据展开状态决定「摘要预览」或完整子树
+      const expanded = depth < MAX_RENDER_DEPTH && state.isExpanded(segs, depth);
+      row.classList.add(expanded ? 'expanded' : 'collapsed');
+
+      const preview = document.createElement('span');
+      preview.className = `jlv-value ${kindClass(kind)} jlv-summary`;
+      preview.textContent = expanded ? '' : containerPreview(value as object);
+      row.appendChild(preview);
+
+      if (expanded) {
+        childrenEl = document.createElement('div');
+        childrenEl.className = 'jlv-tree-block';
+        const { items, remaining } = expandContainer(value as object, pathKey(segs), revealed);
+        for (const it of items) buildNode(childrenEl, [...segs, it.seg], depth + 1, it.value);
+        if (remaining > 0) {
+          const more = document.createElement('div');
+          more.className = 'jlv-load-more';
+          more.dataset.parent = pathKey(segs);
+          more.textContent = `… 还有 ${remaining} 项，点击加载更多`;
+          childrenEl.appendChild(more);
+        }
+      }
     }
 
-    // 容器：根据展开状态决定「摘要预览」或完整子树
-    const expanded = depth < MAX_RENDER_DEPTH && state.isExpanded(segs, depth);
-    row.classList.add(expanded ? 'expanded' : 'collapsed');
-
-    const preview = document.createElement('span');
-    preview.className = `jlv-value ${kindClass(kind)} jlv-summary`;
-    preview.textContent = expanded ? '' : containerPreview(value as object);
-    row.appendChild(preview);
-
-    parent.appendChild(row);
-
-    if (!expanded) return;
-
-    const childrenEl = document.createElement('div');
-    childrenEl.className = 'jlv-tree-children';
-    const { items, remaining } = expandContainer(value as object, pathKey(segs), revealed);
-    for (const it of items) buildNode(childrenEl, [...segs, it.seg], depth + 1, it.value);
-
-    if (remaining > 0) {
-      const more = document.createElement('div');
-      more.className = 'jlv-load-more';
-      more.dataset.parent = pathKey(segs);
-      more.textContent = `… 还有 ${remaining} 项，点击加载更多`;
-      childrenEl.appendChild(more);
-    }
-    row.appendChild(childrenEl);
+    node.appendChild(row);
+    if (childrenEl) node.appendChild(childrenEl);
+    parent.appendChild(node);
   }
 
   function navigateTo(segs: PathSeg[]): void {
@@ -377,9 +385,9 @@ export function createDetailTree(host: HTMLElement): DetailTreeController {
   return controller;
 }
 
-/** 树中键显示：normal 直接用名；含特殊字符的用带引号形式。 */
+/** 树中键显示：数组下标用 [n]；对象不含特殊字符直接用名；否则带引号形式。 */
 function segTextKey(seg: PathSeg): string {
-  if (seg.kind === 'index') return seg.key;
+  if (seg.kind === 'index') return `[${seg.key}]`;
   if (seg.key === '') return '""';
   if (/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(seg.key)) return seg.key;
   return JSON.stringify(seg.key);
