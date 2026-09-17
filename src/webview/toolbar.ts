@@ -82,16 +82,10 @@ export function createToolbar(host: HTMLElement, handlers: ToolbarHandlers = {})
   statusRootEl.appendChild(statusEl);
 
   /* ---- 主要行：文件名 + 状态 + 搜索 + 工具 ---- */
-  const primary = document.createElement('div');
-  primary.className = 'jlv-topbar__primary';
-
   const fileEl = document.createElement('span');
   fileEl.className = 'jlv-file';
   fileEl.appendChild(iconSpan('jlv-file__icon', ICON_FILE));
   fileEl.appendChild(fileNameEl);
-
-  const spacer = document.createElement('div');
-  spacer.className = 'jlv-topbar__spacer';
 
   /* ---------------------- 搜索控件 ---------------------- */
   const searchBox = document.createElement('div');
@@ -153,24 +147,33 @@ export function createToolbar(host: HTMLElement, handlers: ToolbarHandlers = {})
   customizeBtn.appendChild(iconSpan('jlv-tbtn__ic', ICON_COLUMNS));
   customizeBtn.appendChild(document.createTextNode('字段'));
 
-  primary.appendChild(fileEl);
-  primary.appendChild(statusRootEl);
-  primary.appendChild(spacer);
-  primary.appendChild(searchBox);
-  primary.appendChild(navGroup);
-  primary.appendChild(filterBtn);
-  primary.appendChild(customizeBtn);
+  /* 分组行：标题(文件+状态) / 搜索 / 操作 / 统计 */
+  const titleRow = document.createElement('div');
+  titleRow.className = 'jlv-col-title';
+  titleRow.appendChild(fileEl);
+  titleRow.appendChild(statusRootEl);
 
-  /* ---- 统计行：图标化芯片 ---- */
-  const stats = document.createElement('div');
-  stats.className = 'jlv-topbar__stats';
-  stats.appendChild(statChip(totalLinesEl, ICON_LINES));
-  stats.appendChild(statChip(loadedEl, ICON_CHECK));
-  stats.appendChild(statChip(rangeEl, ICON_RANGE));
-  stats.appendChild(statChip(buildMsEl, ICON_CLOCK));
+  const searchRow = document.createElement('div');
+  searchRow.className = 'jlv-col-search';
+  searchRow.appendChild(searchBox);
+  searchRow.appendChild(navGroup);
 
-  root.appendChild(primary);
-  root.appendChild(stats);
+  const actionRow = document.createElement('div');
+  actionRow.className = 'jlv-col-actions';
+  actionRow.appendChild(filterBtn);
+  actionRow.appendChild(customizeBtn);
+
+  const statsRow = document.createElement('div');
+  statsRow.className = 'jlv-topbar__stats';
+  statsRow.appendChild(statChip(totalLinesEl, ICON_LINES));
+  statsRow.appendChild(statChip(loadedEl, ICON_CHECK));
+  statsRow.appendChild(statChip(rangeEl, ICON_RANGE));
+  statsRow.appendChild(statChip(buildMsEl, ICON_CLOCK));
+
+  root.appendChild(titleRow);
+  root.appendChild(searchRow);
+  root.appendChild(actionRow);
+  root.appendChild(statsRow);
 
   /* ---------------------- 过滤面板 ---------------------- */
   let filterPanel: HTMLElement | null = null;

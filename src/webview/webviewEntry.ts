@@ -312,14 +312,13 @@ function main(): void {
   /* ---------------- 详情面板（JSON 树，Task 5） ---------------- */
   const detail = createDetailTree(rootEl);
 
-  /* ---------------- 主体布局 ---------------- */
-  const body = document.createElement('div');
-  body.className = 'jlv-body';
+  /* ---------------- 主体布局：严格左右两栏 ---------------- */
+  /* 左栏 = 列头(文件/搜索/筛选/统计) + 记录列表；右栏 = 详情面板(自带工具头) */
+  const leftCol = document.createElement('div');
+  leftCol.className = 'jlv-col-list';
 
-  /* ---------------- 文件变更 / 错误横幅（Task 7） ---------------- */
+  /* ---------------- 文件变更 / 错误横幅：右上角浮层提示（不占整行） ---------------- */
   const banner = createBanner();
-  rootEl.appendChild(banner.root);
-  rootEl.appendChild(body);
 
   // 宿主返回的通用错误（如 init/索引构建失败）当前无 requestId 关联，
   // 这里统一透出到横幅，便于定位问题。
@@ -363,8 +362,12 @@ function main(): void {
       scheduleFetch.push({ first: displayFirst, lastExclusive: displayLast });
     },
   });
-  body.appendChild(list.scrollEl);
-  body.appendChild(detail.root);
+  // 组装两栏：左栏放入列头(toolbar) + 虚拟列表；右栏为详情面板；横幅浮层最后挂载。
+  leftCol.appendChild(toolbar.root);
+  leftCol.appendChild(list.scrollEl);
+  rootEl.appendChild(leftCol);
+  rootEl.appendChild(detail.root);
+  rootEl.appendChild(banner.root);
 
   /* ---------------- 详情面板：按需请求完整 JSON ---------------- */
 

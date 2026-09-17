@@ -73,11 +73,27 @@ export const CSS_TEXT = `
 html, body, #app { height: 100%; margin: 0; }
 #app {
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
+  align-items: stretch;
   font-family: var(--jlv-font);
   color: var(--jlv-fg);
   background: var(--jlv-bg);
   font-size: var(--jlv-font-size-md);
+}
+
+/* ============================================================
+ * 整体为「严格左右两栏」，无跨整行横条：
+ *   左栏 .jlv-col-list  = 列头(文件/搜索/筛选/统计) + 记录列表
+ *   右栏 .jlv-detail    = 工具头 + 面包屑 + JSON 树
+ * ============================================================ */
+.jlv-col-list {
+  flex: 0 0 320px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--jlv-panel-bg);
+  border-right: 1px solid var(--jlv-border);
 }
 
 /* 统一滚动条 */
@@ -105,31 +121,35 @@ html, body, #app { height: 100%; margin: 0; }
 }
 
 /* ============================================================
- * 顶部概要栏（两层：primary 行 + 统计行）
+ * 左栏列头（原顶栏）：紧凑纵向分组，仅占左栏宽度
  * ============================================================ */
 .jlv-topbar {
   flex: 0 0 auto;
   display: flex;
   flex-direction: column;
+  gap: var(--jlv-space-2);
+  padding: var(--jlv-space-3);
   border-bottom: 1px solid var(--jlv-border);
-  background: var(--jlv-panel-bg);
   position: relative; z-index: 2;
 }
-.jlv-topbar__primary {
-  display: flex;
-  align-items: center;
-  gap: var(--jlv-space-3);
-  padding: var(--jlv-space-2) var(--jlv-space-4);
-  flex-wrap: wrap;
-}
+/* 标题行：文件名(自适应) + 状态(靠右) */
+.jlv-col-title { display: flex; align-items: center; gap: var(--jlv-space-2); min-width: 0; }
+.jlv-col-title .jlv-file { flex: 1 1 auto; max-width: none; }
+.jlv-col-title .jlv-file__icon { color: var(--jlv-key); }
+.jlv-col-title .jlv-status { margin-left: auto; flex: none; }
+/* 搜索行：搜索框占满 + 上/下一条 */
+.jlv-col-search { display: flex; align-items: center; gap: var(--jlv-space-1); }
+.jlv-col-search .jlv-search-box { flex: 1 1 auto; max-width: none; min-width: 0; }
+/* 操作行：筛选 / 字段 */
+.jlv-col-actions { display: flex; align-items: center; gap: var(--jlv-space-1); }
+.jlv-col-actions .jlv-tbtn { flex: 1 1 auto; justify-content: center; }
 .jlv-topbar__stats {
   display: flex;
   align-items: center;
   gap: var(--jlv-space-2);
-  padding: 0 var(--jlv-space-4) var(--jlv-space-2);
   flex-wrap: wrap;
 }
-.jlv-topbar__spacer { flex: 1 1 24px; min-width: var(--jlv-space-3); }
+.jlv-topbar__spacer { flex: 1 1 auto; }
 
 /* 文件名块 */
 .jlv-file {
@@ -269,21 +289,18 @@ html, body, #app { height: 100%; margin: 0; }
 .jlv-topbar .jlv-nav:disabled { opacity: .35; cursor: default; }
 
 /* ============================================================
- * 主体：左侧记录列表（窄栏）+ 右侧 JSON 树（主体）
+ * 左栏列表滚动区（占满左栏剩余纵向空间）
  * ============================================================ */
-.jlv-body { flex: 1 1 0; display: flex; min-height: 0; }
+.jlv-inner { position: relative; width: 100%; }
 
 /* 虚拟滚动容器 */
 .jlv-scroll {
-  flex: 0 0 300px;
+  flex: 1 1 0;
   overflow-y: auto;
   position: relative;
   min-width: 0;
   contain: strict;
-  border-right: 1px solid var(--jlv-border);
-  background: var(--jlv-panel-bg);
 }
-.jlv-inner { position: relative; width: 100%; }
 
 /* 记录卡片 */
 .jlv-card {
@@ -411,15 +428,21 @@ html, body, #app { height: 100%; margin: 0; }
 }
 @keyframes jlv-slide { 0% { transform: translateX(-100%); } 100% { transform: translateX(100%); } }
 
-/* 文件变更 / 错误横幅 */
+/* 文件变更 / 错误横幅：右上角浮层提示（不占整行） */
 .jlv-banner {
-  flex: 0 0 auto;
+  position: fixed;
+  top: var(--jlv-space-3);
+  right: var(--jlv-space-3);
+  z-index: 30;
+  max-width: min(420px, calc(100vw - 24px));
   display: flex;
-  align-items: center;
-  gap: var(--jlv-space-3);
-  padding: var(--jlv-space-2) var(--jlv-space-4);
-  background: var(--jlv-error-bg);
-  border-bottom: 1px solid var(--jlv-border);
+  align-items: flex-start;
+  gap: var(--jlv-space-2);
+  padding: var(--jlv-space-2) var(--jlv-space-3);
+  background: var(--jlv-panel-bg);
+  border: 1px solid color-mix(in srgb, var(--jlv-warn) 40%, var(--jlv-border));
+  box-shadow: var(--jlv-shadow-2);
+  border-radius: var(--jlv-radius-2);
   color: var(--jlv-fg);
   font-size: var(--jlv-font-size-sm);
 }
@@ -428,10 +451,11 @@ html, body, #app { height: 100%; margin: 0; }
   width: 9px; height: 9px; border-radius: 50%;
   background: var(--jlv-warn);
   flex: none;
+  margin-top: 3px;
 }
 .jlv-banner[hidden] { display: none; }
-.jlv-banner-text { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.jlv-banner-action { white-space: nowrap; }
+.jlv-banner-text { flex: 1 1 auto; min-width: 0; overflow: hidden; line-height: 1.4; word-break: break-word; }
+.jlv-banner-action { white-space: nowrap; align-self: center; }
 
 /* ============================================================
  * 右侧详情面板（JSON 树）
@@ -611,11 +635,17 @@ html, body, #app { height: 100%; margin: 0; }
 }
 @keyframes jlv-ring { to { transform: rotate(360deg); } }
 
-/* 屏幕较小时把详情占位收窄到底部下方 */
+/* 屏幕较小时：两栏改为纵向堆叠（仍无跨整行横条） */
 @media (max-width: 700px) {
-  .jlv-body { flex-direction: column; }
-  .jlv-detail { flex: 0 0 auto; border-top: 1px solid var(--jlv-border); max-height: 160px; }
-  .jlv-scroll { flex: 1 1 0; border-right: none; }
+  #app { flex-direction: column; }
+  .jlv-col-list {
+    flex: 0 0 auto;
+    min-height: 38%;
+    max-height: 56%;
+    border-right: none;
+    border-bottom: 1px solid var(--jlv-border);
+  }
+  .jlv-detail { flex: 1 1 0; border-left: none; }
 }
 
 /* ============================================================
