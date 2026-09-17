@@ -252,17 +252,29 @@ export class VirtualRecordList {
     el.classList.remove('error', 'selected');
     const entry = this.cb.getRecord(real);
 
+    // 行号导轨
+    const rail = document.createElement('div');
+    rail.className = 'jlv-card__lno';
     const lineNo = document.createElement('span');
     lineNo.className = 'jlv-line-no';
     lineNo.textContent = `L${real + 1}`;
-    el.appendChild(lineNo);
+    rail.appendChild(lineNo);
+    el.appendChild(rail);
+
+    // 卡片主体列
+    const main = document.createElement('div');
+    main.className = 'jlv-card__main';
+    el.appendChild(main);
 
     if (!entry) {
       el.dataset.loaded = '0'; // 仍为占位，等数据到位后由 renderOnce 2b) 重灌
       const hint = document.createElement('span');
       hint.className = 'jlv-tombstone';
-      hint.textContent = '加载中…';
-      el.appendChild(hint);
+      const bar = document.createElement('span');
+      bar.className = 'jlv-skeleton-bar';
+      hint.appendChild(bar);
+      hint.appendChild(document.createTextNode('加载中…'));
+      main.appendChild(hint);
       return;
     }
 
@@ -273,7 +285,7 @@ export class VirtualRecordList {
       const bad = document.createElement('div');
       bad.className = 'jlv-card-bad';
       bad.textContent = entry.error ?? 'invalid JSON';
-      el.appendChild(bad);
+      main.appendChild(bad);
       return;
     }
 
@@ -282,18 +294,23 @@ export class VirtualRecordList {
       ? this.cb.summarize(entry.value)
       : summarizeRecord(entry.value, fields);
     for (const { key, display } of items) {
+      const tone = statusToneOf(display);
+      if (tone) {
+        main.appendChild(buildBadge(tone, display));
+        continue;
+      }
       const row = document.createElement('div');
       row.className = 'jlv-kv';
       const k = document.createElement('span');
-      k.className = 'key';
+      k.className = 'jlv-kv__key';
       k.textContent = key;
       const v = document.createElement('span');
-      v.className = `val ${valueTypeClass(display)}`;
+      v.className = `jlv-kv__val ${valueTypeClass(display)}`;
       v.textContent = display;
       v.title = display;
       row.appendChild(k);
       row.appendChild(v);
-      el.appendChild(row);
+      main.appendChild(row);
     }
   }
 
@@ -315,4 +332,32 @@ function valueTypeClass(display: string): string {
   if (display.startsWith('"')) return 'str';
   if (/^-?\d/.test(display)) return 'num';
   return '';
+}
+
+/* ------------------- 语义状态徽标 ------------------- */
+
+const STATUS_BAD = new Set(['error', 'failed', 'failure', 'invalid', 'inactive', 'offline', 'blocked', 'dead', 'bad', 'missing', 'expired', 'disabled']);
+const STATUS_WARN = new Set(['pending', 'warn', 'warning', 'retry', 'queued', 'deferred', 'processing', 'running', 'awaiting', 'deprecated', 'unknown', 'paused']);
+const STATUS_GOOD = new Set(['active', 'ok', 'success', 'ready', 'online', 'enabled', 'done', 'complete', 'available', 'healthy', 'published']);
+const STATUS_INFO = new Set(['info', 'new', 'updating', 'created', 'idle', 'draft']);
+
+/** 若展示值为已知的短状态词，返回其语义色调（good/warn/bad/info），否则空串。 */
+function statusToneOf(display: string): string {
+  const raw = String(display).trim().toLowerCase();
+  if (!raw || raw.length > 24) return '';
+  if (/^-?\d|^\[|^\{|\s/.test(raw)) return '';
+  if (STATUS_BAD.has(raw)) return 'bad';
+  if (STATUS_WARN.has(raw)) return 'warn';
+  if (STATUS_GOOD.has(raw)) return 'good';
+  if (STATUS_INFO.has(raw)) return 'info';
+  return '';
+}
+
+/** 渲染语义徽标（含前置状态点）。 */
+function buildBadge(tone: string, display: string): HTMLElement {
+  const b = document.createElement('span');
+  b.className = `jlv-badge jlv-badge--${tone}`;
+  b.textContent = display;
+  b.title = display;
+  return b;
 }

@@ -81,19 +81,23 @@ export function createToolbar(host: HTMLElement, handlers: ToolbarHandlers = {})
   statusRootEl.appendChild(statusDot);
   statusRootEl.appendChild(statusEl);
 
-  // 概要
-  const titleBlock = document.createElement('div');
-  titleBlock.style.display = 'flex';
-  titleBlock.style.alignItems = 'center';
-  titleBlock.style.gap = '12px';
-  titleBlock.style.minWidth = '0';
-  titleBlock.appendChild(fileNameEl);
-  titleBlock.appendChild(totalLinesEl);
-  titleBlock.appendChild(loadedEl);
-  titleBlock.appendChild(rangeEl);
-  titleBlock.appendChild(buildMsEl);
+  /* ---- 主要行：文件名 + 状态 + 搜索 + 工具 ---- */
+  const primary = document.createElement('div');
+  primary.className = 'jlv-topbar__primary';
+
+  const fileEl = document.createElement('span');
+  fileEl.className = 'jlv-file';
+  fileEl.appendChild(iconSpan('jlv-file__icon', ICON_FILE));
+  fileEl.appendChild(fileNameEl);
+
+  const spacer = document.createElement('div');
+  spacer.className = 'jlv-topbar__spacer';
 
   /* ---------------------- 搜索控件 ---------------------- */
+  const searchBox = document.createElement('div');
+  searchBox.className = 'jlv-search-box';
+  searchBox.appendChild(iconSpan('jlv-search-box__icon', ICON_SEARCH));
+
   const search = document.createElement('input');
   search.className = 'jlv-field jlv-search';
   search.type = 'search';
@@ -101,46 +105,72 @@ export function createToolbar(host: HTMLElement, handlers: ToolbarHandlers = {})
   search.autocomplete = 'off';
   search.spellcheck = false;
 
+  const searchClear = document.createElement('button');
+  searchClear.type = 'button';
+  searchClear.className = 'jlv-search-box__clear';
+  searchClear.title = '清除搜索';
+  searchClear.hidden = true;
+  const clearIcon = document.createElement('span');
+  clearIcon.innerHTML = ICON_CLEAR;
+  searchClear.appendChild(clearIcon);
+
+  const matchInfo = document.createElement('span');
+  matchInfo.className = 'jlv-search-box__count';
+  matchInfo.hidden = true;
+
+  searchBox.appendChild(search);
+  searchBox.appendChild(searchClear);
+  searchBox.appendChild(matchInfo);
+
+  const updateClear = (): void => {
+    searchClear.hidden = search.value.length === 0;
+  };
+
+  const navGroup = document.createElement('div');
+  navGroup.className = 'jlv-ctrl-group';
   const prevBtn = document.createElement('button');
   prevBtn.className = 'jlv-tbtn jlv-nav';
   prevBtn.textContent = '↑';
   prevBtn.title = '上一个匹配';
+  prevBtn.disabled = true;
   const nextBtn = document.createElement('button');
   nextBtn.className = 'jlv-tbtn jlv-nav';
   nextBtn.textContent = '↓';
   nextBtn.title = '下一个匹配';
-  const matchInfo = document.createElement('span');
-  matchInfo.className = 'jlv-match';
-  matchInfo.textContent = '';
-  prevBtn.disabled = true;
   nextBtn.disabled = true;
-
-  const searchGroup = document.createElement('div');
-  searchGroup.className = 'jlv-ctrl-group';
-  searchGroup.appendChild(search);
-  searchGroup.appendChild(prevBtn);
-  searchGroup.appendChild(nextBtn);
-  searchGroup.appendChild(matchInfo);
+  navGroup.appendChild(prevBtn);
+  navGroup.appendChild(nextBtn);
 
   /* ---------------------- 面板切换按钮 ---------------------- */
   const filterBtn = document.createElement('button');
   filterBtn.className = 'jlv-tbtn';
-  filterBtn.textContent = '筛选';
   filterBtn.title = '字段值过滤';
+  filterBtn.appendChild(iconSpan('jlv-tbtn__ic', ICON_FILTER));
+  filterBtn.appendChild(document.createTextNode('筛选'));
   const customizeBtn = document.createElement('button');
   customizeBtn.className = 'jlv-tbtn';
-  customizeBtn.textContent = '字段';
   customizeBtn.title = '字段显示定制（显隐/排序/固定）';
+  customizeBtn.appendChild(iconSpan('jlv-tbtn__ic', ICON_COLUMNS));
+  customizeBtn.appendChild(document.createTextNode('字段'));
 
-  const spacer = document.createElement('div');
-  spacer.className = 'spacer';
+  primary.appendChild(fileEl);
+  primary.appendChild(statusRootEl);
+  primary.appendChild(spacer);
+  primary.appendChild(searchBox);
+  primary.appendChild(navGroup);
+  primary.appendChild(filterBtn);
+  primary.appendChild(customizeBtn);
 
-  root.appendChild(titleBlock);
-  root.appendChild(spacer);
-  root.appendChild(searchGroup);
-  root.appendChild(filterBtn);
-  root.appendChild(customizeBtn);
-  root.appendChild(statusRootEl);
+  /* ---- 统计行：图标化芯片 ---- */
+  const stats = document.createElement('div');
+  stats.className = 'jlv-topbar__stats';
+  stats.appendChild(statChip(totalLinesEl, ICON_LINES));
+  stats.appendChild(statChip(loadedEl, ICON_CHECK));
+  stats.appendChild(statChip(rangeEl, ICON_RANGE));
+  stats.appendChild(statChip(buildMsEl, ICON_CLOCK));
+
+  root.appendChild(primary);
+  root.appendChild(stats);
 
   /* ---------------------- 过滤面板 ---------------------- */
   let filterPanel: HTMLElement | null = null;
@@ -476,12 +506,19 @@ export function createToolbar(host: HTMLElement, handlers: ToolbarHandlers = {})
   /* --------------------- Task 6 对外控制器 --------------------- */
   host.appendChild(root);
 
-  // 搜索防抖（300ms）+ 导航
+  // 搜索防抖（300ms）+ 清除 + 导航
   if (typeof handlers.onSearch === 'function') {
     let timer: ReturnType<typeof setTimeout> | undefined;
     search.addEventListener('input', () => {
+      updateClear();
       if (timer) clearTimeout(timer);
       timer = setTimeout(() => handlers.onSearch?.(search.value), 300);
+    });
+    searchClear.addEventListener('click', () => {
+      search.value = '';
+      updateClear();
+      handlers.onSearch?.('');
+      search.focus();
     });
   }
   prevBtn.addEventListener('click', () => handlers.onSearchPrev?.());
@@ -528,11 +565,13 @@ export function createToolbar(host: HTMLElement, handlers: ToolbarHandlers = {})
 
   const setSearchResult = (total: number, index: number): void => {
     if (total <= 0) {
+      matchInfo.hidden = true;
       matchInfo.textContent = '';
       prevBtn.disabled = true;
       nextBtn.disabled = true;
       return;
     }
+    matchInfo.hidden = false;
     prevBtn.disabled = false;
     nextBtn.disabled = false;
     const shown = Math.max(1, index + 1);
@@ -582,3 +621,41 @@ function statusText(s: ToolbarInfo['status']): string {
       return s;
   }
 }
+
+/* -------------------------- 内联 SVG 图标 -------------------------- */
+
+/** 携带 class 的图标容器（innerHTML 注入内联 SVG，跟随 currentColor）。 */
+function iconSpan(className: string, svg: string): HTMLElement {
+  const s = document.createElement('span');
+  s.className = className;
+  s.innerHTML = svg;
+  return s;
+}
+
+/** 统计芯片：图标 + 值宿主。 */
+function statChip(valueEl: HTMLElement, svg: string): HTMLElement {
+  const chip = document.createElement('span');
+  chip.className = 'jlv-stat-chip';
+  chip.appendChild(iconSpan('jlv-stat-chip__ic', svg));
+  chip.appendChild(valueEl);
+  return chip;
+}
+
+const ICON_FILE =
+  '<svg width="14" height="14" viewBox="0 0 16 16"><path d="M9 1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V5L9 1z" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M9 1v4h4" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>';
+const ICON_SEARCH =
+  '<svg width="12" height="12" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M10.5 10.5L14 14" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>';
+const ICON_CLEAR =
+  '<svg width="10" height="10" viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>';
+const ICON_FILTER =
+  '<svg width="12" height="12" viewBox="0 0 16 16"><path d="M2 4h12M5 8h6M8 12h3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>';
+const ICON_COLUMNS =
+  '<svg width="12" height="12" viewBox="0 0 16 16"><rect x="2" y="2" width="5" height="12" rx="1" fill="none" stroke="currentColor" stroke-width="1.2"/><rect x="9" y="2" width="5" height="8" rx="1" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>';
+const ICON_LINES =
+  '<svg width="12" height="12" viewBox="0 0 16 16"><path d="M2 4.5h12M2 8h12M2 11.5h8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>';
+const ICON_CHECK =
+  '<svg width="12" height="12" viewBox="0 0 16 16"><path d="M2.5 8.5l3.2 3L13.5 4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const ICON_RANGE =
+  '<svg width="12" height="12" viewBox="0 0 16 16"><path d="M2 5.5L6 3M14 5.5L10 3M2 10.5L6 13M14 10.5L10 13" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>';
+const ICON_CLOCK =
+  '<svg width="12" height="12" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.5" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M8 4.5V8l2.2 1.4" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>';

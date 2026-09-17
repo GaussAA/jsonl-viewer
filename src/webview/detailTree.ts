@@ -74,18 +74,20 @@ export function createDetailTree(host: HTMLElement): DetailTreeController {
 
   const btnExpandAll = document.createElement('button');
   btnExpandAll.className = 'jlv-tbtn';
-  btnExpandAll.textContent = '全部展开';
   btnExpandAll.title = '展开所有层级（大数组仍分段预览）';
   btnExpandAll.dataset.act = 'expandAll';
+  btnExpandAll.appendChild(icon('jlv-tbtn__ic', ICON_EXPAND));
+  btnExpandAll.appendChild(document.createTextNode('全部展开'));
 
   const btnCollapseAll = document.createElement('button');
   btnCollapseAll.className = 'jlv-tbtn';
-  btnCollapseAll.textContent = '全部折叠';
   btnCollapseAll.title = '只保留顶层';
   btnCollapseAll.dataset.act = 'collapseAll';
+  btnCollapseAll.appendChild(icon('jlv-tbtn__ic', ICON_COLLAPSE));
+  btnCollapseAll.appendChild(document.createTextNode('全部折叠'));
 
   const depthSel = document.createElement('select');
-  depthSel.className = 'jlv-tbtn jlv-depth';
+  depthSel.className = 'jlv-depth';
   depthSel.title = '展开到第 N 层';
   for (let i = 1; i <= 6; i++) {
     const opt = document.createElement('option');
@@ -97,14 +99,19 @@ export function createDetailTree(host: HTMLElement): DetailTreeController {
 
   const btnExpandLevel = document.createElement('button');
   btnExpandLevel.className = 'jlv-tbtn';
-  btnExpandLevel.textContent = '展开到该层';
   btnExpandLevel.dataset.act = 'expandLevel';
+  btnExpandLevel.appendChild(document.createTextNode('展开到该层'));
+  btnExpandLevel.appendChild(icon('jlv-tbtn__ic', ICON_LEVEL));
 
   group.appendChild(btnExpandAll);
   group.appendChild(btnCollapseAll);
-  group.appendChild(depthSel);
   group.appendChild(btnExpandLevel);
+  group.appendChild(depthSel);
   tools.appendChild(group);
+
+  const toolsSpacer = document.createElement('div');
+  toolsSpacer.className = 'jlv-tree-tools__spacer';
+  tools.appendChild(toolsSpacer);
 
   /* ---------------- 面包屑 ---------------- */
   const crumb = document.createElement('nav');
@@ -393,3 +400,20 @@ function kindClass(kind: string): string {
       return 'obj';
   }
 }
+
+/* -------------------------- 工具图标 -------------------------- */
+
+/** 携带 class 的图标容器（innerHTML 注入内联 SVG，跟随 currentColor）。 */
+function icon(className: string, svg: string): HTMLElement {
+  const s = document.createElement('span');
+  s.className = className;
+  s.innerHTML = svg;
+  return s;
+}
+
+const ICON_EXPAND =
+  '<svg width="12" height="12" viewBox="0 0 16 16"><path d="M2 3h12M2 7h12M6 11h4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><path d="M8 11l-1.5 1.5L8 14l1.5-1.5z" fill="currentColor"/></svg>';
+const ICON_COLLAPSE =
+  '<svg width="12" height="12" viewBox="0 0 16 16"><path d="M2 5h12M2 9h12M2 13h12" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>';
+const ICON_LEVEL =
+  '<svg width="12" height="12" viewBox="0 0 16 16"><path d="M3 3v6a2 2 0 0 0 2 2h8M9 7l3 3-3 3" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
