@@ -14,7 +14,6 @@
 import {
   computeFetchWindow,
   FieldLike,
-  formatCount,
   LRUCache,
   ThrottleQueue,
 } from './logic.ts';
@@ -465,7 +464,7 @@ function main(): void {
     try {
       const res = await promise;
       if (state.detailInFlight?.rid !== requestId) return; // 已被更新的选择取代
-      if (res && res.ok !== false && res.value !== undefined) detail.showRecord(res.value);
+      if (res && res.ok !== false && res.value !== undefined) detail.showRecord(res.value, line);
       else detail.showError(res?.error ?? '无法解析该记录。');
     } catch (err) {
       if (state.detailInFlight?.rid === requestId) {
@@ -528,7 +527,7 @@ function main(): void {
     const info: Partial<ToolbarInfo> & { fileName?: string } = {
       fileName: ov?.uri ?? 'JSONL Viewer',
       status: ov ? 'ready' : 'connecting',
-      statusText: ov ? `就绪 · ${formatCount(ov.totalLines)} 行` : '连接中…',
+      statusText: ov ? '就绪' : '连接中…',
     };
     if (ov) {
       info.totalLines = ov.totalLines;

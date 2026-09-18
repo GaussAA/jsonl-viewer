@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>JSONL Viewer — Host Mock Harness</title>
+<style>
+  html, body, #app { height: 100%; margin: 0; }
+  body { background: #1e1e1e; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script>
+/* ============================================================
+ * Host Mock Harness：在普通浏览器中运行真实的 dist/webview.js。
+ * 模拟扩展宿主：acquireVsCodeApi + RPC 响应（init/readRecords/
+ * readRecord/search/filter/getSampleFields/persistState/...）。
+ * ============================================================ */
+
+/* ---------------- 模拟数据：500 行样例 JSONL ---------------- */
+const TOTAL_LINES = 500;
+const BAD_LINE = 37; // 每 37 行一条坏行（演示红标）
+
+function sampleValue(line) {
+  const i = line;
+  const long = i % 19 === 0;
+  return {
+    id: i + 1,
+    user: `user_${String(i + 1).padStart(4, '0')}${long ? '_very_long_username_that_overflows_the_container_width' : ''}`,
+    status: ['active', 'inactive', 'pending', 'banned'][i % 4],
+    category: `cat_${i % 10}`,
+    amount: (i * 3.7) % 200 - 100,
+    score: ((i * 13.3) % 100).toFixed(1),
+    created: `2024-07-${String((i % 28) + 1).padStart(2, '0')}T16:56:00Z`,
+    description: long
+      ? 'A very long description value that should overflow and demonstrate text-overflow ellipsis behavior.'
+      : 'short desc',
+    meta: {
+      topic: ['support', 'sales', 'ops', 'dev'][i % 4],
+      attempts: i % 15,
+      priority: ['low', 'medium', 'high', 'critical'][i % 4],
+      tags: ['important', 'review', 'waiting', 'done'][i % 4],
+      notes: long ? 'Long nested notes value for overflow testing in deeply nested object properties.' : '',
+      metrics: {
+        latency: { p50: 12 + (i % 9), p95: 34 + (i % 9), unit: 'ms' },
+        errors: { count: i % 7, rate: 0.001, last: { code: 500, msg: 'timeout', ts: '2024-07-01T10:00:00Z' } },
+      },
+    },
+    tags: ['vip', 'beta', 'stable', 'experimental'][i % 4],
+  };
+}
+
+/* ---------------- 宿主实现 ---------------- */
+const store = new Map(); // persistState 模拟（按 key）
+const allLines = Array.from({ length: TOTAL_LINES }, (_, i) => i);
+
+function recordFor(line) {
+  if ((line + 1) % BAD_LINE === 0) {
+    return { line, ok: false, error: `JSON 解析失败（行 ${line + 1}）：预期属性键，未闭合引号或括号` };
+  }
+  return { line, ok: true, value: sampleValue(line) };
+}
+
+function stringifyValue(v) {
+  try { return JSON.stringify(v); } catch { return String(v); }
+}
+
+function handleHostRequest(msg) {
+  const reply = (type, requestId, payload) => {
+    window.postMessage({ type, requestId, payload }, '*');
+  };
+  switch (msg.type) {
+    case 'ready':
+      // init 主动推送
+      window.postMessage({
+        type: 'init',
+        payload: { uri: 'mock://samples.jsonl', totalLines: TOTAL_LINES, totalBytes: 0, buildMs: 48, eof: true },
+      }, '*');
+      return;
+    case 'getOverview':
+      reply('overview', msg.requestId, { uri: 'mock://samples.jsonl', totalLines: TOTAL_LINES, totalBytes: 0, buildMs: 48, eof: true });
+      return;
+    case 'getSampleFields': {
+      const fields = ['id', 'user', 'status', 'amount', 'category', 'score', 'created', 'description', 'meta', 'tags']
+        .map((key) => {
+          const v = sampleValue(0)[key];
+          const t = Array.isArray(v) ? 'array' : v === null ? 'null' : typeof v === 'number' ? 'number' : 'string';
+          return { key, type: t };
+        });
+      reply('sampleFields', msg.requestId, { fields, total: 100, scanned: 100 });
+      return;
+    }
+    case 'readRecords': {
+      const items = [];
+      for (let n = 0; n < msg.count; n++) {
+        const line = msg.startLine + n;
+        if (line >= 0 && line < TOTAL_LINES) items.push(recordFor(line));
+      }
+      reply('records', msg.requestId, { startLine: msg.startLine, items, hasMore: msg.startLine + msg.count < TOTAL_LINES });
+      return;
+    }
+    case 'readRecord': {
+      const r = recordFor(msg.line);
+      reply('result', msg.requestId, { value: r.value, ok: r.ok, error: r.error });
+      return;
+    }
+    case 'search': {
+      const q = String(msg.query || '').toLowerCase();
+      const matches = [];
+      for (const line of allLines) {
+        if (line % 2 === 0) continue; // 模拟性能：仅奇数行参与匹配
+        const text = stringifyValue(sampleValue(line)).toLowerCase();
+        if (text.includes(q)) matches.push(line);
+        if (matches.length >= 200) break;
+      }
+      reply('searchResults', msg.requestId, { matches, total: matches.length, truncated: false });
+      return;
+    }
+    case 'filter': {
+      const op = msg.op;
+      const field = msg.field;
+      const value = String(msg.value ?? '');
+      const matches = [];
+      for (const line of allLines) {
+        const v = sampleValue(line)[field];
+        let hit = false;
+        if (op === 'eq') hit = String(v) === value;
+        else if (op === 'contains') hit = String(v).toLowerCase().includes(value.toLowerCase());
+        else if (op === 'exists') hit = v !== undefined && v !== null;
+        else if (op === 'type') hit = Array.isArray(v) ? 'array' === value : (v === null ? 'null' : typeof v) === value;
+        if (hit) matches.push(line);
+        if (matches.length >= 200) break;
+      }
+      reply('filterResults', msg.requestId, { matches: matches.length ? matches : [], total: matches.length, truncated: false });
+      return;
+    }
+    case 'getErrorLines':
+      reply('errorLines', msg.requestId, { lines: allLines.filter((l) => (l + 1) % BAD_LINE === 0) });
+      return;
+    case 'jumpToSource':
+      reply('result', msg.requestId, { jumped: true });
+      return;
+    case 'persistState':
+      store.set(msg.key, msg.value);
+      reply('result', msg.requestId, { ok: true });
+      return;
+    case 'loadState':
+      reply('result', msg.requestId, store.get(msg.key));
+      return;
+    case 'fileReload':
+      reply('overview', msg.requestId, { uri: 'mock://samples.jsonl', totalLines: TOTAL_LINES, totalBytes: 0, buildMs: 12, eof: true });
+      return;
+    case 'cancel':
+      return;
+    default:
+      reply('error', msg.requestId, `endpoint not implemented: ${msg.type}`);
+  }
+}
+
+/* ---------------- mock acquireVsCodeApi ---------------- */
+window.acquireVsCodeApi = () => ({
+  postMessage: (msg) => handleHostRequest(msg),
+  getState: () => null,
+  setState: () => {},
+});
+
+/* 窗口内 RPC：webview 监听 message 事件，宿主响应也走同一通道 */
+window.addEventListener('message', (e) => {
+  // webview 发来的请求已由 acquireVsCodeApi.postMessage 处理；这里仅确保消息不重复处理
+  void e;
+});
+</script>
+<script src="/dist/webview.js"></script>
+</body>
+</html>

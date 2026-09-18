@@ -1,13 +1,11 @@
 /**
  * styles.ts — webview 注入的 CSS 文本。
  *
- * 全部以 VS Code 主题变量（--vscode-*）表达配色，不写死色值，自动跟随主题。
- * 顶部定义一套派生自 --vscode-* 的「设计 token」（间距 / 圆角 / 字号 / 过渡 / 阴影 /
- * 语义色），供所有组件复用，形成统一的排版节奏与视觉层级。
- *
- * 作为字符串常量由 webviewEntry 注入 <style>（CSP 已放行 style-src 'unsafe-inline'），
- * 避免额外引入 css 打包插件、保持 iife 单文件。
+ * 按交互原型（prototype.html）最终设计 **1:1 复刻**，全部以 VS Code 主题变量
+ * （--vscode-*）表达配色（半透明白 + 主题派生色），自动跟随主题。
+ * 结构遵循原型：左栏浮卡工具栏 + 卡片目录 + 两行分页；右栏大卡片头部 + JSON 树。
  */
+
 export const CSS_TEXT = `
 :root {
   /* 字体 */
@@ -26,6 +24,7 @@ export const CSS_TEXT = `
   --jlv-selection: var(--vscode-list-activeSelectionBackground, #04395e);
   --jlv-selection-fg: var(--vscode-list-activeSelectionForeground, #ffffff);
   --jlv-dim: var(--vscode-descriptionForeground, #8a8a8a);
+  --jlv-focus: var(--vscode-focusBorder, #007fd4);
 
   /* JSON 语义色 */
   --jlv-string: var(--vscode-charts-green, #7fdb8a);
@@ -40,6 +39,7 @@ export const CSS_TEXT = `
   --jlv-warn: var(--vscode-charts-yellow, #e5c07b);
   --jlv-bad: var(--vscode-errorForeground, #f48771);
   --jlv-info: var(--vscode-charts-blue, #88c0ff);
+  --jlv-key-dim: var(--vscode-charts-yellow, #c8a86a);
 
   /* 间距刻度 */
   --jlv-space-1: 4px;
@@ -53,53 +53,88 @@ export const CSS_TEXT = `
   --jlv-radius-1: 4px;
   --jlv-radius-2: 6px;
   --jlv-radius-3: 8px;
+  --jlv-radius-4: 12px;
   --jlv-radius-full: 999px;
 
   /* 字号层级 */
   --jlv-font-size-xs: 11px;
   --jlv-font-size-sm: 12px;
   --jlv-font-size-md: 13px;
-  --jlv-font-size-lg: 14px;
-  --jlv-font-size-xl: 16px;
 
-  /* 过渡 / 阴影 */
-  --jlv-ease: cubic-bezier(.2, 0, 0, 1);
+  /* 动效（设计体系 §1.1） */
+  --jlv-ease: cubic-bezier(0.16, 1, 0.3, 1);
   --jlv-transition: 140ms var(--jlv-ease);
+  --jlv-dur-fast: 120ms;
+  --jlv-dur-base: 180ms;
+  --jlv-dur-slow: 280ms;
+
+  /* 阴影 */
   --jlv-shadow-1: 0 1px 3px rgba(0, 0, 0, .22);
-  --jlv-shadow-2: 0 6px 18px rgba(0, 0, 0, .34);
+  --jlv-shadow-2: 0 12px 40px rgba(0, 0, 0, .5), 0 2px 8px rgba(0, 0, 0, .3);
 }
 
-* { box-sizing: border-box; }
-/* 覆盖 UA 的 [hidden]{display:none}：作者样式若给元素设了 display（如 .jlv-ctx/.jlv-depth__menu 的 flex）
-   会盖过低优先级的内置 hidden 规则，导致菜单设置为 hidden 后仍显示、点空白无法关闭。此处强制兜底。 */
+/* ---------------- 动效 keyframes（原型一致） ---------------- */
+@keyframes jlv-card-in { from { opacity: 0; transform: translateX(42px); } to { opacity: 1; transform: translateX(0); } }
+@keyframes jlv-bar-grow { from { transform: scaleY(.4); opacity: .5; } to { transform: scaleY(1); opacity: 1; } }
+@keyframes jlv-pop-in { from { opacity: 0; transform: translateY(4px) scale(.96); } to { opacity: 1; transform: translateY(0) scale(1); } }
+@keyframes jlv-pop-out { from { opacity: 1; transform: translateY(0) scale(1); } to { opacity: 0; transform: translateY(3px) scale(.97); } }
+@keyframes jlv-row-in { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes jlv-copy-pulse { 0% { transform: scale(.8); } 60% { transform: scale(1.15); } 100% { transform: scale(1); } }
+@keyframes jlv-badge-pop { from { transform: scale(.92); opacity: .5; } to { transform: scale(1); opacity: 1; } }
+@keyframes jlv-ring { to { transform: rotate(360deg); } }
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body, #app { height: 100%; overflow: hidden; }
 [hidden] { display: none !important; }
-html, body, #app { height: 100%; margin: 0; }
-#app {
+body {
   display: flex;
-  flex-direction: row;
-  align-items: stretch;
   font-family: var(--jlv-font);
+  font-size: var(--jlv-font-size-md);
   color: var(--jlv-fg);
   background: var(--jlv-bg);
-  font-size: var(--jlv-font-size-md);
+}
+#app { display: flex; flex-direction: row; align-items: stretch; min-width: 0; }
+
+/* 系统减弱动效：全部关闭 */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }
 
+/* 窄屏（<700px）：左右栏纵向堆叠 */
+@media (max-width: 699px) {
+  body { flex-direction: column; overflow: auto; }
+  #app { flex-direction: column; }
+  .jlv-col-list { width: 100% !important; flex: none; }
+  .jlv-col-detail { min-height: 400px; }
+}
+
+/* ---------------- 淡化滚动条（原型：6px 极淡） ---------------- */
+*::-webkit-scrollbar { width: 6px; height: 6px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.14); border-radius: var(--jlv-radius-full); }
+*::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.28); }
+*::-webkit-scrollbar-thumb:active { background: rgba(255,255,255,0.4); }
+*::-webkit-scrollbar-corner { background: transparent; }
+
+/* 焦点可见环 */
+:focus-visible { outline: 2px solid var(--jlv-focus); outline-offset: -1px; }
+
 /* ============================================================
- * 整体为「严格左右两栏」，无跨整行横条：
- *   左栏 .jlv-col-list  = 列头(文件/搜索/筛选/统计) + 记录列表
- *   右栏 .jlv-detail    = 工具头 + 面包屑 + JSON 树
+ * 左栏（原型 .col-list）
  * ============================================================ */
 .jlv-col-list {
   flex: 0 0 auto;
-  width: 320px;
+  width: 340px;
   min-width: 0;
   display: flex;
   flex-direction: column;
-  min-height: 0;
+  gap: 10px;
+  padding: 14px 12px 10px 14px;
   background: var(--jlv-panel-bg);
+  overflow: hidden;
 }
 
-/* 可拖拽分栏条 */
+/* 可拖拽分栏条（无硬分隔线：默认透明，hover 才显示拖拽指示） */
 .jlv-resizer {
   flex: 0 0 5px;
   width: 5px;
@@ -116,846 +151,534 @@ html, body, #app { height: 100%; margin: 0; }
   top: 0; bottom: 0;
   left: 2px;
   width: 1px;
-  background: var(--jlv-border);
+  background: transparent;
   transition: left var(--jlv-transition), width var(--jlv-transition), background var(--jlv-transition);
 }
 .jlv-resizer:hover::after,
-.jlv-resizer.active::after {
-  left: 1px;
-  width: 3px;
-  background: var(--vscode-focusBorder, #007fd4);
+.jlv-resizer.active::after { left: 1px; width: 3px; background: var(--jlv-focus); }
+
+/* ---------------- 工具栏浮卡（原型 .toolbar） ---------------- */
+.jlv-toolbar {
+  background: linear-gradient(180deg, rgba(255,255,255,0.035), rgba(255,255,255,0.01));
+  border: 1px solid rgba(255,255,255,0.07);
+  border-radius: var(--jlv-radius-4);
+  padding: 14px;
+  flex-shrink: 0;
+}
+.jlv-toolbar-header { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+.jlv-toolbar-icon {
+  width: 26px; height: 26px; border-radius: 7px;
+  background: linear-gradient(135deg, var(--jlv-key), var(--jlv-key-dim));
+  display: flex; align-items: center; justify-content: center;
+  font-size: 12px; font-weight: 700; color: #1a1a1e; flex-shrink: 0;
+}
+.jlv-toolbar-title { flex: 1; min-width: 0; }
+.jlv-filename {
+  font-size: 13px; font-weight: 600; color: var(--jlv-fg);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.jlv-sub {
+  font-size: 10px; color: var(--jlv-dim);
+  display: flex; align-items: center; gap: 5px; margin-top: 2px;
+}
+.jlv-dot-ok { width: 5px; height: 5px; border-radius: 50%; background: var(--jlv-good); }
+
+/* 搜索框（原型 .search） */
+.jlv-search {
+  background: rgba(0,0,0,0.35); border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 8px; padding: 8px 12px;
+  display: flex; align-items: center; gap: 8px;
+  transition: border-color .15s, box-shadow .15s;
+}
+.jlv-search:focus-within { border-color: color-mix(in srgb, var(--jlv-focus) 60%, transparent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--jlv-focus) 18%, transparent); }
+.jlv-search .jlv-search-ic { display: inline-flex; align-items: center; color: var(--jlv-dim); flex: none; }
+.jlv-search input {
+  flex: 1; min-width: 0; border: none; background: transparent; outline: none;
+  color: var(--jlv-fg); font-size: 11px; font-family: inherit;
+}
+.jlv-search input::placeholder { color: var(--jlv-dim); }
+.jlv-search-kbd {
+  font-size: 9px; background: color-mix(in srgb, var(--jlv-info) 20%, transparent);
+  color: var(--jlv-info); padding: 2px 6px; border-radius: 4px; font-family: var(--jlv-mono);
+}
+.jlv-search-clear {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 18px; height: 18px; flex: none;
+  border: none; background: transparent; color: var(--jlv-dim);
+  border-radius: 50%; cursor: pointer;
+  transition: background var(--jlv-transition), color var(--jlv-transition);
+}
+.jlv-search-clear:hover { background: var(--jlv-card-hover); color: var(--jlv-fg); }
+.jlv-search-count {
+  flex: none; padding: 1px 7px; border-radius: var(--jlv-radius-full);
+  font-size: 9px; font-family: var(--jlv-mono);
+  color: var(--jlv-info); background: color-mix(in srgb, var(--jlv-info) 15%, transparent);
+}
+.jlv-nav-btn {
+  flex: none; width: 22px; height: 22px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: none; border-radius: 6px; background: rgba(255,255,255,0.04);
+  color: var(--jlv-dim); font-family: inherit; font-size: 11px; cursor: pointer;
+  transition: background var(--jlv-transition), color var(--jlv-transition);
+}
+.jlv-nav-btn:hover:not(:disabled) { background: rgba(255,255,255,0.08); color: var(--jlv-fg); }
+.jlv-nav-btn:disabled { opacity: .3; cursor: default; }
+
+/* 按钮行（原型 .toolbar-actions / .btn）——宽度自适应文本 */
+.jlv-toolbar-actions { display: flex; align-items: center; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
+.jlv-btn {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 11px; color: var(--jlv-dim); padding: 5px 12px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.07);
+  border-radius: 6px; cursor: pointer; font-family: inherit;
+  width: auto; flex: none;
+  transition: background .12s, border-color .12s, color .12s, transform .12s var(--jlv-ease);
+}
+.jlv-btn:hover { background: rgba(255,255,255,0.07); color: var(--jlv-fg); }
+.jlv-btn:active { transform: translateY(1px); }
+.jlv-btn.active {
+  background: color-mix(in srgb, var(--jlv-focus) 20%, transparent);
+  border-color: color-mix(in srgb, var(--jlv-focus) 40%, transparent);
+  color: var(--jlv-info);
+}
+.jlv-btn .jlv-btn-ic { display: inline-flex; align-items: center; }
+.jlv-page-info {
+  font-size: 10px; color: var(--jlv-dim);
+  padding: 5px 10px; background: rgba(128,128,128,0.08);
+  border-radius: 6px; font-family: var(--jlv-mono); margin-left: auto;
 }
 
-/* 统一滚动条 */
-*::-webkit-scrollbar { width: 10px; height: 10px; }
-*::-webkit-scrollbar-track { background: transparent; }
-*::-webkit-scrollbar-thumb {
-  background: var(--vscode-scrollbarSlider-background, rgba(121,121,121,.4));
-  border: 2px solid transparent;
-  border-radius: var(--jlv-radius-full);
-  background-clip: content-box;
-}
-*::-webkit-scrollbar-thumb:hover { background-color: var(--vscode-scrollbarSlider-hoverBackground, rgba(121,121,121,.6)); }
-*::-webkit-scrollbar-thumb:active { background-color: var(--vscode-scrollbarSlider-activeBackground, rgba(121,121,121,.7)); }
-*::-webkit-scrollbar-corner { background: transparent; }
-
-/* 焦点可见环 */
-:focus-visible {
-  outline: 2px solid var(--vscode-focusBorder, #007fd4);
-  outline-offset: -1px;
+/* ---------------- 目录列表（原型 .list-wrap） ---------------- */
+.jlv-list-wrap {
+  flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden;
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 2px 6px 2px 0;
 }
 
-/* 无障碍：使用者偏好在减少动效时关闭动画/过渡 */
-@media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after { animation: none !important; transition: none !important; }
-}
-
-/* ============================================================
- * 左栏列头（原顶栏）：紧凑纵向分组，仅占左栏宽度
- * ============================================================ */
-.jlv-topbar {
-  flex: 0 0 auto;
-  display: flex;
-  flex-direction: column;
-  gap: var(--jlv-space-2);
-  padding: var(--jlv-space-3);
-  border-bottom: 1px solid var(--jlv-border);
-  position: relative; z-index: 2;
-}
-/* 标题行：文件名(自适应) + 状态(靠右)；窄栏时可换行 */
-.jlv-col-title { display: flex; align-items: center; gap: var(--jlv-space-2); min-width: 0; flex-wrap: wrap; }
-.jlv-col-title .jlv-file { flex: 1 1 auto; max-width: none; }
-.jlv-col-title .jlv-file__icon { color: var(--jlv-key); }
-.jlv-col-title .jlv-status { margin-left: auto; flex: none; }
-/* 搜索行：搜索框占满 + 上/下一条；窄栏时可换行 */
-.jlv-col-search { display: flex; align-items: center; gap: var(--jlv-space-1); flex-wrap: wrap; }
-.jlv-col-search .jlv-search-box { flex: 1 1 auto; max-width: none; min-width: 0; }
-/* 操作行：筛选 / 字段 */
-.jlv-col-actions { display: flex; align-items: center; gap: var(--jlv-space-1); flex-wrap: wrap; }
-.jlv-col-actions .jlv-tbtn { flex: 1 1 auto; justify-content: center; }
-.jlv-topbar__stats {
-  display: flex;
-  align-items: center;
-  gap: var(--jlv-space-2);
-  flex-wrap: wrap;
-}
-.jlv-topbar__spacer { flex: 1 1 auto; }
-
-/* 文件名块 */
-.jlv-file {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--jlv-space-2);
-  min-width: 0;
-  max-width: 340px;
-}
-.jlv-file__icon {
-  display: inline-flex;
-  align-items: center;
-  color: var(--jlv-dim);
-  flex: none;
-}
-.jlv-title {
-  font-weight: 600;
-  font-size: var(--jlv-font-size-md);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* 状态 */
-.jlv-status {
-  display: inline-flex; align-items: center; gap: 6px;
-  font-size: var(--jlv-font-size-sm); color: var(--jlv-dim); white-space: nowrap;
-  padding: 2px 8px;
-  border-radius: var(--jlv-radius-full);
-  background: var(--vscode-statusBar-noFolderBackground-dimmed, rgba(128,128,128,.12));
-}
-.jlv-status .dot {
-  width: 8px; height: 8px; border-radius: 50%;
-  background: var(--vscode-charts-orange, #e0a36a);
-}
-.jlv-status.ready .dot { background: var(--jlv-good); }
-.jlv-status.error .dot { background: var(--jlv-bad); }
-
-/* 统计芯片 */
-.jlv-stat-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 3px 9px;
-  font-size: var(--jlv-font-size-sm);
-  color: var(--jlv-dim);
-  white-space: nowrap;
-  background: color-mix(in srgb, var(--vscode-descriptionForeground, #8a8a8a) 8%, transparent);
-  border: 1px solid color-mix(in srgb, var(--jlv-border) 70%, transparent);
-  border-radius: var(--jlv-radius-full);
-  line-height: 1;
-}
-.jlv-stat-chip__ic { display: inline-flex; align-items: center; color: var(--jlv-dim); flex: none; }
-
-/* 搜索框 */
-.jlv-search-box {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  min-width: 200px;
-  max-width: 420px;
-  flex: 1 1 220px;
-  padding: 0 8px;
-  height: 26px;
-  background: var(--vscode-input-background, #3c3c3c);
-  border: 1px solid var(--vscode-input-border, transparent);
-  border-radius: var(--jlv-radius-2);
-  color-scheme: inherit;
-  transition: border-color var(--jlv-transition), box-shadow var(--jlv-transition);
-}
-.jlv-search-box:focus-within {
-  border-color: var(--vscode-focusBorder, #007fd4);
-  box-shadow: 0 0 0 1px var(--vscode-focusBorder, #007fd4);
-}
-.jlv-search-box__icon { display: inline-flex; align-items: center; color: var(--jlv-dim); flex: none; }
-.jlv-search-box .jlv-search {
-  flex: 1 1 auto;
-  min-width: 0;
-  border: none;
-  background: transparent;
-  color: var(--vscode-input-foreground, var(--jlv-fg));
-  outline: none;
-  font-family: inherit;
-  font-size: var(--jlv-font-size-sm);
-  padding: 0;
-}
-.jlv-search-box .jlv-search::placeholder { color: var(--jlv-dim); }
-.jlv-search-box__clear {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 18px; height: 18px;
-  flex: none;
-  border: none;
-  background: transparent;
-  color: var(--jlv-dim);
-  border-radius: 50%;
+/* 记录卡片（原型 .record-card） */
+.jlv-record-card {
+  background: rgba(255,255,255,0.018);
+  border: 1px solid rgba(255,255,255,0.05);
+  border-left: 3px solid transparent;
+  border-radius: 10px;
+  padding: 10px 12px;
   cursor: pointer;
-  transition: background var(--jlv-transition);
-}
-.jlv-search-box__clear:hover { background: var(--jlv-card-hover); color: var(--jlv-fg); }
-.jlv-search-box__count {
-  flex: none;
-  padding: 1px 7px;
-  border-radius: var(--jlv-radius-full);
-  font-size: var(--jlv-font-size-xs);
-  font-family: var(--jlv-mono);
-  color: var(--vscode-foreground, var(--jlv-fg));
-  background: var(--vscode-list-activeSelectionBackground, #04395e);
-}
-
-/* 通用小按钮 */
-.jlv-tbtn {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  background: transparent;
-  color: var(--jlv-fg);
-  border: 1px solid var(--jlv-border);
-  border-radius: var(--jlv-radius-2);
-  font-size: var(--jlv-font-size-sm);
-  padding: 3px 10px;
-  cursor: pointer;
-  font-family: inherit;
-  white-space: nowrap;
-  transition: background var(--jlv-transition), color var(--jlv-transition), border-color var(--jlv-transition), transform var(--jlv-transition);
-}
-.jlv-tbtn:hover { background: var(--jlv-card-hover); }
-.jlv-tbtn:active { transform: translateY(1px); }
-.jlv-tbtn.active { background: var(--jlv-selection); color: var(--jlv-selection-fg); border-color: transparent; }
-.jlv-tbtn__ic { display: inline-flex; align-items: center; }
-
-.jlv-field { min-width: 160px; color-scheme: inherit; }
-.jlv-topbar .jlv-search { min-width: 0; }
-.jlv-topbar .jlv-ctrl-group { display: inline-flex; align-items: center; gap: var(--jlv-space-1); }
-.jlv-topbar .jlv-nav { padding: 2px 6px; }
-.jlv-topbar .jlv-nav:disabled { opacity: .35; cursor: default; }
-
-/* ============================================================
- * 左栏列表滚动区（占满左栏剩余纵向空间）
- * ============================================================ */
-.jlv-inner { position: relative; width: 100%; }
-
-/* 虚拟滚动容器（分页式：渲当前页，满高可滚动） */
-.jlv-scroll {
-  flex: 1 1 0;
-  overflow-y: auto;
   position: relative;
-  min-width: 0;
-  contain: strict;
+  transition: background .15s, border-color .15s, border-left-color .15s, transform .1s;
 }
-.jlv-scroll:focus-visible {
-  outline: 1px solid var(--vscode-focusBorder, #007fd4);
-  outline-offset: -1px;
+.jlv-record-card.jlv-card-enter { animation: jlv-card-in var(--jlv-dur-slow) var(--jlv-ease) backwards; }
+.jlv-record-card.jlv-card-leaving {
+  transform: translateX(-36px);
+  opacity: 0;
+  transition: transform .16s var(--jlv-ease), opacity .16s var(--jlv-ease);
 }
+.jlv-record-card:hover { background: rgba(255,255,255,0.032); border-color: rgba(255,255,255,0.09); transform: translateX(1px); }
+/* 选中：主题标准高亮（亮蓝底 + 白字 + 左高亮条），非"高暗" */
+.jlv-record-card.selected {
+  background: var(--jlv-selection);
+  color: var(--jlv-selection-fg);
+  border: 1px solid color-mix(in srgb, var(--jlv-selection-fg) 22%, transparent);
+  border-left: 3px solid var(--jlv-focus);
+}
+.jlv-record-card.selected .jlv-card-preview { color: var(--jlv-selection-fg); opacity: .88; }
+.jlv-record-card.selected .jlv-card-preview .key,
+.jlv-record-card.selected .jlv-card-preview .str,
+.jlv-record-card.selected .jlv-card-preview .num,
+.jlv-record-card.selected .jlv-card-preview .bool { color: var(--jlv-selection-fg); opacity: .9; }
+.jlv-record-card.selected .jlv-type-badge { color: var(--jlv-selection-fg); background: color-mix(in srgb, var(--jlv-selection-fg) 18%, transparent); }
+/* 选中：左高亮条生长 */
+.jlv-record-card.selected::before {
+  content: '';
+  position: absolute; left: -1px; top: 20%; bottom: 20%; width: 3px;
+  background: var(--jlv-focus);
+  border-radius: 0 3px 3px 0;
+  transform-origin: center;
+  animation: jlv-bar-grow var(--jlv-dur-base) var(--jlv-ease);
+}
+.jlv-record-card.error { background: color-mix(in srgb, var(--jlv-bad) 6%, transparent); border-color: color-mix(in srgb, var(--jlv-bad) 18%, transparent); }
 
-/* 目录空态提示 */
+.jlv-card-head { display: flex; align-items: center; gap: 7px; margin-bottom: 5px; }
+.jlv-line-badge { font-family: var(--jlv-mono); font-size: 10px; font-weight: 600; color: var(--jlv-dim); }
+.jlv-record-card.selected .jlv-line-badge {
+  color: var(--jlv-selection-fg);
+  background: color-mix(in srgb, var(--jlv-selection-fg) 18%, transparent);
+  padding: 1px 7px; border-radius: 4px;
+}
+.jlv-type-badge { font-size: 9px; padding: 1px 6px; border-radius: 4px; font-family: var(--jlv-mono); }
+.jlv-type-badge.object { background: color-mix(in srgb, var(--jlv-good) 15%, transparent); color: var(--jlv-good); }
+.jlv-type-badge.array { background: color-mix(in srgb, var(--jlv-warn) 15%, transparent); color: var(--jlv-warn); }
+.jlv-type-badge.string { background: color-mix(in srgb, var(--jlv-info) 15%, transparent); color: var(--jlv-info); }
+.jlv-type-badge.error { background: color-mix(in srgb, var(--jlv-bad) 15%, transparent); color: var(--jlv-bad); }
+.jlv-type-badge.number { background: color-mix(in srgb, var(--jlv-number) 15%, transparent); color: var(--jlv-number); }
+
+.jlv-card-preview {
+  font-size: 10px; font-family: var(--jlv-mono); color: var(--jlv-dim);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 1.5;
+}
+.jlv-record-card.selected .jlv-card-preview { color: var(--jlv-selection-fg); }
+.jlv-card-preview .str { color: var(--jlv-string); }
+.jlv-card-preview .num { color: var(--jlv-number); }
+.jlv-card-preview .bool { color: var(--jlv-bool); }
+.jlv-card-preview .key { color: var(--jlv-key-dim); }
+.jlv-card-preview.error-text { color: var(--jlv-bad); white-space: normal; }
+
+/* 悬停复制行号按钮 */
+.jlv-card-line__copy {
+  margin-left: auto;
+  flex: none;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 20px; height: 20px;
+  border: none; background: transparent; color: var(--jlv-dim);
+  border-radius: var(--jlv-radius-1); cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--jlv-transition), background var(--jlv-transition), color var(--jlv-transition);
+}
+.jlv-record-card:hover .jlv-card-line__copy,
+.jlv-record-card.selected .jlv-card-line__copy { opacity: .75; }
+.jlv-card-line__copy:hover { opacity: 1; color: var(--jlv-fg); background: var(--jlv-card-hover); }
+.jlv-card-line__copy.copied { opacity: 1; color: var(--jlv-good); }
+
+/* 空态 */
 .jlv-empty {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: var(--jlv-space-1);
-  padding: var(--jlv-space-6) var(--jlv-space-3);
-  color: var(--jlv-dim);
-  text-align: center;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: var(--jlv-space-1); padding: var(--jlv-space-6) var(--jlv-space-3);
+  color: var(--jlv-dim); text-align: center;
 }
 .jlv-empty__icon { color: var(--jlv-dim); opacity: .85; margin-bottom: var(--jlv-space-2); }
 .jlv-empty__text { font-size: var(--jlv-font-size-sm); color: var(--jlv-fg); font-weight: 600; }
 .jlv-empty__sub { font-size: var(--jlv-font-size-xs); color: var(--jlv-dim); font-style: italic; margin-bottom: var(--jlv-space-1); }
 .jlv-empty__action { margin-top: var(--jlv-space-2); }
 
-/* 分页条 */
+/* ---------------- 分页条（原型 .pager 两行） ---------------- */
 .jlv-pager {
-  flex: 0 0 auto;
-  display: flex;
-  align-items: center;
-  gap: var(--jlv-space-1);
-  padding: var(--jlv-space-2) var(--jlv-space-3);
-  border-top: 1px solid var(--jlv-border);
-  background: var(--jlv-panel-bg);
-  font-size: var(--jlv-font-size-sm);
-  color: var(--jlv-dim);
-  flex-wrap: wrap;
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 8px; margin-left: 6px;
+  font-size: 10px; color: var(--jlv-dim); flex-shrink: 0;
+  background: rgba(255,255,255,0.018);
+  border: 1px solid rgba(255,255,255,0.05);
+  border-radius: 10px;
 }
-.jlv-pager-btn { padding: 1px 10px; }
+.jlv-pager-nav { display: flex; align-items: center; gap: 1px; }
+.jlv-pager-btn {
+  width: 26px; height: 22px; padding: 0;
+  background: rgba(255,255,255,0.04); border: none; border-radius: 5px; cursor: pointer;
+  color: var(--jlv-dim); font-family: inherit; font-size: 11px; font-weight: 500;
+  display: inline-flex; align-items: center; justify-content: center;
+  transition: background .1s, color .1s, border-color .1s;
+  flex-shrink: 0;
+}
+.jlv-pager-btn:hover:not(:disabled):not(.active) { background: rgba(255,255,255,0.09); color: var(--jlv-fg); }
+.jlv-pager-btn:active:not(:disabled):not(.active) { background: rgba(255,255,255,0.13); }
+.jlv-pager-btn:disabled { opacity: .25; cursor: default; }
+.jlv-pager-btn.active {
+  background: color-mix(in srgb, var(--jlv-focus) 25%, transparent);
+  color: var(--jlv-info); font-weight: 600;
+}
+.jlv-pager-btn.jlv-pager-navbtn { width: 20px; color: var(--jlv-dim); font-size: 12px; }
+.jlv-pager-ellipsis { width: 20px; text-align: center; color: var(--jlv-dim); opacity: .5; font-size: 11px; flex-shrink: 0; user-select: none; }
+.jlv-pager-side { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.jlv-pager-summary { font-family: var(--jlv-mono); white-space: nowrap; color: var(--jlv-dim); }
+.jlv-pager-input-wrap { display: inline-flex; align-items: center; gap: 4px; font-size: 10px; color: var(--jlv-dim); white-space: nowrap; }
 .jlv-pager-input {
-  box-sizing: border-box;
-  width: 54px;
-  text-align: center;
-  background: var(--vscode-input-background, #3c3c3c);
-  color: var(--vscode-input-foreground, var(--jlv-fg));
-  border: 1px solid var(--vscode-input-border, var(--jlv-border));
-  border-radius: var(--jlv-radius-1);
-  color-scheme: inherit;
-  font-family: inherit;
-  font-size: var(--jlv-font-size-sm);
-  padding: 2px 4px;
+  width: 34px; height: 22px; padding: 0; text-align: center;
+  background: rgba(0,0,0,0.3);
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 4px; color: var(--jlv-fg);
+  font-family: var(--jlv-mono); font-size: 11px;
+  -moz-appearance: textfield;
 }
+.jlv-pager-input::-webkit-outer-spin-button,
+.jlv-pager-input::-webkit-inner-spin-button { -webkit-appearance: none; appearance: none; margin: 0; }
 .jlv-pager-input:focus {
-  outline: none;
-  border-color: var(--vscode-focusBorder, #007fd4);
-  box-shadow: 0 0 0 1px var(--vscode-focusBorder, #007fd4);
+  outline: none; border-color: color-mix(in srgb, var(--jlv-focus) 50%, transparent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--jlv-focus) 15%, transparent);
 }
-.jlv-pager-pages { white-space: nowrap; }
-.jlv-pager-spacer { flex: 1 1 auto; }
-.jlv-pager-summary { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-
-/* 记录卡片 */
-.jlv-card {
-  position: absolute;
-  left: 0; right: 0;
-  display: flex;
-  align-items: stretch;
-  gap: var(--jlv-space-2);
-  padding: var(--jlv-space-2) var(--jlv-space-3);
-  border-bottom: 1px solid var(--jlv-border);
-  border-left: 2px solid transparent;
-  cursor: pointer;
-  overflow: hidden;
-  contain: layout;
-  transition: background var(--jlv-transition), border-color var(--jlv-transition);
-}
-.jlv-card:hover { background: var(--jlv-card-hover); }
-.jlv-card.selected {
-  background: var(--jlv-selection);
-  color: var(--jlv-selection-fg);
-  border-left-color: var(--vscode-focusBorder, #007fd4);
-}
-.jlv-card.error { background: var(--jlv-error-bg); }
-
-/* 翻页式行目录卡片：每行仅行号 Ln（普通流布局） */
-.jlv-card-line { position: relative; align-items: center; padding: var(--jlv-space-2) var(--jlv-space-4); }
-.jlv-card-line .jlv-card__lno {
-  border-right: none;
-  margin-right: 0;
-  width: auto;
-  text-align: left;
-  font-size: var(--jlv-font-size-sm);
-  font-weight: 600;
-}
-.jlv-card-line.loading .jlv-card__lno { opacity: .45; font-style: italic; }
-.jlv-card-line.selected .jlv-card__lno { color: var(--jlv-selection-fg); }
-.jlv-card-line.error::after {
-  content: '';
-  position: absolute;
-  right: var(--jlv-space-3);
-  top: 50%;
-  transform: translateY(-50%);
-  width: 7px; height: 7px;
-  border-radius: 50%;
-  background: var(--jlv-bad);
-}
-
-/* 悬停复制行号按钮：默认透明，行悬停出现 */
-.jlv-card-line__copy {
-  margin-left: auto;
-  flex: none;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 20px; height: 20px;
-  border: none;
-  background: transparent;
-  color: var(--jlv-dim);
-  border-radius: var(--jlv-radius-1);
-  cursor: pointer;
-  opacity: 0;
-  transition: opacity var(--jlv-transition), background var(--jlv-transition), color var(--jlv-transition);
-}
-.jlv-card-line:hover .jlv-card-line__copy,
-.jlv-card-line.selected .jlv-card-line__copy { opacity: .75; }
-.jlv-card-line__copy:hover { opacity: 1; color: var(--jlv-fg); background: var(--jlv-card-hover); }
-.jlv-card-line__copy.copied { opacity: 1; color: var(--jlv-good); }
-.jlv-card-line.error .jlv-card-line__copy { display: none; }
-
-/* 目录右键菜单 */
-.jlv-ctx {
-  position: fixed;
-  z-index: 40;
-  min-width: 150px;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 4px;
-  background: var(--jlv-panel-bg);
-  border: 1px solid var(--jlv-border);
-  border-radius: var(--jlv-radius-2);
-  box-shadow: var(--jlv-shadow-2);
-  font-size: var(--jlv-font-size-sm);
-  color: var(--jlv-fg);
-}
-.jlv-ctx-item {
-  display: flex;
-  align-items: center;
-  width: 100%;
-  padding: 5px 10px;
-  text-align: left;
-  border: none;
-  border-radius: var(--jlv-radius-1);
-  background: transparent;
-  color: inherit;
-  font-family: inherit;
-  font-size: var(--jlv-font-size-sm);
-  cursor: pointer;
-  transition: background var(--jlv-transition);
-}
-.jlv-ctx-item:hover { background: var(--jlv-card-hover); }
-.jlv-ctx-item:focus-visible { outline: 1px solid var(--vscode-focusBorder, #007fd4); }
-.jlv-ctx-sep { height: 1px; background: var(--jlv-border); margin: 3px 4px; }
-
-/* 行号导轨 */
-.jlv-card__lno {
-  flex: none;
-  width: 40px;
-  padding-top: 1px;
-  font-family: var(--jlv-mono);
-  font-size: var(--jlv-font-size-xs);
-  color: var(--jlv-dim);
-  text-align: right;
-  user-select: none;
-  border-right: 1px solid var(--jlv-border);
-  margin-right: var(--jlv-space-1);
-  transition: color var(--jlv-transition);
-}
-.jlv-card.selected .jlv-card__lno { color: color-mix(in srgb, var(--jlv-selection-fg) 62%, transparent); border-color: color-mix(in srgb, var(--jlv-selection-fg) 20%, transparent); }
-
-/* 卡片主体列 */
-.jlv-card__main {
-  flex: 1 1 auto;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  justify-content: center;
-}
-
-/* 字段行 */
-.jlv-kv { display: flex; gap: var(--jlv-space-2); align-items: baseline; min-width: 0; }
-.jlv-kv__key {
-  flex: none;
-  min-width: 44px;
-  font-family: var(--jlv-mono);
-  font-size: var(--jlv-font-size-xs);
-  color: var(--jlv-key);
-  opacity: .85;
-  transition: color var(--jlv-transition), opacity var(--jlv-transition);
-}
-.jlv-card.selected .jlv-kv__key { color: var(--jlv-selection-fg); opacity: .62; }
-.jlv-kv__val {
-  flex: 1 1 auto;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  word-break: break-all;
-  font-family: var(--jlv-mono);
-  font-size: var(--jlv-font-size-sm);
-}
-.jlv-kv__val.str { color: var(--jlv-string); }
-.jlv-kv__val.num { color: var(--jlv-number); }
-.jlv-card.selected .jlv-kv__val.str,
-.jlv-card.selected .jlv-kv__val.num { color: var(--jlv-selection-fg); }
-
-/* 语义状态徽标 */
-.jlv-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  width: fit-content;
-  max-width: 100%;
-  padding: 1px 8px;
-  border-radius: var(--jlv-radius-full);
-  font-family: var(--jlv-font);
-  font-size: var(--jlv-font-size-xs);
-  line-height: 1.45;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  font-weight: 500;
-}
-.jlv-badge::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex: none; }
-.jlv-badge--good { color: var(--jlv-good); background: rgba(127,219,138,.15); background: color-mix(in srgb, var(--jlv-good) 15%, transparent); }
-.jlv-badge--warn { color: var(--jlv-warn); background: rgba(229,192,123,.15); background: color-mix(in srgb, var(--jlv-warn) 15%, transparent); }
-.jlv-badge--bad { color: var(--jlv-bad); background: rgba(244,135,113,.15); background: color-mix(in srgb, var(--jlv-bad) 16%, transparent); }
-.jlv-badge--info { color: var(--jlv-info); background: rgba(136,192,255,.15); background: color-mix(in srgb, var(--jlv-info) 15%, transparent); }
-.jlv-card.selected .jlv-badge { background: color-mix(in srgb, var(--jlv-selection-fg) 14%, transparent); }
-
-/* 错误卡 */
-.jlv-card-bad {
-  color: var(--jlv-error-fg);
-  font-size: var(--jlv-font-size-sm);
-  word-break: break-all;
-  line-height: 1.4;
-}
-
-/* 加载占位骨架 */
-.jlv-tombstone {
-  color: var(--jlv-dim);
-  font-style: italic;
-  font-size: var(--jlv-font-size-sm);
-  display: flex;
-  align-items: center;
-  gap: var(--jlv-space-2);
-}
-.jlv-skeleton-bar { width: 60%; height: 9px; border-radius: var(--jlv-radius-full); background: var(--jlv-card-hover); display: inline-block; }
-
-/* 列表顶部加载指示条 */
-.jlv-loading-bar {
-  position: fixed; top: 0; left: 0; height: 2px; width: 100%;
-  background: linear-gradient(90deg, transparent, var(--vscode-progressBar-background, #0e639c), transparent);
-  animation: jlv-slide 1.1s infinite; z-index: 10; pointer-events: none;
-}
-@keyframes jlv-slide { 0% { transform: translateX(-100%); } 100% { transform: translateX(100%); } }
-
-/* 文件变更 / 错误横幅：右上角浮层提示（不占整行） */
-.jlv-banner {
-  position: fixed;
-  top: var(--jlv-space-3);
-  right: var(--jlv-space-3);
-  z-index: 30;
-  max-width: min(420px, calc(100vw - 24px));
-  display: flex;
-  align-items: flex-start;
-  gap: var(--jlv-space-2);
-  padding: var(--jlv-space-2) var(--jlv-space-3);
-  background: var(--jlv-panel-bg);
-  border: 1px solid color-mix(in srgb, var(--jlv-warn) 40%, var(--jlv-border));
-  box-shadow: var(--jlv-shadow-2);
-  border-radius: var(--jlv-radius-2);
-  color: var(--jlv-fg);
-  font-size: var(--jlv-font-size-sm);
-}
-.jlv-banner::before {
-  content: '';
-  width: 9px; height: 9px; border-radius: 50%;
-  background: var(--jlv-warn);
-  flex: none;
-  margin-top: 3px;
-}
-.jlv-banner[hidden] { display: none; }
-.jlv-banner-text { flex: 1 1 auto; min-width: 0; overflow: hidden; line-height: 1.4; word-break: break-word; }
-.jlv-banner-action { white-space: nowrap; align-self: center; }
 
 /* ============================================================
- * 右侧详情面板（JSON 树）
+ * 右栏（原型 .col-detail / .detail-card）
  * ============================================================ */
-.jlv-detail {
-  position: relative; /* 悬浮工具条以此为定位基准 */
-  flex: 1 1 auto;
+.jlv-col-detail {
+  flex: 1 1 0;
   min-width: 0;
+  max-width: 100%;
   background: var(--jlv-bg);
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  overflow: hidden;
+  padding: 14px 14px 10px 10px;
+  display: flex; flex-direction: column; overflow: hidden;
 }
-.jlv-detail .jlv-detail-hint { color: var(--jlv-dim); font-size: var(--jlv-font-size-sm); }
+.jlv-detail-card {
+  flex: 1; min-height: 0; min-width: 0;
+  background: rgba(255,255,255,0.022); border: 1px solid rgba(255,255,255,0.05);
+  border-radius: var(--jlv-radius-4); overflow: hidden;
+  display: flex; flex-direction: column;
+}
 
-/* 树工具条：悬浮于右栏右上角（不占纵向布局），常态半透明、悬停全显 */
-.jlv-tree-tools {
-  position: absolute;
-  top: 6px;
-  right: 8px;
-  z-index: 6;
-  padding: 3px 4px;
-  border: 1px solid var(--jlv-border);
-  border-radius: var(--jlv-radius-2);
-  background: var(--jlv-panel-bg);
-  box-shadow: var(--jlv-shadow-1);
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  opacity: .62;
-  transition: opacity var(--jlv-transition), background var(--jlv-transition);
+/* 卡片头部（原型 .detail-header） */
+.jlv-detail-header {
+  background: rgba(0,0,0,0.28);
+  padding: 12px 16px;
+  display: flex; align-items: center; justify-content: space-between;
+  flex-shrink: 0; gap: 8px;
 }
-.jlv-detail:hover .jlv-tree-tools,
-.jlv-tree-tools:hover,
-.jlv-tree-tools:focus-within { opacity: 1; }
-.jlv-tree-tools__spacer { display: none; }
-.jlv-tree-tools-group {
-  display: inline-flex;
-  align-items: center;
-  gap: 1px;
-  padding: 0;
-  background: transparent;
-  border: none;
-  border-radius: 0;
+.jlv-dh-left { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1; overflow: hidden; }
+.jlv-dh-line {
+  display: inline-block;
+  font-family: var(--jlv-mono); font-size: 11px; font-weight: 700;
+  color: var(--jlv-info); background: color-mix(in srgb, var(--jlv-info) 15%, transparent);
+  padding: 3px 9px; border-radius: 5px; flex-shrink: 0;
 }
-.jlv-tree-tools-group .jlv-tbtn { border: none; background: transparent; font-size: 0; padding: 3px 6px; border-radius: var(--jlv-radius-1); }
-.jlv-tree-tools-group .jlv-tbtn:hover { background: var(--jlv-card-hover); }
-.jlv-tree-tools-group .jlv-tbtn:active { transform: none; }
-/* 展开深度下拉（自绘：原生 select 弹层无法随主题染色，故自建菜单） */
-.jlv-depth {
-  position: relative;
-  display: inline-flex;
-  flex: none;
-}
-.jlv-depth__trigger {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 3px 7px;
-  font-family: inherit;
-  font-size: var(--jlv-font-size-sm);
-  color: var(--jlv-fg);
-  background: var(--vscode-dropdown-background, var(--vscode-input-background, #3c3c3c));
-  border: 1px solid var(--vscode-input-border, var(--jlv-border));
-  border-radius: var(--jlv-radius-1);
-  cursor: pointer;
-  transition: border-color var(--jlv-transition), background var(--jlv-transition);
-}
-.jlv-depth__trigger svg {
-  color: var(--jlv-dim);
-  transition: transform var(--jlv-transition);
-}
-.jlv-depth__trigger:hover { background: var(--vscode-list-hoverBackground, var(--jlv-card-hover)); border-color: var(--vscode-input-border-editorHoverDefault, var(--jlv-border)); }
-.jlv-depth:focus-within .jlv-depth__trigger,
-.jlv-depth__trigger:focus-visible { outline: 1px solid var(--vscode-focusBorder, #007fd4); outline-offset: -1px; }
-.jlv-depth.open .jlv-depth__trigger svg { transform: rotate(180deg); }
-.jlv-depth__menu {
-  position: absolute;
-  top: calc(100% + 4px);
-  right: 0;
-  left: auto;
-  z-index: 30;
-  min-width: 100%;
-  padding: 3px;
-  background: var(--vscode-dropdown-background, var(--vscode-menu-background, var(--jlv-panel-bg)));
-  border: 1px solid var(--vscode-dropdown-border, var(--jlv-border));
-  border-radius: var(--jlv-radius-2);
-  box-shadow: var(--jlv-shadow-2);
-  display: flex;
-  flex-direction: column;
-}
-.jlv-depth__item {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 10px 4px 8px;
-  border: none;
-  border-radius: var(--jlv-radius-1);
-  background: transparent;
-  color: var(--vscode-dropdown-foreground, var(--jlv-fg));
-  font-family: inherit;
-  font-size: var(--jlv-font-size-sm);
-  text-align: left;
-  cursor: pointer;
-  white-space: nowrap;
-  transition: background var(--jlv-transition);
-}
-.jlv-depth__item:hover { background: var(--vscode-list-hoverBackground, var(--jlv-card-hover)); }
-.jlv-depth__item.selected { background: var(--jlv-selection); color: #ffffff; font-weight: 600; }
-.jlv-depth__item[hidden] { display: none; }
-
-/* 路径面包屑 */
-.jlv-tree-crumb {
-  flex: 0 0 auto;
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: var(--jlv-space-1);
-  padding: 5px var(--jlv-space-3);
-  padding-right: 172px; /* 为右上角悬浮工具条预留空间 */
-  border-bottom: 1px solid var(--jlv-border);
-  color: var(--jlv-dim);
-  font-size: var(--jlv-font-size-sm);
-  font-family: var(--jlv-mono);
-  user-select: none;
-  background: color-mix(in srgb, var(--jlv-panel-bg) 60%, transparent);
+.jlv-dh-line.pop { animation: jlv-badge-pop var(--jlv-dur-base) var(--jlv-ease); }
+.jlv-dh-src { font-family: var(--jlv-mono); font-size: 10px; color: var(--jlv-dim); flex-shrink: 0; }
+.jlv-dh-divider { color: var(--jlv-dim); opacity: .4; flex-shrink: 0; }
+.jlv-dh-crumb {
+  font-family: var(--jlv-mono); font-size: 11px; color: var(--jlv-dim);
+  display: flex; align-items: center; gap: 3px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .jlv-crumb-seg {
-  background: transparent;
-  border: none;
-  border-radius: var(--jlv-radius-1);
-  color: var(--jlv-key);
+  color: var(--jlv-key-dim); cursor: pointer; padding: 1px 5px; border-radius: 3px;
+  border: none; background: transparent; font-family: inherit; font-size: 11px;
+  transition: background .12s;
+}
+.jlv-crumb-seg:hover { background: rgba(255,255,255,0.06); }
+.jlv-crumb-seg.current { color: var(--jlv-info); background: color-mix(in srgb, var(--jlv-info) 15%, transparent); }
+.jlv-crumb-sep { opacity: .35; color: var(--jlv-dim); }
+.jlv-dh-tools { display: flex; gap: 4px; flex-shrink: 0; }
+.jlv-dh-tool {
+  width: 28px; height: 28px;
+  background: rgba(255,255,255,0.05); border: 1px solid transparent; border-radius: 6px;
+  display: flex; align-items: center; justify-content: center; cursor: pointer;
+  color: var(--jlv-dim); font-size: 11px; font-family: inherit; padding: 0;
+  transition: background .12s, color .12s, border-color .12s, transform .12s var(--jlv-ease);
+}
+.jlv-dh-tool:hover { background: rgba(255,255,255,0.1); color: var(--jlv-fg); border-color: rgba(255,255,255,0.08); }
+.jlv-dh-tool:active { transform: scale(.95); }
+.jlv-dh-tool.copy-pulse { animation: jlv-copy-pulse var(--jlv-dur-base) var(--jlv-ease); }
+
+/* 展开层级下拉（自绘） */
+.jlv-depth { position: relative; display: inline-flex; flex: none; }
+.jlv-depth__trigger {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 0 7px; height: 28px;
+  font-family: inherit; font-size: 11px; color: var(--jlv-dim);
+  background: rgba(255,255,255,0.05); border: 1px solid transparent; border-radius: 6px;
   cursor: pointer;
-  font-family: inherit;
-  font-size: var(--jlv-font-size-sm);
-  padding: 1px 4px;
-  max-width: 160px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  transition: border-color var(--jlv-transition), background var(--jlv-transition), color var(--jlv-transition);
+}
+.jlv-depth__trigger:hover { background: rgba(255,255,255,0.1); color: var(--jlv-fg); border-color: rgba(255,255,255,0.08); }
+.jlv-depth__trigger svg { color: var(--jlv-dim); transition: transform var(--jlv-transition); }
+.jlv-depth.open .jlv-depth__trigger svg { transform: rotate(180deg); }
+.jlv-depth__menu {
+  position: absolute; top: calc(100% + 4px); right: 0; z-index: 30;
+  min-width: 100%; padding: 3px;
+  background: var(--jlv-panel-bg);
+  border: 1px solid var(--jlv-border);
+  border-radius: var(--jlv-radius-2);
+  box-shadow: var(--jlv-shadow-2);
+  display: flex; flex-direction: column;
+}
+.jlv-depth__item {
+  display: flex; align-items: center; gap: 6px; padding: 4px 10px;
+  border: none; border-radius: var(--jlv-radius-1); background: transparent;
+  color: var(--jlv-fg); font-family: inherit; font-size: var(--jlv-font-size-sm);
+  text-align: left; cursor: pointer; white-space: nowrap;
   transition: background var(--jlv-transition);
 }
-.jlv-crumb-seg:hover { background: var(--jlv-card-hover); }
-.jlv-crumb-seg.current { background: var(--jlv-selection); color: var(--jlv-selection-fg); }
-.jlv-crumb-sep { color: var(--jlv-dim); opacity: .6; }
+.jlv-depth__item:hover { background: var(--jlv-card-hover); }
+.jlv-depth__item.selected { background: var(--jlv-selection); color: var(--jlv-selection-fg); font-weight: 600; }
 
-/* 树体 */
-.jlv-detail-body.jlv-tree-body {
-  flex: 1 1 auto;
-  overflow: auto;
-  padding: var(--jlv-space-2) var(--jlv-space-2) 40px var(--jlv-space-3);
-  font-family: var(--jlv-mono);
-  font-size: var(--jlv-font-size-sm);
-  line-height: 1.55;
+/* ---------------- JSON 树（原型 .tree-body） ---------------- */
+.jlv-tree-body {
+  flex: 1; min-height: 0; min-width: 0;
+  padding: 16px 20px 20px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  font-family: var(--jlv-mono); font-size: 12px; line-height: 1.85;
 }
-
-/* 空态 / 加载 / 错误 */
-.jlv-tree-hint, .jlv-tree-loading, .jlv-tree-error {
-  color: var(--jlv-dim);
-  padding: var(--jlv-space-5) var(--jlv-space-3);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: var(--jlv-space-2);
-  min-height: 120px;
-}
-.jlv-tree-hint { font-style: italic; opacity: .85; }
-.jlv-tree-loading { font-style: italic; }
-.jlv-tree-error { color: var(--jlv-error-fg); font-style: normal; word-break: break-all; text-align: center; }
-
-/* 树行（header 一行；子树块在下方缩进，避免子节点横向堆积） */
+/* 切换记录：字段逐条出现（舒缓错峰） */
+.jlv-tree-body.animating .jlv-tree-row { animation: jlv-row-in 420ms var(--jlv-ease) backwards; }
 .jlv-tree-row {
-  display: flex;
-  align-items: baseline;
-  gap: 2px;
-  padding-right: 8px;
-  border-radius: var(--jlv-radius-1);
-  white-space: nowrap;
-  min-height: 20px;
+  display: flex; align-items: baseline; gap: 4px;
+  padding: 3px 6px; border-radius: 5px;
   cursor: pointer;
-  transition: background var(--jlv-transition);
-}
-.jlv-tree-row:hover { background: var(--jlv-card-hover); }
-.jlv-tree-row.selected {
-  background: color-mix(in srgb, var(--jlv-selection) 45%, transparent);
-  box-shadow: inset 2px 0 0 var(--vscode-focusBorder, #007fd4);
-}
-.jlv-tree-row .toggler {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 14px;
-  flex: none;
-  color: var(--jlv-dim);
-  cursor: pointer;
-  border-radius: var(--jlv-radius-1);
-  transition: color var(--jlv-transition), background var(--jlv-transition);
-}
-.jlv-tree-row .toggler:hover { color: var(--jlv-fg); background: var(--jlv-card-hover); }
-.jlv-tree-row.collapsed .toggler { transform: rotate(-90deg); }
-.jlv-tree-row .toggler svg { display: block; }
-.jlv-tree-row .jlv-key { color: var(--jlv-key); flex: none; }
-.jlv-tree-row .jlv-colon { color: var(--jlv-dim); margin-right: 4px; opacity: .7; }
-.jlv-tree-row .jlv-value {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   min-width: 0;
+  transition: background .1s;
 }
+.jlv-tree-row:hover { background: rgba(255,255,255,0.04); }
+.jlv-tree-row.selected { background: color-mix(in srgb, var(--jlv-focus) 10%, transparent); }
+/* Toggler：SVG chevron 旋转 */
+.jlv-tree-row .toggler {
+  width: 14px; height: 14px; color: var(--jlv-dim); flex-shrink: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 0; border-radius: 3px;
+  transition: color .12s;
+}
+.jlv-tree-row:hover .toggler { color: var(--jlv-fg); }
+.jlv-tree-row .toggler svg { transition: transform 150ms var(--jlv-ease); transform: rotate(0deg); }
+/* 未展开朝右 ▶（默认 0°），已展开朝下 ▼（90°） */
+.jlv-tree-row.expanded .toggler svg { transform: rotate(90deg); }
+.jlv-tree-row .jlv-key { color: var(--jlv-key); flex: none; }
+.jlv-tree-row .jlv-colon { color: var(--jlv-dim); opacity: .7; flex-shrink: 0; }
+.jlv-tree-row .jlv-value { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .jlv-tree-row .jlv-value.str { color: var(--jlv-string); }
 .jlv-tree-row .jlv-value.num { color: var(--jlv-number); }
 .jlv-tree-row .jlv-value.bool { color: var(--jlv-bool); }
 .jlv-tree-row .jlv-value.null { color: var(--jlv-null); font-style: italic; }
 .jlv-tree-row .jlv-value.obj { color: var(--jlv-container); }
 .jlv-tree-row .jlv-summary { font-style: italic; }
+.jlv-tree-row .jlv-key.jlv-index { color: var(--jlv-number); opacity: .8; }
 
-/* 子树块：每级缩进 + 左侧引导线（子节点显示在父节点下方，而非横向堆积） */
-.jlv-tree-block {
-  margin-left: 13px;
-  padding-left: 7px;
-  border-left: 1px solid var(--jlv-guide);
+/* 子树块：抽屉动画（JS 内联控制高度） */
+.jlv-tree-block { overflow: hidden; }
+.jlv-tree-block-inner {
+  margin-left: 14px;
+  padding-left: 10px;
+  border-left: 1px solid rgba(255,255,255,0.06);
+  overflow: hidden;
 }
-
-/* 数组下标键：以 [n] 呈现并弱化，避免与对象键混淆 */
-.jlv-tree-row .jlv-key.jlv-index {
-  color: var(--jlv-number);
-  opacity: .8;
-}
-
-/* 大数组「加载更多」 */
 .jlv-load-more {
   padding: 2px 0 2px 16px;
-  color: var(--jlv-bool);
-  cursor: pointer;
-  font-size: var(--jlv-font-size-sm);
-  user-select: none;
+  color: var(--jlv-bool); cursor: pointer;
+  font-size: var(--jlv-font-size-sm); user-select: none;
   border-radius: var(--jlv-radius-1);
 }
 .jlv-load-more:hover { text-decoration: underline; background: var(--jlv-card-hover); }
 
-/* 加载指示环 */
-.jlv-progress-ring {
-  width: 14px;
-  height: 14px;
-  flex: none;
-  border-radius: 50%;
-  border: 2px solid var(--vscode-progressBar-background, #0e639c);
-  border-top-color: transparent;
-  animation: jlv-ring .8s linear infinite;
+/* 空态 / 加载 / 错误 */
+.jlv-tree-hint, .jlv-tree-loading, .jlv-tree-error {
+  color: var(--jlv-dim); padding: var(--jlv-space-5) var(--jlv-space-3);
+  display: flex; align-items: center; justify-content: center; gap: var(--jlv-space-2);
+  min-height: 120px;
 }
-@keyframes jlv-ring { to { transform: rotate(360deg); } }
-
-/* 屏幕较小时：两栏改为纵向堆叠（仍无跨整行横条），隐藏横向分隔条 */
-@media (max-width: 700px) {
-  #app { flex-direction: column; }
-  .jlv-col-list {
-    width: 100% !important;
-    flex: 0 0 auto;
-    min-height: 38%;
-    max-height: 56%;
-    border-bottom: 1px solid var(--jlv-border);
-  }
-  .jlv-resizer { display: none; }
-  .jlv-detail { flex: 1 1 0; border-left: none; }
+.jlv-tree-hint { font-style: italic; opacity: .85; }
+.jlv-tree-loading { font-style: italic; }
+.jlv-tree-error { color: var(--jlv-error-fg); font-style: normal; word-break: break-all; text-align: center; }
+.jlv-progress-ring {
+  width: 14px; height: 14px; flex: none;
+  border-radius: 50%; border: 2px solid var(--vscode-progressBar-background, #0e639c);
+  border-top-color: transparent; animation: jlv-ring .8s linear infinite;
 }
 
 /* ============================================================
- * 浮动面板（过滤 / 字段定制）
+ * 浮层面板（筛选 / 字段定制）——原型 .float-panel
  * ============================================================ */
-.jlv-panel {
-  position: fixed;
-  left: var(--jlv-space-2);
-  z-index: 20;
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: var(--jlv-space-2);
-  padding: var(--jlv-space-3);
-  margin-top: var(--jlv-space-1);
-  background: var(--jlv-panel-bg);
-  border: 1px solid var(--jlv-border);
-  border-radius: var(--jlv-radius-2);
+.jlv-float-panel {
+  position: fixed; z-index: 50;
+  background: var(--jlv-panel-bg); border: 1px solid rgba(255,255,255,0.1);
+  border-radius: var(--jlv-radius-4);
   box-shadow: var(--jlv-shadow-2);
-  font-size: var(--jlv-font-size-sm);
-  color: var(--jlv-fg);
+  padding: 16px; min-width: 280px; max-width: 360px;
+  font-size: 12px; color: var(--jlv-fg);
+  transform-origin: top left;
+  animation: jlv-pop-in var(--jlv-dur-base) var(--jlv-ease);
 }
-.jlv-ctrl-label { display: inline-flex; align-items: center; gap: 6px; color: var(--jlv-dim); white-space: nowrap; }
-.jlv-panel input[type='text'],
-.jlv-panel input.jlv-field { min-width: 120px; color-scheme: inherit; }
-
-/* 统一表单控件（筛选面板的输入框/数字框、面板下拉）：复用 VS Code 输入控件主题，
-   避免默认白底/无边框在深色主题下与整体脱节 */
-.jlv-panel input,
-.jlv-panel select {
-  box-sizing: border-box;
-  min-height: 22px;
-  background: var(--vscode-dropdown-background, var(--vscode-input-background, #3c3c3c));
-  color: var(--vscode-input-foreground, var(--jlv-fg));
-  border: 1px solid var(--vscode-input-border, var(--jlv-border));
-  border-radius: var(--jlv-radius-1);
-  padding: 2px 6px;
+.jlv-float-panel.closing { animation: jlv-pop-out var(--jlv-dur-fast) ease-in forwards; }
+.jlv-float-panel h3 {
+  font-size: 13px; font-weight: 600; color: var(--jlv-fg);
+  margin-bottom: 12px; display: flex; align-items: center; gap: 8px;
+}
+.jlv-float-panel h3 .jlv-panel-close {
+  margin-left: auto; width: 22px; height: 22px; border-radius: 5px;
+  background: rgba(255,255,255,0.04); border: none; cursor: pointer;
+  color: var(--jlv-dim); font-size: 14px; display: flex; align-items: center; justify-content: center;
+}
+.jlv-float-panel h3 .jlv-panel-close:hover { background: rgba(255,255,255,0.1); color: var(--jlv-fg); }
+.jlv-float-panel label { display: flex; flex-direction: column; gap: 4px; font-size: 11px; color: var(--jlv-dim); margin-bottom: 10px; width: 100%; }
+/* 字段面板头部的横向标签（"展示字段数 [输入]"）不受纵向规则影响 */
+.jlv-float-panel label.jlv-ctrl-label { flex-direction: row; align-items: center; gap: 8px; width: auto; margin-bottom: 0; }
+.jlv-float-panel label.jlv-field-item { flex-direction: row; align-items: center; gap: 10px; margin-bottom: 0; width: 100%; }
+.jlv-float-panel select, .jlv-float-panel input[type="text"], .jlv-float-panel input[type="number"] {
+  width: 100%;
+  background: rgba(0,0,0,0.35); border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 6px; padding: 6px 10px; color: var(--jlv-fg); font-size: 12px; font-family: inherit;
   color-scheme: inherit;
-  font-family: inherit;
-  font-size: var(--jlv-font-size-sm);
-  transition: border-color var(--jlv-transition), box-shadow var(--jlv-transition);
+  transition: border-color .12s, box-shadow .12s;
 }
-.jlv-panel input:focus,
-.jlv-panel select:focus {
-  outline: none;
-  border-color: var(--vscode-focusBorder, #007fd4);
-  box-shadow: 0 0 0 1px var(--vscode-focusBorder, #007fd4);
+/* 字段面板头部：展示字段数 + 恢复默认 */
+.jlv-panel-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 10px; }
+.jlv-float-panel select {
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6'><path d='M0 0l5 6 5-6z' fill='%23555'/></svg>");
+  background-repeat: no-repeat; background-position: right 8px center;
+  appearance: none; -webkit-appearance: none; cursor: pointer;
+  padding-right: 28px;
 }
-.jlv-panel input::placeholder { color: var(--jlv-dim); }
+.jlv-float-panel select:focus, .jlv-float-panel input:focus {
+  outline: none; border-color: color-mix(in srgb, var(--jlv-focus) 50%, transparent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--jlv-focus) 15%, transparent);
+}
+.jlv-float-panel select option { background: var(--jlv-panel-bg); color: var(--jlv-fg); }
+.jlv-float-panel select option:checked { background: color-mix(in srgb, var(--jlv-focus) 25%, transparent); color: var(--jlv-info); }
+.jlv-panel-actions { display: flex; gap: 6px; margin-top: 14px; }
+.jlv-btn-panel {
+  flex: 1; padding: 7px 12px; font-size: 12px; border-radius: 6px;
+  border: 1px solid rgba(255,255,255,0.1);
+  background: rgba(255,255,255,0.04); color: var(--jlv-fg);
+  cursor: pointer; font-family: inherit;
+  transition: background .12s;
+}
+.jlv-btn-panel:hover { background: rgba(255,255,255,0.08); }
+.jlv-btn-panel.primary {
+  background: color-mix(in srgb, var(--jlv-focus) 20%, transparent);
+  border-color: color-mix(in srgb, var(--jlv-focus) 35%, transparent);
+  color: var(--jlv-info);
+}
+.jlv-btn-panel.primary:hover { background: color-mix(in srgb, var(--jlv-focus) 30%, transparent); }
 
-/* 字段定制行 */
-.jlv-layout-list { display: flex; flex-direction: column; gap: var(--jlv-space-1); }
+/* 字段定制列表 */
+.jlv-layout-list { display: flex; flex-direction: column; gap: 4px; max-height: 300px; overflow-y: auto; margin-bottom: 8px; }
 .jlv-layout-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 2px 4px;
-  border-radius: var(--jlv-radius-1);
-  cursor: pointer;
+  display: flex; align-items: center; gap: 10px; padding: 7px 10px;
+  border-radius: 6px; cursor: pointer;
+  transition: background .1s;
 }
 .jlv-layout-row:hover { background: var(--jlv-card-hover); }
 .jlv-layout-row .jlv-layout-name {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--jlv-key);
-  font-family: var(--jlv-mono);
-  font-size: var(--jlv-font-size-sm);
+  flex: 1 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--jlv-key); font-family: var(--jlv-mono); font-size: var(--jlv-font-size-sm);
 }
+.jlv-layout-row input[type="checkbox"] { flex-shrink: 0; accent-color: var(--jlv-focus); }
+.jlv-layout-row .jlv-tbtn { padding: 2px 6px; font-size: 11px; }
+.jlv-ctrl-label { display: inline-flex; align-items: center; gap: 6px; color: var(--jlv-dim); white-space: nowrap; }
+
+/* ============================================================
+ * 文件变更 / 错误横幅（右上角浮层）
+ * ============================================================ */
+.jlv-banner {
+  position: fixed; top: var(--jlv-space-3); right: var(--jlv-space-3); z-index: 30;
+  max-width: min(420px, calc(100vw - 24px));
+  display: flex; align-items: flex-start; gap: var(--jlv-space-2);
+  padding: var(--jlv-space-2) var(--jlv-space-3);
+  background: var(--jlv-panel-bg);
+  border: 1px solid color-mix(in srgb, var(--jlv-warn) 40%, var(--jlv-border));
+  box-shadow: var(--jlv-shadow-2);
+  border-radius: var(--jlv-radius-2);
+  color: var(--jlv-fg); font-size: var(--jlv-font-size-sm);
+}
+.jlv-banner::before {
+  content: ''; width: 9px; height: 9px; border-radius: 50%;
+  background: var(--jlv-warn); flex: none; margin-top: 3px;
+}
+.jlv-banner-text { flex: 1 1 auto; min-width: 0; overflow: hidden; line-height: 1.4; word-break: break-word; }
+.jlv-banner-action { white-space: nowrap; align-self: center; }
+
+/* ============================================================
+ * 目录右键菜单
+ * ============================================================ */
+.jlv-ctx {
+  position: fixed; z-index: 40; min-width: 150px;
+  display: flex; flex-direction: column; gap: 2px; padding: 4px;
+  background: var(--jlv-panel-bg); border: 1px solid var(--jlv-border);
+  border-radius: var(--jlv-radius-2); box-shadow: var(--jlv-shadow-2);
+  font-size: var(--jlv-font-size-sm); color: var(--jlv-fg);
+}
+.jlv-ctx-item {
+  display: flex; align-items: center; width: 100%;
+  padding: 5px 10px; text-align: left;
+  border: none; border-radius: var(--jlv-radius-1); background: transparent;
+  color: inherit; font-family: inherit; font-size: var(--jlv-font-size-sm); cursor: pointer;
+  transition: background var(--jlv-transition);
+}
+.jlv-ctx-item:hover { background: var(--jlv-card-hover); }
+.jlv-ctx-sep { height: 1px; background: var(--jlv-border); margin: 3px 4px; }
 `;

@@ -1,11 +1,12 @@
 /**
  * virtualScroll.ts — 左侧记录目录的 DOM 渲染层（vanilla TS，无框架）。
  *
- * 翻页式目录：固定每页 PAGE_SIZE 条，上一页/下一页 + 页码跳转切换，不再用无限滚动。
- * 每条记录只展示行号（L1、L2…），不展示字段摘要。
- *   - 只渲染「当前页」的固定条数 DOM，与总行数无关，超大文件也不卡；
- *   - 每次翻页/改页通过 onRangeChange 通知宿主拉取该页对应的真实行区间；
- *   - 过滤态下页面作用于「过滤后的展示行」（translation 映射真实行）。
+ * 翻页式目录：固定每页 PAGE_SIZE 条，上一页/下一页 + 窗口式页码跳转切换，不再用无限滚动。
+ * 设计体系（docs/DESIGN_SYSTEM.md §3.3 / §3.4 / §4.1）：
+ *   - 窗口式页码：固定 7 槽位（首页 + 当前页±1 + 末页 + 省略号），任意页数宽度恒定；
+ *   - 换页动画：旧卡片逐个向左滑出消失 → 新卡片从右逐个滑入（错峰）；
+ *   - 卡片化：圆角浮卡 + hover 上浮 + 选中左高亮条生长（样式在 styles.ts）。
+ *   - 只渲染「当前页」的固定条数 DOM，与总行数无关，超大文件也不卡。
  */
 
 import type { FieldLike } from './logic.ts';
@@ -42,10 +43,20 @@ export interface PageInfo {
   totalRows: number;
 }
 
+/** 窗口式页码：固定 7 槽位，任意页数下宽度恒定、首末页始终可达、当前页始终可见。 */
+function pagerSlots(cur: number, total: number): Array<number | '…'> {
+  if (total <= 7) return Array.from({ length: total }, (_, i) => i);
+  if (cur <= 3) return [0, 1, 2, 3, 4, '…', total - 1];
+  if (cur >= total - 4) return [0, '…', total - 5, total - 4, total - 3, total - 2, total - 1];
+  return [0, '…', cur - 1, cur, cur + 1, '…', total - 1];
+}
+
 export class VirtualRecordList {
   readonly scrollEl: HTMLElement;
   readonly pagerEl: HTMLElement;
   private readonly inner: HTMLElement;
+  private readonly navEl: HTMLElement; // 分页第一行：导航 + 页码窗口
+  private readonly sideEl: HTMLElement; // 分页第二行：跳页 + 统计
   private rawTotal = 0; // 底层总行数（未过滤）
   private totalRows = 0; // 展示行数（过滤后即 translation 长度）
   /** 展示位 -> 真实行号；null 表示不过滤（展示位 == 真实行号）。 */
@@ -54,12 +65,8 @@ export class VirtualRecordList {
   private page = 0; // 当前页（0 起）
   readonly pageSize: number;
   private disposed = false;
-
-  private readonly prevBtn: HTMLButtonElement;
-  private readonly nextBtn: HTMLButtonElement;
-  private readonly pageInput: HTMLInputElement;
-  private readonly pagesLabel: HTMLElement;
-  private readonly summaryLabel: HTMLElement;
+  /** 换页动画序号：防止快速连点时旧 setTimeout 覆盖新渲染。 */
+  private pageSeq = 0;
 
   constructor(
     private readonly cb: ListCallbacks,
@@ -67,9 +74,9 @@ export class VirtualRecordList {
   ) {
     this.pageSize = Math.max(1, Math.floor(pageSize));
 
-    /* 滚动区（渲染当前页） */
+    /* 滚动区（渲染当前页；原型 .jlv-list-wrap） */
     const scroll = document.createElement('div');
-    scroll.className = 'jlv-scroll';
+    scroll.className = 'jlv-list-wrap';
     scroll.tabIndex = 0;
     scroll.setAttribute('role', 'listbox');
     scroll.setAttribute('aria-label', '记录目录');
@@ -80,45 +87,14 @@ export class VirtualRecordList {
     this.scrollEl = scroll;
     this.inner = inner;
 
-    /* 分页条 */
+    /* 分页条（两行：导航+页码窗口 / 跳页+统计） */
     const pager = document.createElement('div');
     pager.className = 'jlv-pager';
-
-    this.prevBtn = document.createElement('button');
-    this.prevBtn.type = 'button';
-    this.prevBtn.className = 'jlv-tbtn jlv-pager-btn';
-    this.prevBtn.textContent = '‹';
-    this.prevBtn.title = '上一页';
-    this.prevBtn.addEventListener('click', () => this.goToPage(this.page - 1));
-
-    this.nextBtn = document.createElement('button');
-    this.nextBtn.type = 'button';
-    this.nextBtn.className = 'jlv-tbtn jlv-pager-btn';
-    this.nextBtn.textContent = '›';
-    this.nextBtn.title = '下一页';
-    this.nextBtn.addEventListener('click', () => this.goToPage(this.page + 1));
-
-    this.pageInput = document.createElement('input');
-    this.pageInput.type = 'number';
-    this.pageInput.className = 'jlv-pager-input';
-    this.pageInput.min = '1';
-    this.pageInput.value = '1';
-    this.pageInput.title = '跳转到第几页';
-    this.pageInput.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') this.commitPageInput();
-    });
-    this.pageInput.addEventListener('change', () => this.commitPageInput());
-
-    this.pagesLabel = document.createElement('span');
-    this.pagesLabel.className = 'jlv-pager-pages';
-
-    const pagerSpacer = document.createElement('div');
-    pagerSpacer.className = 'jlv-pager-spacer';
-
-    this.summaryLabel = document.createElement('span');
-    this.summaryLabel.className = 'jlv-pager-summary';
-
-    pager.append(this.prevBtn, this.pageInput, this.pagesLabel, this.nextBtn, pagerSpacer, this.summaryLabel);
+    this.navEl = document.createElement('div');
+    this.navEl.className = 'jlv-pager-nav';
+    this.sideEl = document.createElement('div');
+    this.sideEl.className = 'jlv-pager-side';
+    pager.append(this.navEl, this.sideEl);
     this.pagerEl = pager;
   }
 
@@ -128,23 +104,23 @@ export class VirtualRecordList {
     this.rawTotal = n;
     this.totalRows = this.translation ? this.translation.length : n;
     this.clampPage();
-    this.render();
+    this.render(false);
   }
 
   setTranslation(rows: number[] | null): void {
     this.translation = rows;
     this.totalRows = this.translation ? this.translation.length : this.rawTotal;
     this.clampPage();
-    this.render();
+    this.render(false);
   }
 
-  /** 数据到达 / 字段变化后刷新当前页内容（不翻页）。 */
+  /** 数据到达 / 字段变化后刷新当前页内容（不翻页、不播换页动画）。 */
   refresh(): void {
-    this.render();
+    this.render(false);
   }
 
   flushNow(): void {
-    this.render();
+    this.render(false);
   }
 
   /** 跳转到指定**真实行**所在页（过滤态映射到展示位后再定位）。 */
@@ -156,7 +132,7 @@ export class VirtualRecordList {
       this.page = Math.floor(d / this.pageSize);
     }
     this.clampPage();
-    this.render();
+    this.render(true);
   }
 
   getScrollTop(): number {
@@ -191,6 +167,7 @@ export class VirtualRecordList {
 
   dispose(): void {
     this.disposed = true;
+    this.pageSeq++;
     this.inner.textContent = '';
     this.pagerEl.remove();
   }
@@ -220,15 +197,16 @@ export class VirtualRecordList {
     const target = Math.max(0, Math.min(p, this.pages - 1));
     if (target === this.page) return;
     this.page = target;
-    this.render();
+    this.render(true);
   }
 
   private commitPageInput(): void {
-    const n = Number(this.pageInput.value);
+    const input = this.sideEl.querySelector<HTMLInputElement>('.jlv-pager-input');
+    if (!input) return;
+    const n = Number(input.value);
     if (!Number.isFinite(n)) return;
     this.goToPage(Math.floor(n) - 1);
-    // 输入框立即回读实际页码，避免溢出显示。
-    this.pageInput.value = String(this.page + 1);
+    input.value = String(this.page + 1);
   }
 
   private realLine(d: number): number {
@@ -243,10 +221,37 @@ export class VirtualRecordList {
 
   /* ---------------------- 渲染 ---------------------- */
 
-  private render(): void {
+  /**
+   * 渲染当前页。
+   * animate=true 表示换页/跳转：旧卡片先向左滑出（错峰），再重建新卡片从右滑入；
+   * animate=false（数据刷新）直接重建，不播动画。
+   */
+  private render(animate: boolean): void {
     if (this.disposed) return;
     this.clampPage();
-    this.scrollEl.scrollTop = 0; // 新页从顶部开始
+    this.scrollEl.scrollTop = 0;
+    this.updatePager();
+
+    const cards = Array.from(this.inner.children) as HTMLElement[];
+    if (animate && cards.length > 0) {
+      // 出口：旧卡片逐个向左滑出
+      cards.forEach((c, i) => {
+        c.classList.add('jlv-card-leaving');
+        c.style.transitionDelay = `${Math.min(i, 10) * 15}ms`;
+      });
+      const mySeq = ++this.pageSeq;
+      const exitMs = 160 + Math.min(cards.length, 10) * 15;
+      setTimeout(() => {
+        if (this.disposed || mySeq !== this.pageSeq) return;
+        this.rebuild();
+      }, exitMs);
+      return;
+    }
+    this.rebuild();
+  }
+
+  /** 重建当前页 DOM（新卡片从右滑入 + 错峰）。 */
+  private rebuild(): void {
     this.inner.textContent = '';
 
     // 空态：文件中无记录 / 过滤后无结果。
@@ -281,28 +286,30 @@ export class VirtualRecordList {
       }
 
       this.inner.appendChild(empty);
-      this.updatePager();
       return;
     }
 
     const start = this.pageStart();
     const count = this.pageCount();
     for (let i = 0; i < count; i++) {
-      this.inner.appendChild(this.createLine(start + i));
+      const card = this.createLine(start + i);
+      // 换页入场：从右滑入（错峰 15ms × 最多 10 张）
+      card.classList.add('jlv-card-enter');
+      card.style.animationDelay = `${Math.min(i, 10) * 15}ms`;
+      this.inner.appendChild(card);
     }
 
     // 通知宿主拉取当前页对应真实行
     if (count > 0) this.cb.onRangeChange(start, start + count);
 
-    this.updatePager();
     this.applySelection();
   }
 
-  /** 构造单行记录（仅显示行号 Ln，悬停可复制行号）。 */
+  /** 构造单行记录（原型卡片：行号徽章 + 类型徽章 + 字段摘要预览）。 */
   private createLine(d: number): HTMLElement {
     const real = this.realLine(d);
     const card = document.createElement('div');
-    card.className = 'jlv-card jlv-card-line';
+    card.className = 'jlv-record-card';
     card.dataset.line = String(real);
     card.setAttribute('role', 'option');
     card.addEventListener('click', () => {
@@ -311,10 +318,43 @@ export class VirtualRecordList {
       this.scrollEl.focus({ preventScroll: true }); // 便于后续键盘导航
     });
 
+    const entry = this.cb.getRecord(real);
+
+    /* 头部：行号徽章 + 类型徽章 + keys 徽章 + 复制按钮 */
+    const head = document.createElement('div');
+    head.className = 'jlv-card-head';
+
     const lno = document.createElement('span');
-    lno.className = 'jlv-card__lno';
+    lno.className = 'jlv-line-badge';
     lno.textContent = `L${real + 1}`;
-    card.appendChild(lno);
+    head.appendChild(lno);
+
+    if (entry === undefined) {
+      card.classList.add('loading');
+      const t = document.createElement('span');
+      t.className = 'jlv-type-badge';
+      t.textContent = '…';
+      head.appendChild(t);
+    } else if (entry.ok === false) {
+      card.classList.add('error');
+      const t = document.createElement('span');
+      t.className = 'jlv-type-badge error';
+      t.textContent = 'error';
+      head.appendChild(t);
+    } else {
+      const kind = jsonKindOfValue(entry.value);
+      const t = document.createElement('span');
+      t.className = `jlv-type-badge ${kind}`;
+      t.textContent = kind;
+      head.appendChild(t);
+      if (kind === 'object' || kind === 'array') {
+        const cnt = document.createElement('span');
+        cnt.className = 'jlv-type-badge string';
+        const n = kind === 'object' ? countKeys(entry.value) : countItems(entry.value);
+        cnt.textContent = `${n} ${kind === 'object' ? 'keys' : 'items'}`;
+        head.appendChild(cnt);
+      }
+    }
 
     // 悬停复制行号按钮（点击不触发选中/详情跳转）
     const copy = document.createElement('button');
@@ -326,9 +366,29 @@ export class VirtualRecordList {
       e.stopPropagation();
       void copyLine(`L${real + 1}`, copy);
     });
-    card.appendChild(copy);
+    head.appendChild(copy);
+    card.appendChild(head);
 
-    const entry = this.cb.getRecord(real);
+    /* 预览：错误信息 或 关键字段摘要 */
+    const preview = document.createElement('div');
+    preview.className = 'jlv-card-preview';
+    if (entry === undefined) {
+      preview.textContent = '加载中…';
+    } else if (entry.ok === false) {
+      preview.classList.add('error-text');
+      preview.textContent = entry.error ?? 'JSON 解析失败';
+    } else {
+      const items = this.cb.summarize ? this.cb.summarize(entry.value) : [];
+      preview.innerHTML = items
+        .slice(0, 3)
+        .map((it) => {
+          const cls = previewKind(it.display);
+          const val = it.display.length > 40 ? `${it.display.slice(0, 40)}…` : it.display;
+          return `<span class="key">${it.key}</span>: <span class="${cls}">${escapeHtml(val)}</span>`;
+        })
+        .join(' · ');
+    }
+    card.appendChild(preview);
 
     // 右键菜单：定位到源码行 / 复制行号 / 复制该行 JSON
     card.addEventListener('contextmenu', (e) => {
@@ -354,11 +414,6 @@ export class VirtualRecordList {
       openContextMenu(e.clientX, e.clientY, items);
     });
 
-    if (entry === undefined) {
-      card.classList.add('loading');
-    } else if (entry.ok === false) {
-      card.classList.add('error');
-    }
     return card;
   }
 
@@ -370,14 +425,72 @@ export class VirtualRecordList {
     }
   }
 
-  updatePager(): void {
+  /** 重建分页条（两行：导航+窗口页码 / 跳页+统计）。 */
+  private updatePager(): void {
     const pages = this.pages;
-    this.prevBtn.disabled = this.page <= 0;
-    this.nextBtn.disabled = this.page >= pages - 1;
-    this.pageInput.value = String(this.page + 1);
-    this.pageInput.max = String(pages);
-    this.pagesLabel.textContent = ` / ${pages} 页`;
-    this.summaryLabel.textContent = `每页 ${this.pageSize} 条`;
+    const p = this.page;
+
+    /* 第一行：首页 « ‹ 页码窗口 › » 末页 */
+    this.navEl.textContent = '';
+    const mkBtn = (label: string, title: string, onClick: () => void, nav: boolean): HTMLButtonElement => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'jlv-pager-btn';
+      if (nav) b.classList.add('jlv-pager-navbtn');
+      b.textContent = label;
+      b.title = title;
+      b.addEventListener('click', onClick);
+      return b;
+    };
+    const first = mkBtn('«', '首页', () => this.goToPage(0), true);
+    first.disabled = p <= 0;
+    const prev = mkBtn('‹', '上一页', () => this.goToPage(p - 1), true);
+    prev.disabled = p <= 0;
+    const next = mkBtn('›', '下一页', () => this.goToPage(p + 1), true);
+    next.disabled = p >= pages - 1;
+    const last = mkBtn('»', '末页', () => this.goToPage(pages - 1), true);
+    last.disabled = p >= pages - 1;
+
+    this.navEl.append(first, prev);
+    for (const slot of pagerSlots(p, pages)) {
+      if (slot === '…') {
+        const dot = document.createElement('span');
+        dot.className = 'jlv-pager-ellipsis';
+        dot.textContent = '…';
+        this.navEl.appendChild(dot);
+      } else {
+        const b = mkBtn(String(slot + 1), `第 ${slot + 1} 页`, () => this.goToPage(slot), false);
+        if (slot === p) b.classList.add('active');
+        this.navEl.appendChild(b);
+      }
+    }
+    this.navEl.append(next, last);
+
+    /* 第二行：跳至 [输入] · N 页 | 统计 */
+    this.sideEl.textContent = '';
+    const inputWrap = document.createElement('span');
+    inputWrap.className = 'jlv-pager-input-wrap';
+    inputWrap.style.cssText = 'display:inline-flex;align-items:center;gap:4px;white-space:nowrap;';
+    const label = document.createElement('span');
+    label.textContent = '跳至';
+    const input = document.createElement('input');
+    input.type = 'number';
+    input.className = 'jlv-pager-input';
+    input.min = '1';
+    input.max = String(pages);
+    input.value = String(p + 1);
+    input.title = `输入 1-${pages} 之间的页码`;
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') this.commitPageInput();
+    });
+    input.addEventListener('change', () => this.commitPageInput());
+    inputWrap.append(label, input);
+    this.sideEl.appendChild(inputWrap);
+
+    const summary = document.createElement('div');
+    summary.className = 'jlv-pager-summary';
+    summary.textContent = `${this.pageSize}/页 · ${this.totalRows.toLocaleString('en-US')} 行`;
+    this.sideEl.appendChild(summary);
   }
 
   /** 滚动/切换分页到指定真实行所在页，并选中该行。 */
@@ -386,14 +499,14 @@ export class VirtualRecordList {
     if (d < 0) {
       this.page = 0;
       this.clampPage();
-      this.render();
+      this.render(true);
       this.select(real);
       return;
     }
     const targetPage = Math.floor(d / this.pageSize);
     if (targetPage !== this.page) {
       this.page = targetPage;
-      this.render();
+      this.render(true);
     }
     this.select(real);
   }
@@ -439,7 +552,7 @@ export class VirtualRecordList {
       const d = e.key === 'Home' ? 0 : Math.max(0, this.totalRows - 1);
       this.page = Math.floor(d / this.pageSize);
       this.clampPage();
-      this.render();
+      this.render(true);
       this.select(this.realLine(d));
       return;
     }
@@ -448,6 +561,52 @@ export class VirtualRecordList {
       this.scrollEl.blur();
     }
   }
+}
+
+/* ------------------- 卡片辅助（原型预览） ------------------- */
+
+function jsonKindOfValue(value: unknown): string {
+  if (value === null) return 'null';
+  const t = typeof value;
+  if (t === 'string') return 'string';
+  if (t === 'number') return 'number';
+  if (t === 'boolean') return 'boolean';
+  return Array.isArray(value) ? 'array' : 'object';
+}
+
+function countKeys(value: unknown): number {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? Object.keys(value as Record<string, unknown>).length
+    : 0;
+}
+
+function countItems(value: unknown): number {
+  return Array.isArray(value) ? value.length : 0;
+}
+
+/** 根据摘要显示文本猜测渲染类（原型：str/num/bool/key）。 */
+function previewKind(display: string): string {
+  if (display.startsWith('"') && display.endsWith('"')) return 'str';
+  if (/^-?\d+(\.\d+)?$/.test(display)) return 'num';
+  if (display === 'true' || display === 'false') return 'bool';
+  return 'str';
+}
+
+function escapeHtml(s: string): string {
+  return s.replace(/[&<>"']/g, (c) => {
+    switch (c) {
+      case '&':
+        return '&amp;';
+      case '<':
+        return '&lt;';
+      case '>':
+        return '&gt;';
+      case '"':
+        return '&quot;';
+      default:
+        return '&#39;';
+    }
+  });
 }
 
 /* ------------------- 复制行号 ------------------- */

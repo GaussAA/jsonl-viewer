@@ -26,10 +26,10 @@ import {
 import type { PathSeg } from './detailLogic.ts';
 
 export interface DetailTreeController {
-  /** 面板根元素（`.jlv-detail`），供宿主放入布局。 */
+  /** 面板根元素（`.jlv-col-detail`），供宿主放入布局。 */
   readonly root: HTMLElement;
-  /** 展示一条记录的完整 JSON 值（替换旧值、重置折叠状态）。 */
-  showRecord(value: unknown): void;
+  /** 展示一条记录的完整 JSON 值（line 用于头部 Record # 展示，可选）。 */
+  showRecord(value: unknown, line?: number): void;
   /** 加载中占位。 */
   showLoading(): void;
   /** 展示错误行信息。 */
@@ -62,32 +62,47 @@ function chevronSvg(): string {
 }
 
 export function createDetailTree(host: HTMLElement): DetailTreeController {
+  /* 右栏：大卡片（原型 .col-detail > .detail-card > .detail-header + 树体） */
   const root = document.createElement('aside');
-  root.className = 'jlv-detail';
+  root.className = 'jlv-col-detail';
+  const card = document.createElement('div');
+  card.className = 'jlv-detail-card';
 
-  /* ---------------- 工具条 ---------------- */
+  const header = document.createElement('div');
+  header.className = 'jlv-detail-header';
+  const dhLeft = document.createElement('div');
+  dhLeft.className = 'jlv-dh-left';
+  const dhLine = document.createElement('span');
+  dhLine.className = 'jlv-dh-line';
+  dhLine.textContent = 'Record #—';
+  const dhSrc = document.createElement('span');
+  dhSrc.className = 'jlv-dh-src';
+  dhSrc.textContent = '';
+  const dhDivider = document.createElement('span');
+  dhDivider.className = 'jlv-dh-divider';
+  dhDivider.textContent = '·';
+  const crumb = document.createElement('nav');
+  crumb.className = 'jlv-dh-crumb';
+  dhLeft.append(dhLine, dhSrc, dhDivider, crumb);
+
+  /* 工具按钮组（原型 .dh-tools） */
   const tools = document.createElement('div');
-  tools.className = 'jlv-tree-tools';
-
-  const group = document.createElement('div');
-  group.className = 'jlv-tree-tools-group';
+  tools.className = 'jlv-dh-tools';
 
   const btnExpandAll = document.createElement('button');
-  btnExpandAll.className = 'jlv-tbtn';
+  btnExpandAll.className = 'jlv-dh-tool';
   btnExpandAll.title = '展开所有层级（大数组仍分段预览）';
   btnExpandAll.dataset.act = 'expandAll';
-  btnExpandAll.appendChild(icon('jlv-tbtn__ic', ICON_EXPAND));
-  btnExpandAll.appendChild(document.createTextNode('全部展开'));
+  btnExpandAll.appendChild(icon('', ICON_EXPAND));
 
   const btnCollapseAll = document.createElement('button');
-  btnCollapseAll.className = 'jlv-tbtn';
+  btnCollapseAll.className = 'jlv-dh-tool';
   btnCollapseAll.title = '只保留顶层';
   btnCollapseAll.dataset.act = 'collapseAll';
-  btnCollapseAll.appendChild(icon('jlv-tbtn__ic', ICON_COLLAPSE));
-  btnCollapseAll.appendChild(document.createTextNode('全部折叠'));
+  btnCollapseAll.appendChild(icon('', ICON_COLLAPSE));
 
-  // 展开深度选择：原生 <select> 的弹层由系统绘制、无法随主题染色，故用自绘下拉替代。
-  let selectedDepth = 2; // 当前选中的「展开到第 N 层」深度
+  // 展开深度选择：自绘下拉
+  let selectedDepth = 2;
   const depthWrap = document.createElement('div');
   depthWrap.className = 'jlv-depth';
   const depthTrigger = document.createElement('button');
@@ -113,43 +128,101 @@ export function createDetailTree(host: HTMLElement): DetailTreeController {
   }
   depthWrap.appendChild(depthTrigger);
   depthWrap.appendChild(depthMenu);
-  syncDepthMenu(); // 标记默认选中的「2 层」
+  syncDepthMenu();
 
   const btnExpandLevel = document.createElement('button');
-  btnExpandLevel.className = 'jlv-tbtn';
+  btnExpandLevel.className = 'jlv-dh-tool';
   btnExpandLevel.dataset.act = 'expandLevel';
-  btnExpandLevel.appendChild(document.createTextNode('展开到该层'));
-  btnExpandLevel.appendChild(icon('jlv-tbtn__ic', ICON_LEVEL));
+  btnExpandLevel.title = '展开到该层';
+  btnExpandLevel.appendChild(icon('', ICON_LEVEL));
 
-  group.appendChild(btnExpandAll);
-  group.appendChild(btnCollapseAll);
-  group.appendChild(depthWrap);
-  group.appendChild(btnExpandLevel);
-  tools.appendChild(group);
+  const btnCopy = document.createElement('button');
+  btnCopy.className = 'jlv-dh-tool';
+  btnCopy.title = '复制 JSON';
+  btnCopy.appendChild(icon('', ICON_COPY));
 
-  const toolsSpacer = document.createElement('div');
-  toolsSpacer.className = 'jlv-tree-tools__spacer';
-  tools.appendChild(toolsSpacer);
+  tools.append(btnExpandAll, btnCollapseAll, depthWrap, btnExpandLevel, btnCopy);
+  header.append(dhLeft, tools);
 
-  /* ---------------- 面包屑 ---------------- */
-  const crumb = document.createElement('nav');
-  crumb.className = 'jlv-tree-crumb';
-
-  /* ---------------- 树体 ---------------- */
+  /* 树体 */
   const body = document.createElement('div');
-  body.className = 'jlv-detail-body jlv-tree-body';
+  body.className = 'jlv-tree-body';
 
-  root.appendChild(tools);
-  root.appendChild(crumb);
-  root.appendChild(body);
+  card.append(header, body);
+  root.appendChild(card);
   host.appendChild(root);
 
   /* ---------------- 树状态 ---------------- */
   const state = new TreeState(1); // 默认展开到第 1 层
   const revealed: Record<string, number> = {}; // 父 pathKey -> 「加载更多」额外项数
   let currentValue: unknown = undefined;
+  let currentLine: number | undefined = undefined;
   let selectedSegs: PathSeg[] = [];
   let disposed = false;
+  /** 最近一次由用户 toggle 展开的路径：重建后仅该节点播抽屉动画（设计体系 §4.1）。 */
+  let lastExpandedKey: string | null = null;
+
+  /** 更新头部：Record # 徽标 + 源行（切换记录时轻弹）。 */
+  function setRecordHeader(line: number | undefined): void {
+    if (line === undefined) {
+      dhLine.textContent = 'Record #—';
+      dhSrc.textContent = '';
+      return;
+    }
+    dhLine.textContent = `Record #${line + 1}`;
+    dhSrc.textContent = `源 L${line + 1}`;
+    dhLine.classList.remove('pop');
+    void dhLine.offsetWidth;
+    dhLine.classList.add('pop');
+  }
+
+  /* ---------------- 抽屉动画（设计体系 §4.4） ---------------- */
+
+  /** 展开动画：0 → scrollHeight 抽屉拉出 + 淡入（delayMs 用于批量操作的瀑布错峰）。 */
+  function animateOpen(el: HTMLElement, delayMs = 0): void {
+    el.style.transition = 'none';
+    el.style.height = '0px';
+    el.style.opacity = '0';
+    // 元素需先挂载到 DOM 才能正确测量 scrollHeight；用 rAF 延迟到下一帧（render 已完成）
+    requestAnimationFrame(() => {
+      const d = delayMs ? ` ${delayMs}ms` : '';
+      el.style.transition = `height 200ms cubic-bezier(0.16,1,0.3,1)${d}, opacity 160ms ease-out${d}`;
+      el.style.height = `${el.scrollHeight}px`;
+      el.style.opacity = '1';
+      const onEnd = (e: TransitionEvent): void => {
+        if (e.propertyName !== 'height') return;
+        el.style.height = 'auto';
+        el.removeEventListener('transitionend', onEnd);
+      };
+      el.addEventListener('transitionend', onEnd);
+    });
+  }
+
+  /** 收起动画：当前高度 → 0 抽屉收回 + 淡出，播完 resolve。 */
+  function animateClose(el: HTMLElement, delayMs = 0): Promise<void> {
+    return new Promise((resolve) => {
+      el.style.transition = 'none';
+      el.style.height = `${el.scrollHeight}px`;
+      el.style.opacity = '1';
+      void el.offsetWidth;
+      const d = delayMs ? ` ${delayMs}ms` : '';
+      el.style.transition = `height 200ms cubic-bezier(0.16,1,0.3,1)${d}, opacity 160ms ease-out${d}`;
+      el.style.height = '0px';
+      el.style.opacity = '0';
+      setTimeout(resolve, 220 + delayMs);
+    });
+  }
+
+  /** 切换记录：右栏字段逐条出现（舒缓错峰，设计体系 §4.1）。 */
+  function replayRowAnim(): void {
+    body.classList.remove('animating');
+    const rows = body.querySelectorAll<HTMLElement>('.jlv-tree-row');
+    rows.forEach((r, i) => {
+      r.style.animationDelay = `${Math.min(i, 10) * 30}ms`;
+    });
+    void body.offsetWidth;
+    body.classList.add('animating');
+  }
 
   function render(): void {
     if (disposed) return;
@@ -196,7 +269,21 @@ export function createDetailTree(host: HTMLElement): DetailTreeController {
       body.appendChild(hint);
       return;
     }
-    buildNode(body, [], 0, currentValue);
+    // 不渲染根节点「$」行：直接以第一层字段作为顶层展示（$ 仅为内部根锚点）
+    if (isContainer(currentValue)) {
+      const { items, remaining } = expandContainer(currentValue as object, '$', revealed);
+      for (const it of items) buildNode(body, [it.seg], 1, it.value);
+      if (remaining > 0) {
+        const more = document.createElement('div');
+        more.className = 'jlv-load-more';
+        more.dataset.parent = '$';
+        more.textContent = `… 还有 ${remaining} 项，点击加载更多`;
+        body.appendChild(more);
+      }
+    } else {
+      // 根为标量（罕见兜底）：原样展示
+      buildNode(body, [], 0, currentValue);
+    }
 
     // 定位当前选中节点到可视区
     if (selectedSegs.length > 0) {
@@ -220,6 +307,7 @@ export function createDetailTree(host: HTMLElement): DetailTreeController {
 
     const node = document.createElement('div');
     node.className = 'jlv-tree-node';
+    (node as unknown as { _value?: unknown })._value = value; // 存数据引用：局部展开懒构建用
 
     const row = document.createElement('div');
     row.className = 'jlv-tree-row';
@@ -274,14 +362,22 @@ export function createDetailTree(host: HTMLElement): DetailTreeController {
       if (expanded) {
         childrenEl = document.createElement('div');
         childrenEl.className = 'jlv-tree-block';
+        const blockInner = document.createElement('div');
+        blockInner.className = 'jlv-tree-block-inner';
+        childrenEl.appendChild(blockInner);
         const { items, remaining } = expandContainer(value as object, pathKey(segs), revealed);
-        for (const it of items) buildNode(childrenEl, [...segs, it.seg], depth + 1, it.value);
+        for (const it of items) buildNode(blockInner, [...segs, it.seg], depth + 1, it.value);
         if (remaining > 0) {
           const more = document.createElement('div');
           more.className = 'jlv-load-more';
           more.dataset.parent = pathKey(segs);
           more.textContent = `… 还有 ${remaining} 项，点击加载更多`;
-          childrenEl.appendChild(more);
+          blockInner.appendChild(more);
+        }
+        // 仅对「用户本次 toggle 展开的节点」播抽屉动画；批量重建（切换/全部展开/加载更多）保持干脆
+        if (pathKey(segs) === lastExpandedKey) {
+          lastExpandedKey = null;
+          animateOpen(childrenEl);
         }
       }
     }
@@ -337,10 +433,56 @@ export function createDetailTree(host: HTMLElement): DetailTreeController {
     const btn = (e.target as HTMLElement).closest<HTMLElement>('[data-act]');
     if (!btn) return;
     const act = btn.dataset.act;
-    if (act === 'expandAll') state.expandAll();
-    else if (act === 'collapseAll') state.collapseAll();
-    else if (act === 'expandLevel') state.expandToLevel(selectedDepth);
-    render();
+    if (act === 'expandAll') {
+      // 全部展开：增量式逐层瀑布（不整树重建，无刷新感）
+      state.expandAll();
+      const rows = body.querySelectorAll<HTMLElement>('.jlv-tree-row[data-container="1"]');
+      let i = 0;
+      rows.forEach((row) => {
+        if (row.classList.contains('expanded')) return;
+        const node = row.closest<HTMLElement>('.jlv-tree-node');
+        if (node) expandNodeLocal(row, node, i * 30);
+        i++;
+      });
+    } else if (act === 'collapseAll') {
+      // 全部折叠：逐个抽屉收回（错峰），保留缓存，不整树重建
+      state.collapseAll();
+      const rows = body.querySelectorAll<HTMLElement>('.jlv-tree-row[data-container="1"]');
+      let i = 0;
+      rows.forEach((row) => {
+        const depth = Number(row.dataset.depth);
+        if (depth === 0 || !row.classList.contains('expanded')) return;
+        const node = row.closest<HTMLElement>('.jlv-tree-node');
+        if (node) void collapseNodeLocal(row, node, i * 30);
+        i++;
+      });
+    } else if (act === 'expandLevel') {
+      state.expandToLevel(selectedDepth);
+      // 展开到 N 层：逐层展开增量式（depth <= N 的容器）
+      const rows = body.querySelectorAll<HTMLElement>('.jlv-tree-row[data-container="1"]');
+      let i = 0;
+      rows.forEach((row) => {
+        const depth = Number(row.dataset.depth);
+        if (depth >= selectedDepth || row.classList.contains('expanded')) return;
+        const node = row.closest<HTMLElement>('.jlv-tree-node');
+        if (node) expandNodeLocal(row, node, i * 30);
+        i++;
+      });
+    }
+  });
+
+  // 复制 JSON：脉冲反馈（设计体系 §4.1）
+  btnCopy.addEventListener('click', () => {
+    if (currentValue === undefined) return;
+    const text = formatJsonValue(currentValue);
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(text).catch(() => legacyCopy(text));
+    } else {
+      legacyCopy(text);
+    }
+    btnCopy.classList.remove('copy-pulse');
+    void btnCopy.offsetWidth;
+    btnCopy.classList.add('copy-pulse');
   });
 
   crumb.addEventListener('click', (e) => {
@@ -350,7 +492,67 @@ export function createDetailTree(host: HTMLElement): DetailTreeController {
     navigateTo(selectedSegs.slice(0, index));
   });
 
-  body.addEventListener('click', (e) => {
+  /** 从行上反解 segs（treeKey 编码同 pathKey）。 */
+  function segsOf(row: HTMLElement): PathSeg[] {
+    return row.dataset.treeKey === '$' ? [] : parseSegsFromNode(row);
+  }
+
+  /** 局部构建某容器节点的子节点到 inner（懒构建，缓存保留）。 */
+  function buildChildrenInto(inner: HTMLElement, segs: PathSeg[], value: unknown, depth: number): void {
+    const { items, remaining } = expandContainer(value as object, pathKey(segs), revealed);
+    for (const it of items) buildNode(inner, [...segs, it.seg], depth + 1, it.value);
+    if (remaining > 0) {
+      const more = document.createElement('div');
+      more.className = 'jlv-load-more';
+      more.dataset.parent = pathKey(segs);
+      more.textContent = `… 还有 ${remaining} 项，点击加载更多`;
+      inner.appendChild(more);
+    }
+  }
+
+  /** 局部展开一个容器节点：懒构建子节点 + 抽屉动画（不整树重建）。 */
+  function expandNodeLocal(row: HTMLElement, node: HTMLElement, delayMs = 0): void {
+    let block = node.querySelector<HTMLElement>(':scope > .jlv-tree-block');
+    let inner = block?.querySelector<HTMLElement>(':scope > .jlv-tree-block-inner') ?? null;
+    if (!block || !inner) {
+      block = document.createElement('div');
+      block.className = 'jlv-tree-block';
+      inner = document.createElement('div');
+      inner.className = 'jlv-tree-block-inner';
+      block.appendChild(inner);
+      node.appendChild(block);
+    }
+    if (inner.childElementCount === 0 && (node as unknown as { _value?: unknown })._value !== undefined) {
+      const segs = segsOf(row);
+      buildChildrenInto(
+        inner,
+        segs,
+        (node as unknown as { _value?: unknown })._value,
+        Number(row.dataset.depth)
+      );
+    }
+    const val = row.querySelector<HTMLElement>('.jlv-value');
+    if (val) val.textContent = '';
+    row.classList.add('expanded');
+    row.classList.remove('collapsed');
+    if (block) animateOpen(block, delayMs);
+  }
+
+  /** 局部折叠一个容器节点：抽屉收回 + 保留缓存（不整树重建）。 */
+  function collapseNodeLocal(row: HTMLElement, node: HTMLElement, delayMs = 0): Promise<void> {
+    const block = node.querySelector<HTMLElement>(':scope > .jlv-tree-block');
+    const val = row.querySelector<HTMLElement>('.jlv-value');
+    if (val && block) {
+      // 折叠态预览文本
+      val.textContent = containerPreview((node as unknown as { _value?: unknown })._value as object);
+    }
+    row.classList.add('collapsed');
+    row.classList.remove('expanded');
+    if (block) return animateClose(block, delayMs);
+    return Promise.resolve();
+  }
+
+  body.addEventListener('click', async (e) => {
     const target = e.target as HTMLElement;
     const more = target.closest<HTMLElement>('.jlv-load-more');
     if (more) {
@@ -365,8 +567,20 @@ export function createDetailTree(host: HTMLElement): DetailTreeController {
     const container = row.dataset.container === '1';
     // 选中当前节点
     selectedSegs = row.dataset.treeKey === '$' ? [] : parseSegsFromNode(row);
-    if (container && selectedSegs.length > 0) state.toggle(selectedSegs, depth);
-    render();
+    if (container && selectedSegs.length > 0) {
+      const node = row.closest<HTMLElement>('.jlv-tree-node');
+      if (!node) return;
+      if (state.isExpanded(selectedSegs, depth)) {
+        // 折叠：局部抽屉收回，不整树重建
+        state.toggle(selectedSegs, depth);
+        await collapseNodeLocal(row, node);
+      } else {
+        // 展开：局部构建 + 抽屉拉出，不整树重建
+        state.toggle(selectedSegs, depth);
+        expandNodeLocal(row, node);
+      }
+      renderBreadcrumb();
+    }
   });
 
   /** 从行上把 treeKey 反解为 segs（存储的 key 是无歧义编码，与 pathKey 同源）。 */
@@ -391,17 +605,22 @@ export function createDetailTree(host: HTMLElement): DetailTreeController {
 
   const controller: DetailTreeController = {
     root,
-    showRecord(value) {
+    showRecord(value, line) {
       currentValue = value;
+      currentLine = line;
+      setRecordHeader(line);
       selectedSegs = [];
       state.collapseAll();
       state.expandToLevel(1);
       for (const k of Object.keys(revealed)) delete revealed[k];
       render();
+      replayRowAnim(); // 切换记录：字段逐条出现
     },
     showLoading() {
       currentValue = undefined;
+      setRecordHeader(currentLine);
       render();
+      replayRowAnim();
       const hint = body.querySelector('.jlv-tree-hint');
       if (!hint) return;
       hint.textContent = '';
@@ -423,6 +642,8 @@ export function createDetailTree(host: HTMLElement): DetailTreeController {
     },
     clear() {
       currentValue = undefined;
+      currentLine = undefined;
+      setRecordHeader(undefined);
       selectedSegs = [];
       render();
     },
@@ -476,3 +697,30 @@ const ICON_COLLAPSE =
   '<svg width="12" height="12" viewBox="0 0 16 16"><path d="M2 5h12M2 9h12M2 13h12" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>';
 const ICON_LEVEL =
   '<svg width="12" height="12" viewBox="0 0 16 16"><path d="M3 3v6a2 2 0 0 0 2 2h8M9 7l3 3-3 3" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const ICON_COPY =
+  '<svg width="12" height="12" viewBox="0 0 16 16"><rect x="5" y="5" width="8" height="9" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M11 2.5H4.5A1.5 1.5 0 0 0 3 4v7.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>';
+
+/** 把任意 JSON 值格式化为多行文本。 */
+function formatJsonValue(value: unknown): string {
+  try {
+    return JSON.stringify(value, null, 2) ?? String(value);
+  } catch {
+    return String(value);
+  }
+}
+
+/** 写文本到剪贴板（Clipboard API 失败时回退 execCommand）。 */
+function legacyCopy(text: string): void {
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.position = 'fixed';
+  ta.style.opacity = '0';
+  document.body.appendChild(ta);
+  ta.select();
+  try {
+    document.execCommand('copy');
+  } catch {
+    /* ignore */
+  }
+  document.body.removeChild(ta);
+}

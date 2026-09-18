@@ -1,11 +1,8 @@
 /**
- * toolbar.ts — 顶部概要栏 + Task 6 的搜索 / 过滤 / 字段定制控件。
+ * toolbar.ts — 左栏工具栏浮卡（按原型 1:1 复刻）。
  *
- * 概要栏展示：文件名、总行数、已解析/当前范围行数、打开耗时、后端状态。
- * Task 6 新增：
- *   - 全文/字段级搜索输入框（300ms 防抖回调 onSearch）+ 上一条/下一条 + 匹配计数。
- *   - 「筛选」切换一个过滤面板（字段 + 运算符 + 值）；「字段」切换字段显示定制面板。
- * 全部样式来自 styles.ts 的 --vscode-* 变量，贴合主题。DOM/UI 不强测。
+ * 结构：J 图标 + 文件名 + 状态点副标题 / 搜索框 + 上一条/下一条 / 筛选·字段按钮 + 页码范围。
+ * Task 6 搜索 / 过滤 / 字段定制逻辑保留：搜索防抖、匹配计数与导航、筛选与字段浮层面板。
  */
 
 import type { FieldCondition, FieldLayout } from './queryLogic.ts';
@@ -21,13 +18,10 @@ export interface ToolbarInfo {
 }
 
 export interface ToolbarHandlers {
-  /** 防抖后的搜索输入（query 为空表示清空搜索）。 */
   onSearch?: (query: string) => void;
   onSearchPrev?: () => void;
   onSearchNext?: () => void;
-  /** 应用/清空字段值过滤（cond 为 null/空 = 清除过滤）。 */
   onApplyFilter?: (cond: FieldCondition | null) => void;
-  /** 应用字段显示定制布局（含「恢复默认」）。 */
   onApplyLayout?: (layout: FieldLayout) => void;
 }
 
@@ -52,146 +46,175 @@ export function createToolbar(host: HTMLElement, handlers: ToolbarHandlers = {})
   refresh(): void;
   els: ToolbarStatsEls;
   searchInput(): HTMLInputElement | null;
-  /** 设置推断字段，填充过滤字段下拉 + 字段定制面板。 */
   setFields(fields: readonly FieldOption[] | null): void;
-  /** 反映当前字段定制布局（勾选/固定/顺序/字段数上限）。 */
   setLayout(layout: FieldLayout): void;
-  /** 更新搜索结果状态：total = 命中总数，index = 当前展示第几个（0 起）。 */
   setSearchResult(total: number, index: number): void;
 } {
-  const root = document.createElement('header');
-  root.className = 'jlv-topbar';
+  const root = document.createElement('div');
+  root.className = 'jlv-toolbar';
 
-  const fileNameEl = document.createElement('span');
-  fileNameEl.className = 'jlv-title';
-  const totalLinesEl = document.createElement('span');
-  totalLinesEl.className = 'jlv-stat';
-  const loadedEl = document.createElement('span');
-  loadedEl.className = 'jlv-stat';
-  const rangeEl = document.createElement('span');
-  rangeEl.className = 'jlv-stat';
-  const buildMsEl = document.createElement('span');
-  buildMsEl.className = 'jlv-stat';
-  const statusRootEl = document.createElement('span');
-  statusRootEl.className = 'jlv-status';
+  /* ---------- 头部：J 图标 + 文件名 + 状态副标题 ---------- */
+  const header = document.createElement('div');
+  header.className = 'jlv-toolbar-header';
+
+  const icon = document.createElement('div');
+  icon.className = 'jlv-toolbar-icon';
+  icon.textContent = 'J';
+
+  const titleBox = document.createElement('div');
+  titleBox.className = 'jlv-toolbar-title';
+  const fileNameEl = document.createElement('div');
+  fileNameEl.className = 'jlv-filename';
+  fileNameEl.textContent = 'JSONL Viewer';
+  const statusRootEl = document.createElement('div');
+  statusRootEl.className = 'jlv-sub';
   const statusDot = document.createElement('span');
-  statusDot.className = 'dot';
+  statusDot.className = 'jlv-dot-ok';
   const statusEl = document.createElement('span');
   statusEl.textContent = '…';
-  statusRootEl.appendChild(statusDot);
-  statusRootEl.appendChild(statusEl);
+  const totalLinesEl = document.createElement('span');
+  const loadedEl = document.createElement('span');
+  loadedEl.hidden = true;
+  const buildMsEl = document.createElement('span');
+  statusRootEl.append(statusDot, statusEl, totalLinesEl, loadedEl, buildMsEl);
 
-  /* ---- 主要行：文件名 + 状态 + 搜索 + 工具 ---- */
-  const fileEl = document.createElement('span');
-  fileEl.className = 'jlv-file';
-  fileEl.appendChild(iconSpan('jlv-file__icon', ICON_FILE));
-  fileEl.appendChild(fileNameEl);
+  titleBox.append(fileNameEl, statusRootEl);
+  header.append(icon, titleBox);
+  root.appendChild(header);
 
-  /* ---------------------- 搜索控件 ---------------------- */
-  const searchBox = document.createElement('div');
-  searchBox.className = 'jlv-search-box';
-  searchBox.appendChild(iconSpan('jlv-search-box__icon', ICON_SEARCH));
+  /* ---------- 搜索行 ---------- */
+  const search = document.createElement('div');
+  search.className = 'jlv-search';
 
-  const search = document.createElement('input');
-  search.className = 'jlv-field jlv-search';
-  search.type = 'search';
-  search.placeholder = '搜索记录…';
-  search.autocomplete = 'off';
-  search.spellcheck = false;
+  const searchInputEl = document.createElement('input');
+  searchInputEl.type = 'search';
+  searchInputEl.placeholder = '搜索记录…';
+  searchInputEl.autocomplete = 'off';
+  searchInputEl.spellcheck = false;
 
   const searchClear = document.createElement('button');
   searchClear.type = 'button';
-  searchClear.className = 'jlv-search-box__clear';
+  searchClear.className = 'jlv-search-clear';
   searchClear.title = '清除搜索';
   searchClear.hidden = true;
-  const clearIcon = document.createElement('span');
-  clearIcon.innerHTML = ICON_CLEAR;
-  searchClear.appendChild(clearIcon);
+  searchClear.innerHTML = ICON_CLEAR;
 
   const matchInfo = document.createElement('span');
-  matchInfo.className = 'jlv-search-box__count';
+  matchInfo.className = 'jlv-search-count';
   matchInfo.hidden = true;
 
-  searchBox.appendChild(search);
-  searchBox.appendChild(searchClear);
-  searchBox.appendChild(matchInfo);
-
-  const updateClear = (): void => {
-    searchClear.hidden = search.value.length === 0;
-  };
+  const searchKbd = document.createElement('span');
+  searchKbd.className = 'jlv-search-kbd';
+  searchKbd.textContent = '⌘K';
 
   const navGroup = document.createElement('div');
-  navGroup.className = 'jlv-ctrl-group';
+  navGroup.style.cssText = 'display:flex;align-items:center;gap:4px;flex:none;';
   const prevBtn = document.createElement('button');
-  prevBtn.className = 'jlv-tbtn jlv-nav';
+  prevBtn.type = 'button';
+  prevBtn.className = 'jlv-nav-btn';
   prevBtn.textContent = '↑';
   prevBtn.title = '上一个匹配';
   prevBtn.disabled = true;
   const nextBtn = document.createElement('button');
-  nextBtn.className = 'jlv-tbtn jlv-nav';
+  nextBtn.type = 'button';
+  nextBtn.className = 'jlv-nav-btn';
   nextBtn.textContent = '↓';
   nextBtn.title = '下一个匹配';
   nextBtn.disabled = true;
-  navGroup.appendChild(prevBtn);
-  navGroup.appendChild(nextBtn);
+  navGroup.append(prevBtn, nextBtn);
 
-  /* ---------------------- 面板切换按钮 ---------------------- */
+  search.append(iconSpan('jlv-search-ic', ICON_SEARCH), searchInputEl, searchClear, matchInfo, searchKbd, navGroup);
+  root.appendChild(search);
+
+  const updateClear = (): void => {
+    searchClear.hidden = searchInputEl.value.length === 0;
+  };
+
+  /* ---------- 按钮行：筛选 / 字段 + 页码范围 ---------- */
+  const actions = document.createElement('div');
+  actions.className = 'jlv-toolbar-actions';
+
   const filterBtn = document.createElement('button');
-  filterBtn.className = 'jlv-tbtn';
+  filterBtn.type = 'button';
+  filterBtn.className = 'jlv-btn';
   filterBtn.title = '字段值过滤';
-  filterBtn.appendChild(iconSpan('jlv-tbtn__ic', ICON_FILTER));
+  filterBtn.appendChild(iconSpan('jlv-btn-ic', ICON_FILTER));
   filterBtn.appendChild(document.createTextNode('筛选'));
+
   const customizeBtn = document.createElement('button');
-  customizeBtn.className = 'jlv-tbtn';
+  customizeBtn.type = 'button';
+  customizeBtn.className = 'jlv-btn';
   customizeBtn.title = '字段显示定制（显隐/排序/固定）';
-  customizeBtn.appendChild(iconSpan('jlv-tbtn__ic', ICON_COLUMNS));
+  customizeBtn.appendChild(iconSpan('jlv-btn-ic', ICON_COLUMNS));
   customizeBtn.appendChild(document.createTextNode('字段'));
 
-  /* 分组行：标题(文件+状态) / 搜索 / 操作 / 统计 */
-  const titleRow = document.createElement('div');
-  titleRow.className = 'jlv-col-title';
-  titleRow.appendChild(fileEl);
-  titleRow.appendChild(statusRootEl);
+  const rangeEl = document.createElement('span');
+  rangeEl.className = 'jlv-page-info';
 
-  const searchRow = document.createElement('div');
-  searchRow.className = 'jlv-col-search';
-  searchRow.appendChild(searchBox);
-  searchRow.appendChild(navGroup);
+  actions.append(filterBtn, customizeBtn, rangeEl);
+  root.appendChild(actions);
 
-  const actionRow = document.createElement('div');
-  actionRow.className = 'jlv-col-actions';
-  actionRow.appendChild(filterBtn);
-  actionRow.appendChild(customizeBtn);
-
-  const statsRow = document.createElement('div');
-  statsRow.className = 'jlv-topbar__stats';
-  statsRow.appendChild(statChip(totalLinesEl, ICON_LINES));
-  statsRow.appendChild(statChip(loadedEl, ICON_CHECK));
-  statsRow.appendChild(statChip(rangeEl, ICON_RANGE));
-  statsRow.appendChild(statChip(buildMsEl, ICON_CLOCK));
-
-  root.appendChild(titleRow);
-  root.appendChild(searchRow);
-  root.appendChild(actionRow);
-  root.appendChild(statsRow);
-
-  /* ---------------------- 过滤面板 ---------------------- */
+  /* ---------- 过滤面板（原型 .jlv-float-panel） ---------- */
   let filterPanel: HTMLElement | null = null;
-  const buildFilterPanel = (): HTMLElement => {
+  let panelFields: FieldOption[] = [];
+
+  const populateFieldSel = (fieldSel: HTMLSelectElement): void => {
+    fieldSel.textContent = '';
+    const none = document.createElement('option');
+    none.value = '';
+    none.textContent = '(全部字段)';
+    fieldSel.appendChild(none);
+    for (const f of panelFields) {
+      if (f.key.startsWith('$')) continue;
+      const o = document.createElement('option');
+      o.value = f.key;
+      o.textContent = f.key;
+      fieldSel.appendChild(o);
+    }
+  };
+
+  const panelShell = (
+    title: string,
+    anchor: HTMLElement,
+    onClose?: () => void
+  ): { panel: HTMLElement; close(): void } => {
     const panel = document.createElement('div');
-    panel.className = 'jlv-panel';
+    panel.className = 'jlv-float-panel';
+    // 定位：锚定触发按钮下方（fixed + 显式 top/left，防视口默认位置）
+    const rect = anchor.getBoundingClientRect();
+    panel.style.top = `${Math.min(rect.bottom + 6, window.innerHeight - 40)}px`;
+    panel.style.left = `${Math.max(4, Math.min(rect.left, window.innerWidth - 320))}px`;
+    const h3 = document.createElement('h3');
+    const titleSpan = document.createElement('span');
+    titleSpan.textContent = title;
+    const closeBtn = document.createElement('button');
+    closeBtn.type = 'button';
+    closeBtn.className = 'jlv-panel-close';
+    closeBtn.textContent = '✕';
+    closeBtn.title = '关闭';
+    h3.append(titleSpan, closeBtn);
+    panel.appendChild(h3);
+    document.body.appendChild(panel);
+    // 单实例复用：关闭仅淡出后隐藏（不移除 DOM），下次打开直接显示
+    const close = (): void => {
+      onClose?.();
+      panel.classList.add('closing');
+      setTimeout(() => {
+        panel.style.display = 'none';
+        panel.classList.remove('closing');
+      }, 100);
+    };
+    closeBtn.addEventListener('click', close);
+    return { panel, close };
+  };
 
+  const buildFilterPanel = (): void => {
+    const { panel, close } = panelShell('字段筛选', filterBtn, () => filterBtn.classList.remove('active'));
     const fieldSel = document.createElement('select');
-    fieldSel.className = 'jlv-depth';
     fieldSel.title = '字段';
+    populateFieldSel(fieldSel);
     const opSel = document.createElement('select');
-    opSel.className = 'jlv-depth';
     opSel.title = '运算符';
-    const valueInput = document.createElement('input');
-    valueInput.className = 'jlv-field';
-    valueInput.placeholder = '值';
-    valueInput.spellcheck = false;
-
     const OPS: Array<[string, FieldCondition['op']]> = [
       ['等于', 'eq'],
       ['包含', 'contains'],
@@ -204,9 +227,13 @@ export function createToolbar(host: HTMLElement, handlers: ToolbarHandlers = {})
       o.textContent = label;
       opSel.appendChild(o);
     }
+    const valueInput = document.createElement('input');
+    valueInput.type = 'text';
+    valueInput.placeholder = '值';
+    valueInput.spellcheck = false;
     const typeSel = document.createElement('select');
-    typeSel.className = 'jlv-depth';
     typeSel.title = '值类型';
+    typeSel.style.display = 'none';
     for (const t of ['string', 'number', 'boolean', 'null', 'object', 'array']) {
       const o = document.createElement('option');
       o.value = t;
@@ -215,15 +242,11 @@ export function createToolbar(host: HTMLElement, handlers: ToolbarHandlers = {})
     }
 
     const applyBtn = document.createElement('button');
-    applyBtn.className = 'jlv-tbtn';
+    applyBtn.className = 'jlv-btn-panel primary';
     applyBtn.textContent = '应用';
     const clearBtn = document.createElement('button');
-    clearBtn.className = 'jlv-tbtn';
+    clearBtn.className = 'jlv-btn-panel';
     clearBtn.textContent = '清除';
-    const closeBtn = document.createElement('button');
-    closeBtn.className = 'jlv-tbtn';
-    closeBtn.textContent = '✕';
-    closeBtn.title = '关闭';
 
     const syncTypeUI = (): void => {
       const op = opSel.value as FieldCondition['op'];
@@ -240,98 +263,84 @@ export function createToolbar(host: HTMLElement, handlers: ToolbarHandlers = {})
       const value = op === 'type' ? typeSel.value : valueInput.value;
       return { field, op, value };
     };
-    applyBtn.addEventListener('click', () => handlers.onApplyFilter?.(buildCond()));
-    clearBtn.addEventListener('click', () => handlers.onApplyFilter?.(null));
-    closeBtn.addEventListener('click', () => {
-      panel.style.display = 'none';
-      filterBtn.classList.remove('active');
+    applyBtn.addEventListener('click', () => {
+      handlers.onApplyFilter?.(buildCond());
+      close(); // close 内 onClose 会移除按钮 active（面板关闭即恢复样式）
+    });
+    clearBtn.addEventListener('click', () => {
+      handlers.onApplyFilter?.(null);
+      close();
     });
 
-    panel.appendChild(label('字段', fieldSel));
-    panel.appendChild(label('运算符', opSel));
-    panel.appendChild(label('值', valueInput));
-    panel.appendChild(label('类型', typeSel));
-    panel.appendChild(applyBtn);
-    panel.appendChild(clearBtn);
-    panel.appendChild(closeBtn);
+    panel.append(vlabel('字段', fieldSel), vlabel('运算符', opSel), vlabel('值', valueInput), vlabel('类型', typeSel));
+    const acts = document.createElement('div');
+    acts.className = 'jlv-panel-actions';
+    acts.append(clearBtn, applyBtn);
+    panel.appendChild(acts);
 
-    // 暴露给 setFields 填充
     (panel as unknown as { _fieldSel?: HTMLSelectElement })._fieldSel = fieldSel;
-    return panel;
+    filterPanel = panel;
   };
 
   filterBtn.addEventListener('click', () => {
-    if (!filterPanel) {
-      filterPanel = buildFilterPanel();
-      root.ownerDocument.body.appendChild(filterPanel);
-      // 定位到工具条下方
-      const r = root.getBoundingClientRect();
-      filterPanel.style.top = `${r.bottom}px`;
+    // 面板互斥：打开筛选时收起字段面板
+    if (layoutPanel && layoutPanel.style.display !== 'none') {
+      layoutPanel.style.display = 'none';
+      customizeBtn.classList.remove('active');
     }
-    const visible = filterPanel.style.display !== 'none';
-    filterPanel.style.display = visible ? 'none' : 'flex';
+    if (!filterPanel || !document.body.contains(filterPanel)) {
+      // 首次创建：直接显示（避免 display 状态误判导致需点两次）
+      buildFilterPanel();
+      const panel = filterPanel as HTMLElement;
+      panel.style.display = 'block';
+      filterBtn.classList.add('active');
+      return;
+    }
+    const panel = filterPanel as HTMLElement;
+    const visible = panel.style.display !== 'none';
+    panel.style.display = visible ? 'none' : 'block';
     filterBtn.classList.toggle('active', !visible);
   });
 
-  /* ---------------------- 字段定制面板 ---------------------- */
+  /* ---------- 字段定制面板 ---------- */
   let layoutPanel: HTMLElement | null = null;
-  let panelFields: FieldOption[] = [];
   let panelLayout: FieldLayout = { pinned: [], order: [], hidden: [], maxKeys: 4 };
 
-  const buildLayoutPanel = (): HTMLElement => {
-    const panel = document.createElement('div');
-    panel.className = 'jlv-panel';
-    panel.style.flexDirection = 'column';
-    panel.style.alignItems = 'stretch';
-    panel.style.maxHeight = '40vh';
-    panel.style.overflow = 'auto';
+  const buildLayoutPanel = (): void => {
+    const { panel, close } = panelShell('字段定制', customizeBtn, () => customizeBtn.classList.remove('active'));
 
     const head = document.createElement('div');
-    head.style.cssText = 'display:flex;align-items:center;gap:8px;';
+    head.className = 'jlv-panel-head';
     const maxLabel = label('展示字段数', document.createElement('input'));
     const maxInput = maxLabel.querySelector('input') as HTMLInputElement;
     maxInput.type = 'number';
     maxInput.min = '1';
     maxInput.max = '20';
-    maxInput.value = '4';
+    maxInput.value = String(panelLayout.maxKeys);
     maxInput.style.width = '56px';
-    head.appendChild(maxLabel);
-
     const restoreBtn = document.createElement('button');
-    restoreBtn.className = 'jlv-tbtn';
+    restoreBtn.className = 'jlv-btn';
     restoreBtn.textContent = '恢复默认';
-    const close2 = document.createElement('button');
-    close2.className = 'jlv-tbtn';
-    close2.textContent = '✕';
-    close2.title = '关闭';
-    head.appendChild(restoreBtn);
-    head.appendChild(close2);
+    head.append(maxLabel, restoreBtn);
     panel.appendChild(head);
 
     const list = document.createElement('div');
     list.className = 'jlv-layout-list';
     panel.appendChild(list);
 
-    const emit = (): void => {
-      const layout = readLayoutFromDom();
-      handlers.onApplyLayout?.(layout);
-    };
+    const emit = (): void => handlers.onApplyLayout?.(readLayoutFromDom());
     maxInput.addEventListener('change', emit);
     restoreBtn.addEventListener('click', () => onRestoreDefault());
-    close2.addEventListener('click', () => {
-      panel.style.display = 'none';
-      customizeBtn.classList.remove('active');
-    });
 
-    (panel as unknown as { _emit?: () => void; _list?: HTMLElement })._emit = emit;
+    (panel as unknown as { _emit?: () => void; _list?: HTMLElement; _maxInput?: HTMLInputElement })._emit = emit;
     (panel as unknown as { _list?: HTMLElement })._list = list;
-    // 由 setLayout 重建，这里不填充
-    return panel;
+    (panel as unknown as { _maxInput?: HTMLInputElement })._maxInput = maxInput;
+    layoutPanel = panel;
   };
 
   const readLayoutFromDom = (): FieldLayout => {
     const list = layoutPanel && ((layoutPanel as unknown as { _list?: HTMLElement })._list as HTMLElement);
-    const rows = list ? Array.from(list.querySelectorAll<HTMLElement >('.jlv-layout-row')) : [];
+    const rows = list ? Array.from(list.querySelectorAll<HTMLElement>('.jlv-layout-row')) : [];
     const pinned: string[] = [];
     const order: string[] = [];
     const hidden: string[] = [];
@@ -343,19 +352,18 @@ export function createToolbar(host: HTMLElement, handlers: ToolbarHandlers = {})
       else if (row.classList.contains('pinned')) pinned.push(key);
       else order.push(key);
     }
-    const maxInput = layoutPanel?.querySelector<HTMLInputElement>('input[type=number]');
+    const maxInput = layoutPanel && (layoutPanel as unknown as { _maxInput?: HTMLInputElement })._maxInput;
     const maxKeys = maxInput ? Number(maxInput.value) || 4 : panelLayout.maxKeys;
     return { pinned, order, hidden, maxKeys };
   };
 
   const onRestoreDefault = (): void => {
-    const layout = {
+    handlers.onApplyLayout?.({
       pinned: [],
       order: panelFields.map((f) => f.key),
       hidden: [],
       maxKeys: 4,
-    };
-    handlers.onApplyLayout?.(layout);
+    });
   };
 
   const rebuildLayoutRows = (): void => {
@@ -374,7 +382,7 @@ export function createToolbar(host: HTMLElement, handlers: ToolbarHandlers = {})
       seen.add(f.key);
       const isShown = shown.includes(f.key) && !hiddenSet.has(f.key);
       const row = document.createElement('label');
-      row.className = 'jlv-layout-row';
+      row.className = 'jlv-layout-row jlv-field-item';
       row.dataset.key = f.key;
 
       const cb = document.createElement('input');
@@ -386,7 +394,7 @@ export function createToolbar(host: HTMLElement, handlers: ToolbarHandlers = {})
 
       const pin = document.createElement('button');
       pin.type = 'button';
-      pin.className = 'jlv-tbtn jlv-pin';
+      pin.className = 'jlv-btn jlv-pin';
       pin.textContent = '📌';
       pin.title = '固定到最前';
       pin.classList.toggle('pinned', pinnedSet.has(f.key) && isShown);
@@ -397,7 +405,7 @@ export function createToolbar(host: HTMLElement, handlers: ToolbarHandlers = {})
 
       const upBtn = document.createElement('button');
       upBtn.type = 'button';
-      upBtn.className = 'jlv-tbtn';
+      upBtn.className = 'jlv-btn';
       upBtn.textContent = '↑';
       upBtn.title = '前移';
       upBtn.addEventListener('click', (e) => {
@@ -406,7 +414,7 @@ export function createToolbar(host: HTMLElement, handlers: ToolbarHandlers = {})
       });
       const downBtn = document.createElement('button');
       downBtn.type = 'button';
-      downBtn.className = 'jlv-tbtn';
+      downBtn.className = 'jlv-btn';
       downBtn.textContent = '↓';
       downBtn.title = '后移';
       downBtn.addEventListener('click', (e) => {
@@ -419,11 +427,7 @@ export function createToolbar(host: HTMLElement, handlers: ToolbarHandlers = {})
       name.textContent = f.key;
       name.title = f.type ? `${f.key} (${f.type})` : f.key;
 
-      row.appendChild(name);
-      row.appendChild(cb);
-      row.appendChild(pin);
-      row.appendChild(upBtn);
-      row.appendChild(downBtn);
+      row.append(name, cb, pin, upBtn, downBtn);
       list.appendChild(row);
     }
   };
@@ -458,24 +462,32 @@ export function createToolbar(host: HTMLElement, handlers: ToolbarHandlers = {})
   const applyLayoutToPanel = (layout: FieldLayout): void => {
     panelLayout = layout;
     rebuildLayoutRows();
-    const maxInput = layoutPanel?.querySelector<HTMLInputElement>('input[type=number]');
+    const maxInput = layoutPanel && (layoutPanel as unknown as { _maxInput?: HTMLInputElement })._maxInput;
     if (maxInput) maxInput.value = String(layout.maxKeys);
   };
 
   customizeBtn.addEventListener('click', () => {
-    if (!layoutPanel) {
-      layoutPanel = buildLayoutPanel();
-      root.ownerDocument.body.appendChild(layoutPanel);
-      rebuildLayoutRows();
-      const r = root.getBoundingClientRect();
-      layoutPanel.style.top = `${r.bottom}px`;
+    // 面板互斥：打开字段时收起筛选面板
+    if (filterPanel && filterPanel.style.display !== 'none') {
+      filterPanel.style.display = 'none';
+      filterBtn.classList.remove('active');
     }
-    const visible = layoutPanel.style.display !== 'none';
-    layoutPanel.style.display = visible ? 'none' : 'block';
+    if (!layoutPanel || !document.body.contains(layoutPanel)) {
+      // 首次创建：直接显示
+      buildLayoutPanel();
+      rebuildLayoutRows();
+      const panel = layoutPanel as HTMLElement;
+      panel.style.display = 'block';
+      customizeBtn.classList.add('active');
+      return;
+    }
+    const panel = layoutPanel as HTMLElement;
+    const visible = panel.style.display !== 'none';
+    panel.style.display = visible ? 'none' : 'block';
     customizeBtn.classList.toggle('active', !visible);
   });
 
-  /* --------------------- 概要栏 update / els --------------------- */
+  /* ---------- update / els ---------- */
   const els: ToolbarStatsEls = {
     fileNameEl,
     totalLinesEl,
@@ -488,40 +500,30 @@ export function createToolbar(host: HTMLElement, handlers: ToolbarHandlers = {})
 
   const update = (info: Partial<ToolbarInfo> & { fileName?: string }): void => {
     if (info.fileName !== undefined) fileNameEl.textContent = info.fileName;
-    if (info.totalLines !== undefined) {
-      totalLinesEl.textContent = `共 ${info.totalLines.toLocaleString('en-US')} 行`;
-    }
-    if (info.loadedLines !== undefined) {
-      loadedEl.textContent = `已解析 ${info.loadedLines.toLocaleString('en-US')} 行`;
-    }
-    if (info.range) {
-      rangeEl.textContent = `当前可见 ${info.range[0] + 1}–${info.range[1] + 1} 行`;
-    }
-    if (info.buildMs !== undefined) {
-      buildMsEl.textContent = `打开 ${formatMs(info.buildMs)}`;
-    }
+    if (info.totalLines !== undefined) totalLinesEl.textContent = ` · ${info.totalLines.toLocaleString('en-US')} 行`;
+    if (info.buildMs !== undefined) buildMsEl.textContent = ` · ${formatMs(info.buildMs)}`;
+    if (info.range) rangeEl.textContent = `${info.range[0] + 1}–${info.range[1] + 1}`;
     if (info.status) {
-      statusRootEl.className = `jlv-status ${info.status === 'ready' ? 'ready' : info.status === 'error' ? 'error' : ''}`;
+      statusRootEl.className = `jlv-sub ${info.status === 'ready' ? 'ready' : info.status === 'error' ? 'error' : ''}`;
       statusEl.textContent = info.statusText ?? statusText(info.status);
     }
   };
 
-  /* --------------------- Task 6 对外控制器 --------------------- */
   host.appendChild(root);
 
-  // 搜索防抖（300ms）+ 清除 + 导航
+  /* ---------- 搜索交互 ---------- */
   if (typeof handlers.onSearch === 'function') {
     let timer: ReturnType<typeof setTimeout> | undefined;
-    search.addEventListener('input', () => {
+    searchInputEl.addEventListener('input', () => {
       updateClear();
       if (timer) clearTimeout(timer);
-      timer = setTimeout(() => handlers.onSearch?.(search.value), 300);
+      timer = setTimeout(() => handlers.onSearch?.(searchInputEl.value), 300);
     });
     searchClear.addEventListener('click', () => {
-      search.value = '';
+      searchInputEl.value = '';
       updateClear();
       handlers.onSearch?.('');
-      search.focus();
+      searchInputEl.focus();
     });
   }
   prevBtn.addEventListener('click', () => handlers.onSearchPrev?.());
@@ -529,37 +531,20 @@ export function createToolbar(host: HTMLElement, handlers: ToolbarHandlers = {})
 
   const setFields = (fields: readonly FieldOption[] | null): void => {
     panelFields = fields ? [...fields] : [];
-    // 填充过滤字段下拉
     const fieldSel = filterPanel && (filterPanel as unknown as { _fieldSel?: HTMLSelectElement })._fieldSel;
-    if (fieldSel) {
-      fieldSel.textContent = '';
-      const none = document.createElement('option');
-      none.value = '';
-      none.textContent = '(全部字段)';
-      fieldSel.appendChild(none);
-      for (const f of panelFields) {
-        if (f.key.startsWith('$')) continue; // 过滤用真实字段
-        const o = document.createElement('option');
-        o.value = f.key;
-        o.textContent = f.key;
-        fieldSel.appendChild(o);
-      }
-    }
+    if (fieldSel) populateFieldSel(fieldSel);
     if (layoutPanel) {
-      // 合并进新推断字段（保留既有定制，剔除不存在字段）
       panelLayout = trimLayoutToFields(panelLayout, new Set(panelFields.map((f) => f.key)));
       rebuildLayoutRows();
     }
   };
 
-  const trimLayoutToFields = (layout: FieldLayout, known: Set<string>): FieldLayout => {
-    return {
-      pinned: layout.pinned.filter((k) => known.has(k)),
-      order: layout.order.filter((k) => known.has(k)),
-      hidden: layout.hidden.filter((k) => known.has(k)),
-      maxKeys: layout.maxKeys,
-    };
-  };
+  const trimLayoutToFields = (layout: FieldLayout, known: Set<string>): FieldLayout => ({
+    pinned: layout.pinned.filter((k) => known.has(k)),
+    order: layout.order.filter((k) => known.has(k)),
+    hidden: layout.hidden.filter((k) => known.has(k)),
+    maxKeys: layout.maxKeys,
+  });
 
   const setLayout = (layout: FieldLayout): void => {
     panelLayout = layout;
@@ -586,7 +571,7 @@ export function createToolbar(host: HTMLElement, handlers: ToolbarHandlers = {})
     els,
     update,
     refresh: () => update({}),
-    searchInput: () => document.querySelector<HTMLInputElement>('.jlv-search') ?? search,
+    searchInput: () => document.querySelector<HTMLInputElement>('.jlv-search input') ?? searchInputEl,
     setFields,
     setLayout,
     setSearchResult,
@@ -598,6 +583,16 @@ export function createToolbar(host: HTMLElement, handlers: ToolbarHandlers = {})
 function label(text: string, control: HTMLElement): HTMLElement {
   const wrap = document.createElement('label');
   wrap.className = 'jlv-ctrl-label';
+  const t = document.createElement('span');
+  t.textContent = text;
+  wrap.appendChild(t);
+  wrap.appendChild(control);
+  return wrap;
+}
+
+/** 纵向标签（筛选面板：字段名在上、控件在下，占满宽度）。 */
+function vlabel(text: string, control: HTMLElement): HTMLElement {
+  const wrap = document.createElement('label');
   const t = document.createElement('span');
   t.textContent = text;
   wrap.appendChild(t);
@@ -625,9 +620,6 @@ function statusText(s: ToolbarInfo['status']): string {
   }
 }
 
-/* -------------------------- 内联 SVG 图标 -------------------------- */
-
-/** 携带 class 的图标容器（innerHTML 注入内联 SVG，跟随 currentColor）。 */
 function iconSpan(className: string, svg: string): HTMLElement {
   const s = document.createElement('span');
   s.className = className;
@@ -635,17 +627,6 @@ function iconSpan(className: string, svg: string): HTMLElement {
   return s;
 }
 
-/** 统计芯片：图标 + 值宿主。 */
-function statChip(valueEl: HTMLElement, svg: string): HTMLElement {
-  const chip = document.createElement('span');
-  chip.className = 'jlv-stat-chip';
-  chip.appendChild(iconSpan('jlv-stat-chip__ic', svg));
-  chip.appendChild(valueEl);
-  return chip;
-}
-
-const ICON_FILE =
-  '<svg width="14" height="14" viewBox="0 0 16 16"><path d="M9 1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V5L9 1z" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M9 1v4h4" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>';
 const ICON_SEARCH =
   '<svg width="12" height="12" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M10.5 10.5L14 14" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>';
 const ICON_CLEAR =
@@ -654,11 +635,3 @@ const ICON_FILTER =
   '<svg width="12" height="12" viewBox="0 0 16 16"><path d="M2 4h12M5 8h6M8 12h3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>';
 const ICON_COLUMNS =
   '<svg width="12" height="12" viewBox="0 0 16 16"><rect x="2" y="2" width="5" height="12" rx="1" fill="none" stroke="currentColor" stroke-width="1.2"/><rect x="9" y="2" width="5" height="8" rx="1" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>';
-const ICON_LINES =
-  '<svg width="12" height="12" viewBox="0 0 16 16"><path d="M2 4.5h12M2 8h12M2 11.5h8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>';
-const ICON_CHECK =
-  '<svg width="12" height="12" viewBox="0 0 16 16"><path d="M2.5 8.5l3.2 3L13.5 4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>';
-const ICON_RANGE =
-  '<svg width="12" height="12" viewBox="0 0 16 16"><path d="M2 5.5L6 3M14 5.5L10 3M2 10.5L6 13M14 10.5L10 13" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>';
-const ICON_CLOCK =
-  '<svg width="12" height="12" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.5" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M8 4.5V8l2.2 1.4" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>';

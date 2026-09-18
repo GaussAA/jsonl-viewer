@@ -1,0 +1,1357 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>JSONL Viewer — 交互原型 v2</title>
+<style>
+  /* ============ 动效设计令牌 ============ */
+  :root {
+    --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1); /* 快启动、优雅减速 */
+    --dur-fast: 120ms;   /* 按压 / 状态反馈 */
+    --dur-base: 180ms;   /* 切换 / 弹出 */
+    --dur-slow: 280ms;   /* 入场 */
+  }
+
+  /* 新条目入场：从右侧逐个滑入（换页效果） */
+  @keyframes card-in {
+    from { opacity: 0; transform: translateX(42px); }
+    to   { opacity: 1; transform: translateX(0); }
+  }
+  /* 选中高亮条生长 */
+  @keyframes bar-grow {
+    from { transform: scaleY(0.4); opacity: 0.5; }
+    to   { transform: scaleY(1); opacity: 1; }
+  }
+  /* 浮层弹出：缩放 + 上浮 */
+  @keyframes pop-in {
+    from { opacity: 0; transform: translateY(4px) scale(0.96); }
+    to   { opacity: 1; transform: translateY(0) scale(1); }
+  }
+  @keyframes pop-out {
+    from { opacity: 1; transform: translateY(0) scale(1); }
+    to   { opacity: 0; transform: translateY(3px) scale(0.97); }
+  }
+  /* 右栏字段逐条出现：错峰淡入上浮 */
+  @keyframes row-in {
+    from { opacity: 0; transform: translateY(3px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+  /* 复制成功脉冲 */
+  @keyframes copy-pulse {
+    0%   { transform: scale(0.8); }
+    60%  { transform: scale(1.15); }
+    100% { transform: scale(1); }
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; overflow: hidden; font-family: -apple-system, Segoe UI, system-ui, sans-serif; }
+  body { display: flex; background: #0d0d0f; color: #cccccc; font-size: 13px; }
+
+  /* 系统减弱动效：全部关闭 */
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+
+  /* 窄屏（<700px）：左右栏纵向堆叠 */
+  @media (max-width: 699px) {
+    body { flex-direction: column; overflow: auto; }
+    .col-list { width: 100% !important; flex: none; }
+    .col-detail { min-height: 400px; }
+  }
+
+  /* ============ 淡化滚动条 ============ */
+  *::-webkit-scrollbar { width: 6px; height: 6px; }
+  *::-webkit-scrollbar-track { background: transparent; }
+  *::-webkit-scrollbar-thumb {
+    background: rgba(255,255,255,0.14);
+    border-radius: 999px;
+  }
+  *::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.28); }
+  *::-webkit-scrollbar-thumb:active { background: rgba(255,255,255,0.4); }
+
+  /* ============ 左栏 ============ */
+  .col-list {
+    width: 340px; flex-shrink: 0; background: #1a1a1e;
+    display: flex; flex-direction: column;
+    padding: 14px 12px 10px 14px; gap: 10px; overflow: hidden;
+  }
+
+  /* 工具栏浮卡 */
+  .toolbar {
+    background: linear-gradient(180deg, rgba(255,255,255,0.035), rgba(255,255,255,0.01));
+    border: 1px solid rgba(255,255,255,0.07);
+    border-radius: 12px; padding: 14px; flex-shrink: 0;
+  }
+  .toolbar-header { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+  .toolbar-icon {
+    width: 26px; height: 26px; border-radius: 7px;
+    background: linear-gradient(135deg, #e5c07b, #c8a86a);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 12px; font-weight: 700; color: #1a1a1e; flex-shrink: 0;
+  }
+  .toolbar-title { flex: 1; min-width: 0; }
+  .toolbar-title .filename { font-size: 13px; font-weight: 600; color: #d4d4d4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .toolbar-title .sub { font-size: 10px; color: #666; display: flex; align-items: center; gap: 5px; margin-top: 2px; }
+  .dot-ok { width: 5px; height: 5px; border-radius: 50%; background: #7fdb8a; }
+
+  /* 搜索框 */
+  .search {
+    background: rgba(0,0,0,0.35); border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 8px; padding: 8px 12px;
+    display: flex; align-items: center; gap: 8px;
+    transition: border-color 0.15s, box-shadow 0.15s;
+  }
+  .search:focus-within { border-color: rgba(0,127,212,0.6); box-shadow: 0 0 0 2px rgba(0,127,212,0.18); }
+  .search input { flex: 1; min-width: 0; border: none; background: transparent; outline: none; color: #d4d4d4; font-size: 11px; font-family: inherit; }
+  .search input::placeholder { color: #555; }
+  .search-kbd { font-size: 9px; background: rgba(0,127,212,0.2); color: #88c0ff; padding: 2px 6px; border-radius: 4px; font-family: 'SF Mono', Consolas, monospace; }
+
+  /* 按钮行 — 自适应文本宽度（去掉 flex:1，自然宽度） */
+  .toolbar-actions { display: flex; align-items: center; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
+  .btn {
+    display: inline-flex; align-items: center; gap: 5px;
+    font-size: 11px; color: #aaa; padding: 5px 12px;
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.07);
+    border-radius: 6px; cursor: pointer; font-family: inherit;
+    width: auto; flex: none; /* 关键：内容自适应 */
+    transition: background 0.12s, border-color 0.12s, color 0.12s, transform 0.12s var(--ease-out-expo);
+  }
+  .btn:hover { background: rgba(255,255,255,0.07); color: #d4d4d4; }
+  .btn:active { transform: translateY(1px); }
+  .btn.active { background: rgba(0,127,212,0.2); border-color: rgba(0,127,212,0.4); color: #88c0ff; }
+
+  .page-info { font-size: 10px; color: #555; padding: 5px 10px; background: rgba(128,128,128,0.08); border-radius: 6px; font-family: 'SF Mono', Consolas, monospace; margin-left: auto; }
+
+  /* ============ 列表 ============ */
+  .list-wrap {
+    flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden;
+    display: flex; flex-direction: column; gap: 6px;
+    padding: 2px 6px 2px 0;
+  }
+
+  /* 卡片 */
+  .record-card {
+    background: rgba(255,255,255,0.018);
+    border: 1px solid rgba(255,255,255,0.05);
+    border-left: 3px solid transparent;
+    border-radius: 10px;
+    padding: 10px 12px;
+    margin-left: 6px;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s, border-left-color 0.15s, transform 0.1s;
+    position: relative;
+  }
+  /* ① 仅翻页时播入场（.card-enter 由 renderList(animate=true) 添加） */
+  .record-card.card-enter {
+    animation: card-in var(--dur-slow) var(--ease-out-expo) backwards;
+  }
+  /* 换页出口：旧条目逐个向左滑出消失 */
+  .record-card.leaving {
+    transform: translateX(-36px);
+    opacity: 0;
+    transition: transform 0.16s var(--ease-out-expo), opacity 0.16s var(--ease-out-expo);
+  }
+  .record-card:hover { background: rgba(255,255,255,0.032); border-color: rgba(255,255,255,0.09); transform: translateX(1px); }
+  .record-card.selected {
+    background: linear-gradient(90deg, rgba(0,127,212,0.28) 0%, rgba(0,127,212,0.08) 100%);
+    border: 1px solid rgba(0,127,212,0.45);
+    border-left: 3px solid #007fd4;
+  }
+  /* ② 选中：左侧高亮条生长（伪元素覆盖在左边框上） */
+  .record-card.selected::before {
+    content: '';
+    position: absolute; left: -1px; top: 20%; bottom: 20%; width: 3px;
+    background: #007fd4;
+    border-radius: 0 3px 3px 0;
+    transform-origin: center;
+    animation: bar-grow var(--dur-base) var(--ease-out-expo);
+  }
+  .record-card.error { background: rgba(244,135,113,0.055); border: 1px solid rgba(244,135,113,0.18); }
+
+  .card-head { display: flex; align-items: center; gap: 7px; margin-bottom: 5px; }
+  .line-badge { font-family: 'SF Mono', Consolas, monospace; font-size: 10px; font-weight: 600; color: #555; }
+  .record-card.selected .line-badge { color: #ffffff; background: rgba(255,255,255,0.18); padding: 1px 7px; border-radius: 4px; }
+  .type-badge { font-size: 9px; padding: 1px 6px; border-radius: 4px; font-family: 'SF Mono', Consolas, monospace; }
+  .type-badge.object { background: rgba(127,219,138,0.15); color: #7fdb8a; }
+  .type-badge.array { background: rgba(229,192,123,0.15); color: #e5c07b; }
+  .type-badge.string { background: rgba(136,192,255,0.15); color: #88c0ff; }
+  .type-badge.error { background: rgba(244,135,113,0.15); color: #f48771; }
+
+  .card-preview { font-size: 10px; font-family: 'SF Mono', Consolas, monospace; color: #aaa; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 1.5; }
+  .record-card.selected .card-preview { color: #d0d0d0; }
+  .card-preview .str { color: #7fdb8a; }
+  .card-preview .num { color: #88c0ff; }
+  .card-preview .bool { color: #c586c0; }
+  .card-preview .key { color: #c8a86a; }
+  .card-preview.error-text { color: #f48771; white-space: normal; }
+
+  /* ============ 分页条（两行布局，任何宽度下都不溢出） ============ */
+  .pager {
+    display: flex; flex-direction: column; gap: 6px;
+    padding: 8px 8px 8px 10px; margin-left: 6px;
+    font-size: 10px; color: #555; flex-shrink: 0;
+  }
+  /* 第一行：导航 + 页码窗口 */
+  .pager-nav {
+    display: flex; align-items: center; gap: 1px;
+  }
+  .pager-btn {
+    width: 26px; height: 22px; padding: 0; background: rgba(255,255,255,0.04);
+    border: none; border-radius: 5px; cursor: pointer;
+    color: #888; font-family: inherit; font-size: 11px; font-weight: 500;
+    display: inline-flex; align-items: center; justify-content: center;
+    transition: background 0.1s, color 0.1s, border-color 0.1s;
+    flex-shrink: 0;
+  }
+  /* 导航按钮（« ‹ › »）窄一点，页码按钮统一 26px 双字符位 */
+  .pager-btn:hover:not(:disabled):not(.active) { background: rgba(255,255,255,0.09); color: #d4d4d4; }
+  .pager-btn:active:not(:disabled):not(.active) { background: rgba(255,255,255,0.13); }
+  .pager-btn:disabled { opacity: 0.25; cursor: default; }
+  .pager-btn.active { background: rgba(0,127,212,0.25); color: #88c0ff; font-weight: 600; }
+  .pager-btn.nav { width: 20px; color: #777; font-size: 12px; }
+  .pager-ellipsis { width: 20px; text-align: center; color: #4a4a4a; font-size: 11px; flex-shrink: 0; user-select: none; }
+
+  /* 第二行：跳页 + 统计（靠右） */
+  .pager-side {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 8px;
+  }
+  .pager-summary { font-family: 'SF Mono', Consolas, monospace; white-space: nowrap; color: #666; }
+
+  /* 跳页输入：原生加减按钮样式化 */
+  .pager-input-wrap {
+    display: inline-flex; align-items: center; gap: 4px;
+    font-size: 10px; color: #555; white-space: nowrap;
+  }
+  .pager-input {
+    width: 34px; height: 22px; padding: 0; text-align: center;
+    background: rgba(0,0,0,0.3);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 4px; color: #aaa;
+    font-family: 'SF Mono', Consolas, monospace; font-size: 11px;
+    -moz-appearance: textfield;
+  }
+  .pager-input::-webkit-outer-spin-button,
+  .pager-input::-webkit-inner-spin-button {
+    -webkit-appearance: none; appearance: none; margin: 0; height: 100%;
+    background: rgba(255,255,255,0.04); border-left: 1px solid rgba(255,255,255,0.08);
+    cursor: pointer;
+  }
+  .pager-input::-webkit-inner-spin-button { width: 12px; }
+  .pager-input::-webkit-outer-spin-button { width: 12px; }
+  .pager-input::-webkit-inner-spin-button:hover,
+  .pager-input::-webkit-outer-spin-button:hover {
+    background: rgba(255,255,255,0.09);
+  }
+  .pager-input:focus { outline: none; border-color: rgba(0,127,212,0.5); box-shadow: 0 0 0 2px rgba(0,127,212,0.15); }
+
+  /* ============ 右栏 ============ */
+  .col-detail { flex: 1; background: #141418; padding: 14px 14px 10px 10px; display: flex; flex-direction: column; overflow: hidden; }
+
+  .detail-card { flex: 1; background: rgba(255,255,255,0.022); border: 1px solid rgba(255,255,255,0.05); border-radius: 12px; overflow: hidden; display: flex; flex-direction: column; min-height: 0; }
+
+  /* 卡片头部 */
+  .detail-header { background: rgba(0,0,0,0.28); padding: 12px 16px; display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; }
+  .dh-left { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1; overflow: hidden; }
+  .dh-line { font-family: 'SF Mono', Consolas, monospace; font-size: 11px; font-weight: 700; color: #88c0ff; background: rgba(136,192,255,0.15); padding: 3px 9px; border-radius: 5px; flex-shrink: 0; }
+  .dh-src { font-family: 'SF Mono', Consolas, monospace; font-size: 10px; color: #555; flex-shrink: 0; }
+  .dh-divider { color: #333; flex-shrink: 0; }
+  .dh-crumb { font-family: 'SF Mono', Consolas, monospace; font-size: 11px; color: #555; display: flex; align-items: center; gap: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .crumb-seg { color: #c8a86a; cursor: pointer; padding: 1px 5px; border-radius: 3px; transition: background 0.12s; }
+  .crumb-seg:hover { background: rgba(255,255,255,0.06); }
+  .crumb-seg.current { color: #88c0ff; background: rgba(136,192,255,0.15); }
+  .crumb-sep { opacity: 0.35; }
+
+  .dh-tools { display: flex; gap: 4px; flex-shrink: 0; }
+  .dh-tool { width: 28px; height: 28px; background: rgba(255,255,255,0.05); border: 1px solid transparent; border-radius: 6px; display: flex; align-items: center; justify-content: center; cursor: pointer; color: #aaa; transition: background 0.12s, color 0.12s, border-color 0.12s, transform 0.12s var(--ease-out-expo); }
+  .dh-tool:hover { background: rgba(255,255,255,0.1); color: #fff; border-color: rgba(255,255,255,0.08); }
+  .dh-tool:active { transform: scale(0.95); }
+  /* ⑥ 复制成功脉冲 */
+  .dh-tool.copy-pulse { animation: copy-pulse var(--dur-base) var(--ease-out-expo); }
+
+  /* 右栏头部记录徽标（Record #xx）轻弹反馈 */
+  @keyframes badge-pop {
+    from { transform: scale(0.92); opacity: 0.5; }
+    to   { transform: scale(1); opacity: 1; }
+  }
+  .dh-line { display: inline-block; }
+  .dh-line.pop { animation: badge-pop var(--dur-base) var(--ease-out-expo); }
+
+  /* JSON 树 */
+  .tree-body { flex: 1; padding: 16px 20px 20px; overflow-y: auto; font-family: 'SF Mono', Consolas, monospace; font-size: 12px; line-height: 1.85; }
+  /* ⑤ 切换记录：右栏字段逐条出现（舒缓错峰淡入上浮） */
+  .tree-body.animating .tree-row { animation: row-in 420ms var(--ease-out-expo) backwards; }
+  .tree-row { display: flex; align-items: baseline; gap: 4px; padding: 3px 6px; border-radius: 5px; cursor: pointer; transition: background 0.1s; }
+  .tree-row:hover { background: rgba(255,255,255,0.04); }
+  .tree-row.selected { background: rgba(0,127,212,0.1); }
+  /* Toggler：SVG chevron，展开时旋转 90°（▶ → ▼） */
+  .toggler {
+    width: 14px; height: 14px; color: #888; flex-shrink: 0;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 0; border-radius: 3px;
+    transition: color 0.12s;
+  }
+  .tree-row:hover .toggler { color: #ccc; }
+  .toggler svg {
+    transition: transform 150ms var(--ease-out-expo);
+    transform: rotate(0deg);
+  }
+  .tree-row.open .toggler svg { transform: rotate(90deg); }
+  .tree-row .key { color: #e5c07b; }
+  .tree-row .colon { color: #555; flex-shrink: 0; }
+
+  /* 值：强制单行 + 溢出省略 */
+  .tree-row .val { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  .tree-row .val.str { color: #7fdb8a; }
+  .tree-row .val.num { color: #88c0ff; }
+  .tree-row .val.bool { color: #c586c0; }
+  .tree-row .val.null { color: #e0a36a; font-style: italic; }
+  .tree-row .val.container { color: #777; font-style: italic; }
+  .tree-row .idx { color: #88c0ff; opacity: 0.75; flex-shrink: 0; }
+
+  /* 子树块：抽屉式展开/收起（JS 测量高度 + 内联样式过渡，跨环境可靠） */
+  .tree-block-inner {
+    margin-left: 14px;      /* 缩进 */
+    padding-left: 10px;
+    border-left: 1px solid rgba(255,255,255,0.06); /* 竖向导引线随展开绘制 */
+    overflow: hidden;
+  }
+
+  .empty-hint { color: #555; font-style: italic; text-align: center; padding: 60px 20px; }
+  .tree-error { color: #f48771; text-align: center; padding: 40px 20px; line-height: 1.6; }
+
+  /* ============ 筛选 / 字段浮层面板 ============ */
+  .float-panel {
+    position: fixed; z-index: 50;
+    background: #1a1a1e; border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 12px; box-shadow: 0 12px 40px rgba(0,0,0,0.5), 0 2px 8px rgba(0,0,0,0.3);
+    padding: 16px; min-width: 280px; max-width: 360px;
+    font-size: 12px; color: #ccc;
+    /* ③ 弹出：缩放 + 上浮 */
+    transform-origin: top left;
+    animation: pop-in var(--dur-base) var(--ease-out-expo);
+  }
+  .float-panel.closing {
+    animation: pop-out var(--dur-fast) ease-in forwards;
+  }
+  .float-panel h3 { font-size: 13px; font-weight: 600; color: #e0e0e0; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
+  .float-panel h3 .close-panel {
+    margin-left: auto; width: 22px; height: 22px; border-radius: 5px;
+    background: rgba(255,255,255,0.04); border: none; cursor: pointer;
+    color: #888; font-size: 14px; display: flex; align-items: center; justify-content: center;
+  }
+  .float-panel h3 .close-panel:hover { background: rgba(255,255,255,0.1); color: #fff; }
+  /* 表单 label：只影响筛选面板的字段/运算符/值，不影响 .field-item */
+  .float-panel > label:not(.field-item),
+  .float-panel label.form-label { display: flex; flex-direction: column; gap: 4px; font-size: 11px; color: #888; margin-bottom: 10px; }
+  .float-panel select, .float-panel input[type="text"], .float-panel input[type="number"] {
+    background: rgba(0,0,0,0.35); border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 6px; padding: 6px 28px 6px 10px; color: #d4d4d4; font-size: 12px; font-family: inherit;
+    /* 自定义下拉箭头 */
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6'><path d='M0 0l5 6 5-6z' fill='%23555'/></svg>");
+    background-repeat: no-repeat; background-position: right 8px center; appearance: none; -webkit-appearance: none;
+    cursor: pointer;
+  }
+  .float-panel select:focus, .float-panel input:focus { outline: none; border-color: rgba(0,127,212,0.5); box-shadow: 0 0 0 2px rgba(0,127,212,0.15); }
+  /* select 下拉选项（深色主题适配） */
+  .float-panel select option { background: #1a1a1e; color: #d4d4d4; padding: 6px 10px; }
+  .float-panel select option:checked { background: rgba(0,127,212,0.25); color: #88c0ff; }
+  .float-panel .panel-actions { display: flex; gap: 6px; margin-top: 14px; }
+  .float-panel .btn-panel {
+    flex: 1; padding: 7px 12px; font-size: 12px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.1);
+    background: rgba(255,255,255,0.04); color: #d4d4d4; cursor: pointer; font-family: inherit;
+    transition: background 0.12s;
+  }
+  .float-panel .btn-panel:hover { background: rgba(255,255,255,0.08); }
+  .float-panel .btn-panel.primary { background: rgba(0,127,212,0.2); border-color: rgba(0,127,212,0.35); color: #88c0ff; }
+  .float-panel .btn-panel.primary:hover { background: rgba(0,127,212,0.3); }
+  .float-panel hr { border: none; border-top: 1px solid rgba(255,255,255,0.07); margin: 10px 0; }
+
+  /* 字段定制面板 — 多行列表（显式覆盖父级 label 的 flex-direction:column） */
+  .field-list { display: flex; flex-direction: column; gap: 4px; max-height: 300px; overflow-y: auto; margin-bottom: 8px; }
+  .field-item {
+    display: flex; flex-direction: row !important; align-items: center;
+    gap: 10px; padding: 7px 10px; border-radius: 6px; cursor: pointer;
+    transition: background 0.1s; margin-bottom: 0; /* 覆盖父 label 的 margin-bottom */
+  }
+  .field-item:hover { background: rgba(255,255,255,0.05); }
+  .field-item input[type="checkbox"] { flex-shrink: 0; accent-color: #007fd4; }
+  .field-item .field-name { flex: 1; font-family: 'SF Mono', Consolas, monospace; font-size: 11px; color: #e5c07b; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .field-item .field-type { font-size: 10px; color: #555; font-family: 'SF Mono', Consolas, monospace; }
+  .field-item .field-pin { font-size: 11px; cursor: pointer; opacity: 0.4; transition: opacity 0.15s; }
+  .field-item .field-pin.pinned { opacity: 1; }
+  .field-item .field-pin:hover { opacity: 1; }
+
+  /* 筛选激活态指示条（工具栏下方） */
+  .filter-active-badge {
+    display: inline-flex; align-items: center; gap: 6px; font-size: 10px;
+    padding: 4px 10px; background: rgba(0,127,212,0.15); border: 1px solid rgba(0,127,212,0.3);
+    border-radius: 6px; color: #88c0ff; margin-top: 8px;
+  }
+  .filter-active-badge button {
+    margin-left: auto; background: none; border: none; color: #88c0ff; cursor: pointer; font-size: 12px; padding: 0 2px;
+  }
+  .filter-active-badge button:hover { color: #fff; }
+
+</style>
+</head>
+<body>
+
+<!-- ============ 左栏 ============ -->
+<aside class="col-list" id="leftCol">
+  <!-- 工具栏 -->
+  <div class="toolbar" id="toolbar">
+    <div class="toolbar-header">
+      <div class="toolbar-icon">J</div>
+      <div class="toolbar-title">
+        <div class="filename">large_100k.jsonl</div>
+        <div class="sub"><span class="dot-ok"></span>100,000 行 · 128ms</div>
+      </div>
+    </div>
+    <div class="search">
+      <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="#555" stroke-width="1.4"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14" stroke-linecap="round"/></svg>
+      <input type="text" placeholder="搜索记录…" id="searchInput">
+      <span class="search-kbd">⌘K</span>
+    </div>
+    <div class="toolbar-actions">
+      <button class="btn" id="filterBtn">
+        <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 4h12M5 8h6M8 12h3" stroke-linecap="round"/></svg>
+        筛选
+      </button>
+      <button class="btn" id="fieldsBtn">
+        <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><rect x="2" y="2" width="5" height="12" rx="1"/><rect x="9" y="2" width="5" height="8" rx="1"/></svg>
+        字段
+      </button>
+      <div class="page-info" id="pageInfo">1–20</div>
+    </div>
+    <div id="filterBadge" style="display:none;"></div>
+  </div>
+
+  <!-- 列表 -->
+  <div class="list-wrap" id="listWrap"></div>
+
+  <!-- 分页条（动态渲染，支持 10 页） -->
+  <div class="pager" id="pager"></div>
+</aside>
+
+<!-- ============ 右栏 ============ -->
+<main class="col-detail">
+  <div class="detail-card">
+    <div class="detail-header">
+      <div class="dh-left">
+        <span class="dh-line" id="dhLine">Record #—</span>
+        <span class="dh-src" id="dhSrc">—</span>
+        <span class="dh-divider">·</span>
+        <div class="dh-crumb" id="dhCrumb"><span class="crumb-seg current">$</span></div>
+      </div>
+      <div class="dh-tools">
+        <div class="dh-tool" id="expandAll" title="全部展开">
+          <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 3h12M2 7h12M6 11h4" stroke-linecap="round"/><path d="M8 11l-1.5 1.5L8 14l1.5-1.5z" fill="currentColor"/></svg>
+        </div>
+        <div class="dh-tool" id="collapseAll" title="全部折叠">
+          <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 5h12M2 9h12M2 13h12" stroke-linecap="round"/></svg>
+        </div>
+        <div class="dh-tool" id="copyJson" title="复制 JSON">
+          <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><rect x="5" y="5" width="8" height="9" rx="1.2"/><path d="M11 2.5H4.5A1.5 1.5 0 0 0 3 4v7.5" stroke-linecap="round"/></svg>
+        </div>
+      </div>
+    </div>
+    <div class="tree-body" id="treeBody">
+      <div class="empty-hint">← 点击左侧记录查看详情</div>
+    </div>
+  </div>
+</main>
+
+<script>
+/* ============================================================
+   完整交互原型 v2
+   ============================================================ */
+
+// ============ 模拟数据生成（10 页 × 20 条 = 200 条 ============
+const TOTAL_PAGES = 100;
+const PAGE_SIZE = 20;
+
+function genRecord(pageIdx, idx) {
+  const realLine = pageIdx * PAGE_SIZE + idx + 1;
+  const isError = (realLine % 37 === 0 || realLine % 53 === 0);
+  const isLong = (realLine % 19 === 0); // 超长值演示
+  
+  if (isError) {
+    return { line: realLine, type: 'error', error: 'JSON 解析失败：预期属性键在第 12 字符位置，未闭合的引号或括号导致后续所有内容无法解析' };
+  }
+
+  const types = ['object', 'object', 'object', 'object', 'array', 'object', 'string'];
+  const type = types[realLine % types.length];
+
+  // 构造预览
+  const previewKeys = ['id', 'user', 'status', 'amount', 'category', 'created', 'meta', 'tags', 'score', 'level'];
+  const preview = previewKeys.slice(0, 3 + (realLine % 4)).map(k => {
+    if (k === 'id') return { k, v: realLine, kind: 'num' };
+    if (k === 'user') {
+      const val = `"user_${String(realLine).padStart(4,'0')}"${isLong ? '_very_long_username_that_will_overflow_the_container_width_demonstrating_ellipsis_truncation_behavior' : ''}`;
+      return { k, v: val, kind: 'str' };
+    }
+    if (k === 'status') {
+      const statuses = ['active', 'inactive', 'pending', 'banned', 'deleted', 'online'];
+      return { k, v: `"${statuses[realLine % statuses.length]}"`, kind: 'str' };
+    }
+    if (k === 'amount') return { k, v: (Math.random() * 200 - 100).toFixed(2), kind: 'num' };
+    if (k === 'category') return { k, v: `"cat_${realLine % 10}"`, kind: 'str' };
+    if (k === 'created') return { k, v: `"2024-07-${String((realLine % 28) + 1).padStart(2,'0')}T16:56:00Z"`, kind: 'str' };
+    if (k === 'score') return { k, v: (Math.random() * 100).toFixed(1), kind: 'num' };
+    return { k, v: '{…}', kind: 'container' };
+  });
+
+  return { line: realLine, type, preview };
+}
+
+// 生成 JSON 树示例（带长字段用于演示 overflow）
+function sampleJsonFor(line) {
+  const isLong = (line % 19 === 0);
+  return {
+    id: line,
+    user: `user_${String(line).padStart(4,'0')}${isLong ? '_very_long_username_that_will_overflow_the_container_width_demonstrating_ellipsis_truncation_behavior' : ''}`,
+    status: ['active', 'inactive', 'pending', 'banned'][line % 4],
+    category: `cat_${line % 10}`,
+    amount: (Math.random() * 200 - 100).toFixed(2),
+    score: (Math.random() * 100).toFixed(1),
+    created: `2024-07-${String((line % 28) + 1).padStart(2,'0')}T16:56:00Z`,
+    description: isLong
+      ? `This is a very long description field that should overflow the container and demonstrate text-overflow ellipsis behavior when the value exceeds the available width of the JSON tree column in the viewer interface.`
+      : 'short desc',
+    meta: {
+      topic: ['support', 'sales', 'ops', 'dev'][line % 4],
+      attempts: line % 15,
+      priority: ['low', 'medium', 'high', 'critical'][line % 4],
+      tags: ['important', 'review', 'waiting', 'done'][line % 4],
+      notes: isLong
+        ? `Additional metadata notes field that is intentionally made very long to test how the JSON viewer handles overflow in deeply nested object properties where line wrapping might not be desired.`
+        : '',
+      // 加深嵌套层级：演示全部展开/折叠的瀑布动画
+      metrics: {
+        latency: { p50: 12 + (line % 9), p95: 34 + (line % 9), unit: 'ms' },
+        errors: {
+          count: line % 7,
+          rate: 0.001,
+          last: { code: 500, msg: 'timeout', ts: '2024-07-01T10:00:00Z' },
+        },
+      },
+      flags: ['vip', 'beta'][line % 2],
+    },
+    tags: ['vip', 'beta', 'stable', 'experimental'][line % 4],
+  };
+}
+
+// ============ 状态 ============
+let currentPage = 0; // 0起
+let selectedLine = null;
+let expandedPaths = new Set(['$', '$.meta']);
+let activeFilter = null; // { field, op, value }
+let activeFields = ['id', 'user', 'status', 'amount', 'meta']; // 字段定制
+let searchQuery = ''; // 搜索关键字
+
+// ============ 渲染列表 ============
+// animate=true 仅翻页时传入：此时卡片才播错峰入场；搜索/选中不触发
+function renderList(animate = false) {
+  const wrap = document.getElementById('listWrap');
+  wrap.innerHTML = '';
+
+  let shown = 0;
+  for (let i = 0; i < PAGE_SIZE; i++) {
+    const rec = genRecord(currentPage, i);
+
+    // 搜索过滤：匹配行号/类型/预览文本
+    if (searchQuery) {
+      const hay = [
+        String(rec.line),
+        rec.type,
+        rec.error || '',
+        ...(rec.preview || []).map(p => String(p.v) + ' ' + p.k)
+      ].join(' ').toLowerCase();
+      if (!hay.includes(searchQuery.toLowerCase())) continue;
+    }
+
+    const card = document.createElement('div');
+    card.className = 'record-card';
+    if (rec.type === 'error') card.classList.add('error');
+    if (rec.line === selectedLine) card.classList.add('selected');
+    card.dataset.line = rec.line;
+    /* ① 仅翻页时错峰入场：最多 10 张 × 15ms */
+    if (animate) {
+      card.classList.add('card-enter');
+      card.style.animationDelay = Math.min(i, 10) * 15 + 'ms';
+    }
+
+    const head = document.createElement('div');
+    head.className = 'card-head';
+
+    const badge = document.createElement('span');
+    badge.className = 'line-badge';
+    badge.textContent = `L${rec.line}`;
+    head.appendChild(badge);
+
+    if (rec.type === 'error') {
+      const tb = document.createElement('span');
+      tb.className = 'type-badge error';
+      tb.textContent = 'error';
+      head.appendChild(tb);
+    } else {
+      const tb = document.createElement('span');
+      tb.className = `type-badge ${rec.type}`;
+      tb.textContent = rec.type;
+      head.appendChild(tb);
+      if (rec.type === 'object') {
+        const kb = document.createElement('span');
+        kb.className = 'type-badge string';
+        kb.textContent = `${rec.preview.length} keys`;
+        head.appendChild(kb);
+      }
+    }
+    card.appendChild(head);
+
+    const preview = document.createElement('div');
+    preview.className = 'card-preview';
+    preview.title = rec.type === 'error' ? rec.error : '';
+
+    if (rec.type === 'error') {
+      preview.classList.add('error-text');
+      preview.textContent = rec.error;
+    } else if (rec.preview) {
+      preview.innerHTML = rec.preview.slice(0, 4).map(p => {
+        const valHtml = p.kind === 'str'
+          ? `<span class="str">${p.v}</span>`
+          : p.kind === 'num'
+          ? `<span class="num">${p.v}</span>`
+          : p.kind === 'bool'
+          ? `<span class="bool">${p.v}</span>`
+          : `<span>${p.v}</span>`;
+        return `<span class="key">${p.k}</span>: ${valHtml}`;
+      }).join(' · ');
+    }
+    card.appendChild(preview);
+    card.addEventListener('click', () => selectRecord(rec));
+    wrap.appendChild(card);
+    shown++;
+  }
+
+  // 无匹配时显示空态
+  if (shown === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'empty-hint';
+    empty.textContent = searchQuery ? `无匹配「${searchQuery}」的记录` : '无记录';
+    wrap.appendChild(empty);
+  }
+
+  // 更新范围显示
+  const start = currentPage * PAGE_SIZE + 1;
+  const end = currentPage * PAGE_SIZE + PAGE_SIZE;
+  document.getElementById('pageInfo').textContent = `${start}–${end}`;
+}
+
+// ============ 窗口式页码算法 ============
+// 固定 7 槽位，任意页数下宽度恒定、首末页始终可达、当前页始终可见
+//  - 靠近首页： [1][2][3][4][5] … [N]
+//  - 靠近末页： [1] … [N-4][N-3][N-2][N-1][N]
+//  - 中间：     [1] … [p-1][p][p+1] … [N]
+// 页数 <= 7 时直接全部显示
+function pagerSlots(cur, total) {
+  if (total <= 7) return Array.from({ length: total }, (_, i) => i);
+  if (cur <= 3) {
+    return [0, 1, 2, 3, 4, '…', total - 1];
+  }
+  if (cur >= total - 4) {
+    return [0, '…', total - 5, total - 4, total - 3, total - 2, total - 1];
+  }
+  return [0, '…', cur - 1, cur, cur + 1, '…', total - 1];
+}
+
+// ============ 渲染分页条（固定布局，不随翻页抖动） ============
+function renderPager() {
+  const pager = document.getElementById('pager');
+  pager.innerHTML = '';
+
+  // ===== 第一行：导航 + 页码 =====
+  const nav = document.createElement('div');
+  nav.className = 'pager-nav';
+
+  // 首页 «
+  const first = document.createElement('button');
+  first.className = 'pager-btn nav';
+  first.textContent = '«';
+  first.title = '首页';
+  first.disabled = currentPage === 0;
+  first.addEventListener('click', () => { currentPage = 0; renderAll(); });
+  nav.appendChild(first);
+
+  // 上一页 ‹
+  const prev = document.createElement('button');
+  prev.className = 'pager-btn nav';
+  prev.textContent = '‹';
+  prev.title = '上一页';
+  prev.disabled = currentPage === 0;
+  prev.addEventListener('click', () => { if (currentPage > 0) { currentPage--; renderAll(); }});
+  nav.appendChild(prev);
+
+  // 页码 —— 窗口式：固定 7 槽位（首页 + 当前页±1 + 末页 + 省略号），任意页数宽度恒定
+  const slots = pagerSlots(currentPage, TOTAL_PAGES);
+  for (const s of slots) {
+    if (s === '…') {
+      const dot = document.createElement('span');
+      dot.className = 'pager-ellipsis';
+      dot.textContent = '…';
+      nav.appendChild(dot);
+    } else {
+      const btn = document.createElement('button');
+      btn.className = 'pager-btn' + (currentPage === s ? ' active' : '');
+      btn.textContent = String(s + 1);
+      btn.title = `第 ${s + 1} 页`;
+      btn.addEventListener('click', () => { currentPage = s; renderAll(); });
+      nav.appendChild(btn);
+    }
+  }
+
+  // 下一页 ›
+  const next = document.createElement('button');
+  next.className = 'pager-btn nav';
+  next.textContent = '›';
+  next.title = '下一页';
+  next.disabled = currentPage === TOTAL_PAGES - 1;
+  next.addEventListener('click', () => { if (currentPage < TOTAL_PAGES - 1) { currentPage++; renderAll(); }});
+  nav.appendChild(next);
+
+  // 末页 »
+  const last = document.createElement('button');
+  last.className = 'pager-btn nav';
+  last.textContent = '»';
+  last.title = '末页';
+  last.disabled = currentPage === TOTAL_PAGES - 1;
+  last.addEventListener('click', () => { currentPage = TOTAL_PAGES - 1; renderAll(); });
+  nav.appendChild(last);
+
+  pager.appendChild(nav);
+
+  // ===== 第二行：跳页 + 统计（靠右） =====
+  const side = document.createElement('div');
+  side.className = 'pager-side';
+
+  const wrap = document.createElement('span');
+  wrap.className = 'pager-input-wrap';
+
+  const label1 = document.createElement('span');
+  label1.textContent = '跳至';
+  wrap.appendChild(label1);
+
+  const input = document.createElement('input');
+  input.type = 'number';
+  input.className = 'pager-input';
+  input.min = '1';
+  input.max = String(TOTAL_PAGES);
+  input.value = String(currentPage + 1);
+  input.title = `输入 1-${TOTAL_PAGES} 之间的页码`;
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Enter') {
+      const n = Number(input.value);
+      if (n >= 1 && n <= TOTAL_PAGES) { currentPage = n - 1; renderAll(); }
+      else { input.value = String(currentPage + 1); }
+    }
+  });
+  input.addEventListener('change', () => {
+    const n = Number(input.value);
+    if (n >= 1 && n <= TOTAL_PAGES && n - 1 !== currentPage) {
+      currentPage = n - 1; renderAll();
+    } else {
+      input.value = String(currentPage + 1);
+    }
+  });
+  wrap.appendChild(input);
+
+  // 注意：不要用 innerHTML += ，会销毁动态创建的 input 导致监听器丢失
+  const sep = document.createElement('span');
+  sep.textContent = '·';
+  wrap.appendChild(sep);
+  const total = document.createElement('span');
+  total.textContent = `${TOTAL_PAGES} 页`;
+  wrap.appendChild(total);
+
+  side.appendChild(wrap);
+
+  const sum = document.createElement('div');
+  sum.className = 'pager-summary';
+  sum.textContent = `${PAGE_SIZE}/页 · ${TOTAL_PAGES * PAGE_SIZE} 行`;
+  side.appendChild(sum);
+
+  pager.appendChild(side);
+}
+
+// ============ 选中记录 + 渲染 JSON 树 ============
+function selectRecord(rec) {
+  // 同一记录重复点击：直接忽略，不重渲染、不重播动画
+  if (rec.line === selectedLine) return;
+  selectedLine = rec.line;
+  // 原位更新选中态：不整列重渲染，避免目录刷新抖动
+  document.querySelectorAll('.record-card').forEach(c =>
+    c.classList.toggle('selected', Number(c.dataset.line) === rec.line));
+  const treeData = sampleJsonFor(rec.line);
+
+  document.getElementById('dhLine').textContent = `Record #${rec.line}`;
+  popRecordBadge();
+  document.getElementById('dhSrc').textContent = `源 L${rec.line}`;
+  document.getElementById('dhCrumb').innerHTML = `<span class="crumb-seg current">$</span>`;
+
+  if (rec.type === 'error') {
+    document.getElementById('treeBody').innerHTML = `<div class="tree-error">⚠ ${rec.error}</div>`;
+    replayTreeAnim();
+    return;
+  }
+  expandedPaths = new Set(['$', '$.meta']);
+  renderTree(treeData);
+  replayTreeAnim();
+}
+
+// 记录徽标轻弹：切换记录时 Record #xx 有反馈
+function popRecordBadge() {
+  const el = document.getElementById('dhLine');
+  el.classList.remove('pop');
+  void el.offsetWidth;
+  el.classList.add('pop');
+}
+
+// 重新触发右栏逐条出现动画（切换记录时，舒缓错峰）
+function replayTreeAnim() {
+  const body = document.getElementById('treeBody');
+  body.classList.remove('animating');
+  // 每行设置错峰延迟：最多 10 行 × 30ms（舒缓节奏）
+  const rows = body.querySelectorAll('.tree-row');
+  rows.forEach((r, i) => { r.style.animationDelay = Math.min(i, 10) * 30 + 'ms'; });
+  void body.offsetWidth; // 强制 reflow，重置动画
+  body.classList.add('animating');
+}
+
+/* ============ JSON 树渲染 ============ */
+// 增量式：展开/折叠只动单个节点（SVG 箭头旋转 + 子块 grid 抽屉动画），不整树重建
+// 子节点懒构建：首次展开才建 DOM，收起后缓存保留，再次展开直接动画
+function renderTree(data) {
+  const body = document.getElementById('treeBody');
+  body.innerHTML = '';
+  const root = buildNode('$', data, '$');
+  body.appendChild(root);
+}
+
+// 构建子节点列表（懒构建时使用）
+// expSet：构建时的展开集；传 new Set() 表示全部按折叠态构建（瀑布展开时逐层动画）
+function buildChildren(value, inner, path, expSet) {
+  const entries = isArr(value)
+    ? value.map((v, i) => [String(i), v])
+    : Object.entries(value);
+  entries.forEach(([k, v]) => inner.appendChild(buildNode(k, v, `${path}.${k}`, expSet)));
+}
+function isArr(value) { return Array.isArray(value); }
+
+// 构建一个节点（DOM 容器），内含 header 行 + 子树块
+// expSet：可选，覆盖展开判定来源（默认全局 expandedPaths）
+function buildNode(key, value, path, expSet) {
+  const wrap = document.createElement('div');
+  const isContainer = value !== null && typeof value === 'object';
+  const kind = value === null ? 'null' : isArr(value) ? 'array' : typeof value;
+  const expanded = (expSet || expandedPaths).has(path);
+
+  // 头行
+  const row = document.createElement('div');
+  row.className = 'tree-row';
+  row.dataset.path = path;
+  if (expanded) row.classList.add('open');
+
+  // Toggler：SVG chevron，展开时旋转 90°（▶ → ▼）
+  const toggler = document.createElement('span');
+  toggler.className = 'toggler';
+  if (isContainer) {
+    toggler.innerHTML = '<svg viewBox="0 0 8 8" width="8" height="8" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 1.5l3 2.5-3 2.5"/></svg>';
+    if (expanded) toggler.firstElementChild.style.transform = 'rotate(90deg)'; // 初始展开态直接旋转
+  }
+  toggler.title = isContainer ? (expanded ? '收起' : '展开') : '';
+
+  const keyEl = document.createElement('span');
+  keyEl.className = isArr(value) && /^\d+$/.test(key) ? 'idx' : 'key';
+  keyEl.textContent = key;
+
+  const colon = document.createElement('span');
+  colon.className = 'colon';
+  colon.textContent = ':';
+
+  const valEl = document.createElement('span');
+  valEl.className = `val ${kind}`;
+  if (!isContainer) {
+    valEl.textContent = kind === 'string' ? `"${value}"` : String(value);
+    valEl.title = valEl.textContent.length > 40 ? valEl.textContent : '';
+  } else {
+    valEl.textContent = expanded
+      ? (isArr(value) ? '[' : '{')
+      : (isArr(value) ? `[ ${value.length} items ]` : `{ ${Object.keys(value).length} keys }`);
+  }
+
+  row.appendChild(toggler);
+  row.appendChild(keyEl);
+  row.appendChild(colon);
+  row.appendChild(valEl);
+  wrap.appendChild(row);
+
+  // 子树块：容器节点始终有块骨架，子节点懒构建（首次展开）
+  let block = null;
+  if (isContainer) {
+    block = document.createElement('div');
+    block.className = 'tree-block';
+    // 存数据引用：全部展开时用于懒构建未展开的子节点
+    block._value = value;
+    block._path = path;
+    const inner = document.createElement('div');
+    inner.className = 'tree-block-inner';
+    if (expanded) {
+      buildChildren(value, inner, path);
+      block.dataset.built = '1';
+      block.classList.add('open');
+      inner.style.opacity = '1'; // 初始展开直接显示，无动画
+    }
+    block.appendChild(inner);
+    wrap.appendChild(block);
+  }
+
+  // 增量式展开/折叠：JS 驱动抽屉动画 + 箭头旋转，只动这一行
+  row.addEventListener('click', e => {
+    e.stopPropagation();
+    if (!isContainer) return;
+    // 展开/折叠不是"切换记录"：去掉树体入场态，避免行重播逐条动画
+    document.getElementById('treeBody').classList.remove('animating');
+    const inner = block.querySelector('.tree-block-inner');
+    const svg = row.querySelector('.toggler svg');
+    if (expandedPaths.has(path)) {
+      // 收起：抽屉收回 + 箭头转回
+      expandedPaths.delete(path);
+      row.classList.remove('open');
+      block.classList.remove('open');
+      collapseBlock(inner);
+      if (svg) { svg.style.transition = 'transform 150ms cubic-bezier(0.16,1,0.3,1)'; svg.style.transform = 'rotate(0deg)'; }
+    } else {
+      // 展开：懒构建子节点，然后抽屉拉出 + 箭头旋转
+      if (block.dataset.built !== '1') {
+        buildChildren(value, inner, path);
+        block.dataset.built = '1';
+      }
+      expandedPaths.add(path);
+      row.classList.add('open');
+      block.classList.add('open');
+      expandBlock(inner);
+      if (svg) { svg.style.transition = 'transform 150ms cubic-bezier(0.16,1,0.3,1)'; svg.style.transform = 'rotate(90deg)'; }
+    }
+  });
+
+  return wrap;
+}
+
+// 展开动画：0 → scrollHeight 抽屉拉出 + 淡入（delayMs 用于全部展开的瀑布错峰）
+function expandBlock(inner, delayMs = 0) {
+  // 清理上一轮残留的 transitionend 监听（快速连点时避免累积）
+  if (inner._onEnd) inner.removeEventListener('transitionend', inner._onEnd);
+  // 规范模式：先禁用过渡建立起始态，再启用过渡设置目标态（避免起始态变化也触发过渡的竞态）
+  inner.style.transition = 'none';
+  inner.style.height = '0px';
+  inner.style.opacity = '0';
+  void inner.offsetWidth; // 应用起始态
+  const d = delayMs ? ` ${delayMs}ms` : '';
+  inner.style.transition = `height 200ms cubic-bezier(0.16,1,0.3,1)${d}, opacity 160ms ease-out${d}`;
+  inner.style.height = inner.scrollHeight + 'px';
+  inner.style.opacity = '1';
+  // 动画结束后恢复自动高度，容纳嵌套内容自由生长
+  const onEnd = e => {
+    if (e.propertyName !== 'height') return;
+    inner.style.height = 'auto';
+    inner.removeEventListener('transitionend', onEnd);
+    inner._onEnd = null;
+  };
+  inner._onEnd = onEnd;
+  inner.addEventListener('transitionend', onEnd);
+}
+
+// 收起动画：当前高度 → 0 抽屉收回 + 淡出（delayMs 用于全部折叠的瀑布错峰）
+function collapseBlock(inner, delayMs = 0) {
+  inner.style.transition = 'none';
+  inner.style.height = inner.scrollHeight + 'px'; // 若是 auto，先固化为像素
+  inner.style.opacity = '1';
+  void inner.offsetWidth; // 应用当前态
+  const d = delayMs ? ` ${delayMs}ms` : '';
+  inner.style.transition = `height 200ms cubic-bezier(0.16,1,0.3,1)${d}, opacity 160ms ease-out${d}`;
+  inner.style.height = '0px';
+  inner.style.opacity = '0';
+}
+
+// 全部展开：递归展开每个 block，按深度错峰瀑布
+function walkExpand(block, depth) {
+  if (!block) return;
+  const row = block.previousElementSibling;
+  if (!block.classList.contains('open')) {
+    // 懒构建未展开的子节点：按折叠态构建（空展开集），逐层瀑布展开动画
+    if (block.dataset.built !== '1' && block._value) {
+      buildChildren(block._value, block.querySelector('.tree-block-inner'), block._path, new Set());
+      block.dataset.built = '1';
+    }
+    block.classList.add('open');
+    row.classList.add('open');
+    expandBlock(block.querySelector('.tree-block-inner'), depth * 40);
+    const svg = row.querySelector('.toggler svg');
+    if (svg) { svg.style.transition = 'transform 150ms cubic-bezier(0.16,1,0.3,1)'; svg.style.transform = 'rotate(90deg)'; }
+  }
+  // 递归子 block：inner 的直接子元素是 wrap（row + block），取每个 wrap 的 block
+  const inner = block.querySelector('.tree-block-inner');
+  if (inner) {
+    Array.from(inner.children).forEach(w => {
+      const sub = w.lastElementChild;
+      if (sub && sub.classList.contains('tree-block')) walkExpand(sub, depth + 1);
+    });
+  }
+}
+
+// 全部折叠：递归收起每个非根 block，按深度错峰瀑布（根 $ 保持展开）
+function walkCollapse(block, depth) {
+  if (!block) return;
+  if (block.classList.contains('open') && block._path !== '$') {
+    const row = block.previousElementSibling;
+    block.classList.remove('open');
+    row.classList.remove('open');
+    collapseBlock(block.querySelector('.tree-block-inner'), depth * 40);
+    const svg = row.querySelector('.toggler svg');
+    if (svg) { svg.style.transition = 'transform 150ms cubic-bezier(0.16,1,0.3,1)'; svg.style.transform = 'rotate(0deg)'; }
+  }
+  // 递归子 block（父已收起也继续，让深层节点同步收回）
+  const inner = block.querySelector('.tree-block-inner');
+  if (inner) {
+    Array.from(inner.children).forEach(w => {
+      const sub = w.lastElementChild;
+      if (sub && sub.classList.contains('tree-block')) walkCollapse(sub, depth + 1);
+    });
+  }
+}
+
+// ============ 全部展开 / 全部折叠 ============
+document.getElementById('expandAll').addEventListener('click', () => {
+  if (!selectedLine) return;
+  // 增量式全部展开：每个 block 按深度错峰瀑布拉出，不再瞬时重建
+  document.getElementById('treeBody').classList.remove('animating');
+  expandedPaths = collectAllPaths(sampleJsonFor(selectedLine));
+  const rootBlock = document.getElementById('treeBody').firstElementChild?.querySelector('.tree-block');
+  if (rootBlock) walkExpand(rootBlock, 0);
+});
+document.getElementById('collapseAll').addEventListener('click', () => {
+  if (!selectedLine) return;
+  // 增量式全部折叠：每个非根 block 按深度错峰瀑布收回（根 $ 保持展开）
+  document.getElementById('treeBody').classList.remove('animating');
+  expandedPaths = new Set(['$']);
+  const rootBlock = document.getElementById('treeBody').firstElementChild?.querySelector('.tree-block');
+  if (rootBlock) walkCollapse(rootBlock, 0);
+});
+document.getElementById('copyJson').addEventListener('click', () => {
+  if (!selectedLine) return;
+  const text = JSON.stringify(sampleJsonFor(selectedLine), null, 2);
+  // 优先 Clipboard API；无焦点/权限失败时退回 textarea + execCommand
+  if (navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(text).catch(() => legacyCopy(text));
+  } else {
+    legacyCopy(text);
+  }
+  const btn = document.getElementById('copyJson');
+  const orig = btn.innerHTML;
+  btn.innerHTML = '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 8.5l3.2 3L13 4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  btn.style.color = '#7fdb8a';
+  /* ⑥ 确认脉冲 */
+  btn.classList.remove('copy-pulse');
+  void btn.offsetWidth;
+  btn.classList.add('copy-pulse');
+  setTimeout(() => {
+    btn.innerHTML = orig; btn.style.color = '';
+    btn.classList.remove('copy-pulse');
+  }, 1200);
+});
+function legacyCopy(text) {
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.cssText = 'position:fixed;opacity:0;pointer-events:none;';
+  document.body.appendChild(ta);
+  ta.select();
+  try { document.execCommand('copy'); } catch (e) { /* 忽略 */ }
+  ta.remove();
+}
+
+function collectAllPaths(obj, prefix = '$') {
+  const set = new Set([prefix]);
+  if (obj !== null && typeof obj === 'object') {
+    const entries = Array.isArray(obj) ? obj.map((v, i) => [String(i), v]) : Object.entries(obj);
+    entries.forEach(([k, v]) => {
+      if (v !== null && typeof v === 'object') {
+        const child = `${prefix}.${k}`;
+        set.add(child);
+        collectAllPaths(v, child).forEach(p => set.add(p));
+      }
+    });
+  }
+  return set;
+}
+
+// ============ 筛选面板 ============
+let filterPanelEl = null;
+function openFilterPanel() {
+  if (filterPanelEl && document.body.contains(filterPanelEl)) return closeFilterPanel();
+
+  const panel = document.createElement('div');
+  panel.className = 'float-panel';
+  panel.innerHTML = `
+    <h3>
+      <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 4h12M5 8h6M8 12h3" stroke-linecap="round"/></svg>
+      字段筛选
+      <button class="close-panel">✕</button>
+    </h3>
+    <label>
+      <span>字段</span>
+      <select id="f-field">
+        <option value="">选择字段…</option>
+        <option value="user">user</option>
+        <option value="status">status</option>
+        <option value="amount">amount</option>
+        <option value="category">category</option>
+        <option value="score">score</option>
+        <option value="priority">priority</option>
+      </select>
+    </label>
+    <label>
+      <span>运算符</span>
+      <select id="f-op">
+        <option value="eq">等于 (==)</option>
+        <option value="contains">包含 (contains)</option>
+        <option value="exists">存在 (exists)</option>
+        <option value="type">类型为 (type)</option>
+      </select>
+    </label>
+    <label id="f-val-label">
+      <span>值</span>
+      <input type="text" id="f-value" placeholder="输入值…">
+    </label>
+    <div class="panel-actions">
+      <button class="btn-panel" id="f-clear">清除</button>
+      <button class="btn-panel primary" id="f-apply">应用筛选</button>
+    </div>
+  `;
+
+  // 定位到工具栏下方
+  const tb = document.getElementById('toolbar');
+  const r = tb.getBoundingClientRect();
+  panel.style.left = `${r.left}px`;
+  panel.style.top = `${r.bottom + 8}px`;
+  document.body.appendChild(panel);
+  filterPanelEl = panel;
+
+  // 关闭
+  panel.querySelector('.close-panel').addEventListener('click', closeFilterPanel);
+  panel.addEventListener('click', e => e.stopPropagation());
+
+  // 运算符切换显示
+  const opSel = panel.querySelector('#f-op');
+  const valLabel = panel.querySelector('#f-val-label');
+  opSel.addEventListener('change', () => {
+    valLabel.style.display = opSel.value === 'exists' ? 'none' : '';
+  });
+
+  // 应用
+  panel.querySelector('#f-apply').addEventListener('click', () => {
+    const f = panel.querySelector('#f-field').value;
+    const op = opSel.value;
+    const val = panel.querySelector('#f-value').value;
+    if (!f) return;
+    activeFilter = { field: f, op, value: val };
+    document.getElementById('filterBtn').classList.add('active');
+    showFilterBadge();
+    closeFilterPanel();
+  });
+
+  // 清除
+  panel.querySelector('#f-clear').addEventListener('click', () => {
+    activeFilter = null;
+    document.getElementById('filterBtn').classList.remove('active');
+    hideFilterBadge();
+    closeFilterPanel();
+  });
+
+  // 点空白关闭
+  setTimeout(() => {
+    document.addEventListener('pointerdown', outsideCloseFilter, { once: true });
+  }, 0);
+}
+function outsideCloseFilter(e) {
+  if (filterPanelEl && !filterPanelEl.contains(e.target) && e.target !== document.getElementById('filterBtn')) closeFilterPanel();
+}
+// 关闭浮层：先播 100ms 淡出动画再移除
+function closeFilterPanel() {
+  if (filterPanelEl) {
+    const el = filterPanelEl;
+    el.classList.add('closing');
+    setTimeout(() => el.remove(), 100);
+    filterPanelEl = null;
+  }
+  document.getElementById('filterBtn').classList.toggle('active', !!activeFilter);
+}
+
+function showFilterBadge() {
+  const b = document.getElementById('filterBadge');
+  if (!activeFilter) return b.style.display = 'none';
+  b.innerHTML = `<span style="font-family: 'SF Mono', monospace;">${activeFilter.field} ${activeFilter.op} "${activeFilter.value || '(any)'}"</span><button title="清除">✕</button>`;
+  b.style.display = 'inline-flex';
+  b.querySelector('button').addEventListener('click', () => {
+    activeFilter = null;
+    document.getElementById('filterBtn').classList.remove('active');
+    b.style.display = 'none';
+  });
+}
+function hideFilterBadge() { document.getElementById('filterBadge').style.display = 'none'; }
+
+document.getElementById('filterBtn').addEventListener('click', openFilterPanel);
+
+// ============ 字段定制面板 ============
+let fieldsPanelEl = null;
+function openFieldsPanel() {
+  if (fieldsPanelEl && document.body.contains(fieldsPanelEl)) return closeFieldsPanel();
+
+  const ALL_FIELDS = [
+    { key: 'id', type: 'number', pinned: true },
+    { key: 'user', type: 'string', pinned: true },
+    { key: 'status', type: 'string', pinned: false },
+    { key: 'amount', type: 'number', pinned: false },
+    { key: 'category', type: 'string', pinned: false },
+    { key: 'score', type: 'number', pinned: false },
+    { key: 'created', type: 'date', pinned: false },
+    { key: 'description', type: 'string', pinned: false },
+    { key: 'meta', type: 'object', pinned: false },
+    { key: 'tags', type: 'array', pinned: false },
+  ];
+
+  const panel = document.createElement('div');
+  panel.className = 'float-panel';
+  panel.innerHTML = `
+    <h3>
+      <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><rect x="2" y="2" width="5" height="12" rx="1"/><rect x="9" y="2" width="5" height="8" rx="1"/></svg>
+      字段定制
+      <button class="close-panel">✕</button>
+    </h3>
+    <label style="flex-direction: row; align-items: center; gap: 10px;">
+      <span style="flex-shrink: 0;">每行展示字段数</span>
+      <input type="number" min="1" max="6" value="3" style="width: 48px;">
+    </label>
+    <div class="field-list" id="f-list"></div>
+    <hr>
+    <div class="panel-actions">
+      <button class="btn-panel" id="f-restore">恢复默认</button>
+    </div>
+  `;
+
+  const tb = document.getElementById('toolbar');
+  const r = tb.getBoundingClientRect();
+  panel.style.left = `${Math.min(r.left, window.innerWidth - 380)}px`;
+  panel.style.top = `${r.bottom + 8}px`;
+  document.body.appendChild(panel);
+  fieldsPanelEl = panel;
+
+  panel.querySelector('.close-panel').addEventListener('click', closeFieldsPanel);
+  panel.addEventListener('click', e => e.stopPropagation());
+
+  // 填充字段列表
+  const list = panel.querySelector('#f-list');
+  ALL_FIELDS.forEach(f => {
+    const item = document.createElement('label');
+    item.className = 'field-item';
+    item.innerHTML = `
+      <input type="checkbox" ${activeFields.includes(f.key) ? 'checked' : ''}>
+      <span class="field-name">${f.key}</span>
+      <span class="field-type">${f.type}</span>
+      <span class="field-pin ${f.pinned ? 'pinned' : ''}" title="置顶">📌</span>
+    `;
+    item.querySelector('input').addEventListener('change', () => {
+      activeFields = Array.from(list.querySelectorAll('.field-item'))
+        .filter(el => el.querySelector('input').checked)
+        .map(el => el.querySelector('.field-name').textContent);
+    });
+    list.appendChild(item);
+  });
+
+  panel.querySelector('#f-restore').addEventListener('click', () => {
+    activeFields = ['id', 'user', 'status', 'amount', 'meta'];
+    list.querySelectorAll('.field-item').forEach((el, i) => {
+      const cb = el.querySelector('input');
+      cb.checked = activeFields.includes(ALL_FIELDS[i].key);
+    });
+  });
+
+  setTimeout(() => {
+    document.addEventListener('pointerdown', outsideCloseFields, { once: true });
+  }, 0);
+}
+function outsideCloseFields(e) {
+  if (fieldsPanelEl && !fieldsPanelEl.contains(e.target) && e.target !== document.getElementById('fieldsBtn')) closeFieldsPanel();
+}
+// 关闭浮层：先播 100ms 淡出动画再移除
+function closeFieldsPanel() {
+  if (fieldsPanelEl) {
+    const el = fieldsPanelEl;
+    el.classList.add('closing');
+    setTimeout(() => el.remove(), 100);
+    fieldsPanelEl = null;
+  }
+  document.getElementById('fieldsBtn').classList.remove('active');
+}
+document.getElementById('fieldsBtn').addEventListener('click', () => {
+  const open = fieldsPanelEl && document.body.contains(fieldsPanelEl);
+  document.getElementById('fieldsBtn').classList.toggle('active', !open);
+  open ? closeFieldsPanel() : openFieldsPanel();
+});
+
+// ============ 统一重渲染（换页过渡） ============
+// 换页效果：旧条目从上到下逐个向左滑出消失，然后新条目从右逐个滑入
+let pageSeq = 0; // 防止快速连点时旧 setTimeout 覆盖新渲染
+function renderAll() {
+  const wrap = document.getElementById('listWrap');
+  const cards = wrap.querySelectorAll('.record-card');
+  const mySeq = ++pageSeq;
+
+  if (!cards.length) {
+    // 无旧卡片（首屏/搜索空）：直接渲染
+    renderList(true);
+    renderPager();
+    return;
+  }
+
+  // 阶段一：旧卡片逐个向左滑出（错峰 15ms × 最多 10 张）
+  cards.forEach((c, i) => {
+    c.classList.add('leaving');
+    c.style.transitionDelay = Math.min(i, 10) * 15 + 'ms';
+  });
+
+  // 阶段二：出口动画播完后重建，新卡片从右侧滑入
+  const exitMs = 160 + Math.min(cards.length, 10) * 15;
+  setTimeout(() => {
+    if (mySeq !== pageSeq) return; // 已被更新的翻页取代
+    renderList(true);
+    renderPager();
+  }, exitMs);
+}
+
+// ============ 搜索 ============
+document.getElementById('searchInput').addEventListener('input', e => {
+  searchQuery = e.target.value.trim();
+  renderList();
+});
+
+// ============ 初始化 ============
+renderAll();
+selectRecord(genRecord(0, 0));
+</script>
+</body>
+</html>
