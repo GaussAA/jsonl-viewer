@@ -739,7 +739,7 @@ function main(): void {
   // 软刷新 / 尺寸变化：重新渲染当前可视区。
   window.addEventListener('resize', () => list.refresh());
 
-  update();
+  updateToolbar();
 
   /* ---------- 生命周期清理 ----------
    * VS Code webview 关闭时不会自动调用任何 dispose 回调——
