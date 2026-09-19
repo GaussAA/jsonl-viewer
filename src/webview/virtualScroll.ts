@@ -44,12 +44,22 @@ export interface PageInfo {
   totalRows: number;
 }
 
-/** 窗口式页码：固定 7 槽位，任意页数下宽度恒定、首末页始终可达、当前页始终可见。 */
+/**
+ * 滑动窗口式页码：只显示 3 个连续页码按钮（+ 必要省略号）。
+ * 首页/尾页由两侧的 `«`/`»` 箭头按钮负责，这里不再重复显示第 1 页/末页数字按钮。
+ * 窗口随当前页滑动：翻页时整段 3 页窗口前移/后移一格。
+ */
+const WINDOW = 3;
 function pagerSlots(cur: number, total: number): Array<number | '…'> {
-  if (total <= 7) return Array.from({ length: total }, (_, i) => i);
-  if (cur <= 3) return [0, 1, 2, 3, 4, '…', total - 1];
-  if (cur >= total - 4) return [0, '…', total - 5, total - 4, total - 3, total - 2, total - 1];
-  return [0, '…', cur - 1, cur, cur + 1, '…', total - 1];
+  if (total <= 0) return [];
+  if (total <= WINDOW) return Array.from({ length: total }, (_, i) => i);
+  const lo = Math.max(0, Math.min(cur - 1, total - WINDOW)); // 窗口起点（尽量含当前页，扩展到 3 个）
+  const hi = lo + WINDOW - 1;
+  const out: Array<number | '…'> = [];
+  if (lo > 0) out.push('…'); // 窗口之前还有页 → 省略号
+  for (let i = lo; i <= hi; i++) out.push(i);
+  if (hi < total - 1) out.push('…'); // 窗口之后还有页 → 省略号
+  return out;
 }
 
 export class VirtualRecordList {
@@ -134,6 +144,38 @@ export class VirtualRecordList {
     }
     this.clampPage();
     this.render(true);
+  }
+
+  /**
+   * 选中真实行并保证其所在页可见；选中行已在当前页时**仅更新选中高亮**（不重建 DOM、不播换页动画）。
+   * 用于「上一条/下一条」逐条导航——避免每次导航都触发目录整体刷新动画。
+   * 无论同页/跨页，都会把选中项滚动进可视区（跟随移动）。
+   */
+  focus(line: number): void {
+    const d = this.displayPosOf(line);
+    if (d < 0) {
+      this.page = 0;
+      this.clampPage();
+      this.render(true);
+    } else {
+      const targetPage = Math.floor(d / this.pageSize);
+      if (targetPage !== this.page) {
+        // 跨页：正常播换页动画
+        this.page = targetPage;
+        this.render(true);
+      }
+    }
+    this.selectedLine = line;
+    this.applySelection();
+    // 把选中项滚动进可视区（rAF 等渲染完成后再滚动，避免被渲染重置）
+    const el = this.scrollEl.querySelector<HTMLElement>(`#jlv-opt-${line}`);
+    if (el && typeof el.scrollIntoView === 'function') {
+      if (this.disposed) return;
+      requestAnimationFrame(() => {
+        if (this.disposed || this.selectedLine !== line) return;
+        el.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+      });
+    }
   }
 
   getScrollTop(): number {

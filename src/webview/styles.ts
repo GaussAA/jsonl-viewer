@@ -95,7 +95,7 @@ body {
   color: var(--jlv-fg);
   background: var(--jlv-bg);
 }
-#app { display: flex; flex-direction: row; align-items: stretch; min-width: 0; }
+#app { display: flex; flex-direction: row; align-items: stretch; min-width: 0; position: relative; }
 
 /* 系统减弱动效：全部关闭 */
 @media (prefers-reduced-motion: reduce) {
@@ -127,6 +127,7 @@ body {
   background: transparent;
   overflow: hidden;
 }
+/* 收起/展开期间由 JS 注入 margin-right + opacity 过渡（内容宽度保持不变，右栏平滑跟随移动，且无 reflow 抖动） */
 
 /* 可拖拽分栏条（无硬分隔线：默认透明，hover 才显示拖拽指示） */
 .jlv-resizer {
@@ -138,6 +139,7 @@ body {
   touch-action: none;
   user-select: none;
   background: transparent;
+  transition: width var(--jlv-transition), flex-basis var(--jlv-transition), background var(--jlv-transition);
 }
 .jlv-resizer::after {
   content: '';
@@ -150,6 +152,63 @@ body {
 }
 .jlv-resizer:hover::after,
 .jlv-resizer.active::after { left: 1px; width: 3px; background: var(--jlv-focus); }
+
+/* resizer 上的折叠按钮 */
+.jlv-resizer__toggle {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 16px; height: 28px;
+  padding: 0;
+  border-radius: 6px;
+  border: 1px solid rgba(255,255,255,0.07);
+  background: rgba(255,255,255,0.04);
+  color: var(--jlv-dim);
+  display: inline-flex; align-items: center; justify-content: center;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--jlv-transition), background var(--jlv-transition), color var(--jlv-transition), border-color var(--jlv-transition);
+  z-index: 5;
+}
+.jlv-resizer:hover .jlv-resizer__toggle,
+.jlv-resizer.active .jlv-resizer__toggle { opacity: 1; }
+.jlv-resizer__toggle:hover { background: rgba(255,255,255,0.1); color: var(--jlv-fg); border-color: rgba(255,255,255,0.12); }
+.jlv-resizer__toggle svg { flex: none; }
+
+/* 左栏折叠态 */
+.jlv-col-list.collapsed {
+  flex-basis: 0 !important;
+  width: 0 !important;
+  min-width: 0 !important;
+  padding-left: 0;
+  padding-right: 0;
+  overflow: hidden;
+  gap: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* 折叠后的展开按钮（悬浮在右栏左边缘） */
+.jlv-col-list__expand {
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 22px; height: 48px;
+  padding: 0;
+  border-radius: 0 8px 8px 0;
+  border: 1px solid rgba(255,255,255,0.07);
+  border-left: none;
+  background: rgba(255,255,255,0.04);
+  color: var(--jlv-dim);
+  display: inline-flex; align-items: center; justify-content: center;
+  cursor: pointer;
+  z-index: 10;
+  transition: background var(--jlv-transition), color var(--jlv-transition), border-color var(--jlv-transition);
+}
+.jlv-col-list__expand:hover { background: rgba(255,255,255,0.1); color: var(--jlv-fg); border-color: rgba(255,255,255,0.12); }
+.jlv-col-list__expand svg { flex: none; }
 
 /* ---------------- 工具栏浮卡（原型 .toolbar） ---------------- */
 .jlv-toolbar {
@@ -275,24 +334,34 @@ body {
   transition: transform .16s var(--jlv-ease), opacity .16s var(--jlv-ease);
 }
 .jlv-record-card:hover { background: rgba(255,255,255,0.032); border-color: rgba(255,255,255,0.09); transform: translateX(1px); }
-/* 选中：主题标准高亮（亮蓝底 + 白字 + 左高亮条），非"高暗" */
+/* 选中：整张卡片背景变亮的高亮（实色蓝底 + 亮边框 + 左高亮条 + 外发光），保留语义配色并整体提亮 */
 .jlv-record-card.selected {
-  background: var(--jlv-selection);
-  color: var(--jlv-selection-fg);
-  border: 1px solid color-mix(in srgb, var(--jlv-selection-fg) 22%, transparent);
-  border-left: 3px solid var(--jlv-focus);
+  background: color-mix(in srgb, var(--jlv-info) 26%, var(--jlv-panel-bg));
+  color: var(--jlv-fg);
+  border: 1px solid var(--jlv-info);
+  border-radius: 10px;
+  border-left: 3px solid var(--jlv-info);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--jlv-info) 50%, transparent),
+    0 0 18px color-mix(in srgb, var(--jlv-info) 42%, transparent);
 }
-.jlv-record-card.selected .jlv-card-preview { color: var(--jlv-selection-fg); opacity: .88; }
-.jlv-record-card.selected .jlv-card-preview .key,
-.jlv-record-card.selected .jlv-card-preview .str,
-.jlv-record-card.selected .jlv-card-preview .num,
-.jlv-record-card.selected .jlv-card-preview .bool { color: var(--jlv-selection-fg); opacity: .9; }
-.jlv-record-card.selected .jlv-type-badge { color: var(--jlv-selection-fg); background: color-mix(in srgb, var(--jlv-selection-fg) 18%, transparent); }
+/* 保留各 token 的语义色，但整体提亮，让选中项在亮蓝底上更醒目 */
+.jlv-record-card.selected .jlv-card-preview { color: #ffffff; filter: brightness(1.35); }
+.jlv-record-card.selected .jlv-card-preview .str { color: var(--jlv-string); }
+.jlv-record-card.selected .jlv-card-preview .num { color: var(--jlv-number); }
+.jlv-record-card.selected .jlv-card-preview .bool { color: var(--jlv-bool); }
+.jlv-record-card.selected .jlv-card-preview .key { color: var(--jlv-key); }
+/* 类型徽章：提亮保留取色 */
+.jlv-record-card.selected .jlv-type-badge { filter: brightness(1.3); }
+.jlv-record-card.selected .jlv-type-badge.object { color: var(--jlv-good); }
+.jlv-record-card.selected .jlv-type-badge.array { color: var(--jlv-warn); }
+.jlv-record-card.selected .jlv-type-badge.string { color: var(--jlv-info); }
+.jlv-record-card.selected .jlv-type-badge.error { color: var(--jlv-bad); }
+.jlv-record-card.selected .jlv-type-badge.number { color: var(--jlv-number); }
 /* 选中：左高亮条生长 */
 .jlv-record-card.selected::before {
   content: '';
   position: absolute; left: -1px; top: 20%; bottom: 20%; width: 3px;
-  background: var(--jlv-focus);
+  background: var(--jlv-info);
   border-radius: 0 3px 3px 0;
   transform-origin: center;
   animation: jlv-bar-grow var(--jlv-dur-base) var(--jlv-ease);
@@ -302,8 +371,8 @@ body {
 .jlv-card-head { display: flex; align-items: center; gap: 7px; margin-bottom: 5px; }
 .jlv-line-badge { font-family: var(--jlv-mono); font-size: 10px; font-weight: 600; color: var(--jlv-dim); }
 .jlv-record-card.selected .jlv-line-badge {
-  color: var(--jlv-selection-fg);
-  background: color-mix(in srgb, var(--jlv-selection-fg) 18%, transparent);
+  color: #ffffff;
+  background: color-mix(in srgb, var(--jlv-info) 36%, var(--jlv-panel-bg));
   padding: 1px 7px; border-radius: 4px;
 }
 .jlv-type-badge { font-size: 9px; padding: 1px 6px; border-radius: 4px; font-family: var(--jlv-mono); }
@@ -457,38 +526,14 @@ body {
 .jlv-dh-tool:hover { background: rgba(255,255,255,0.1); color: var(--jlv-fg); border-color: rgba(255,255,255,0.08); }
 .jlv-dh-tool:active { transform: scale(.95); }
 .jlv-dh-tool.copy-pulse { animation: jlv-copy-pulse var(--jlv-dur-base) var(--jlv-ease); }
-
-/* 展开层级下拉（自绘） */
-.jlv-depth { position: relative; display: inline-flex; flex: none; }
-.jlv-depth__trigger {
-  display: inline-flex; align-items: center; gap: 5px;
-  padding: 0 7px; height: 28px;
-  font-family: inherit; font-size: 11px; color: var(--jlv-dim);
-  background: rgba(255,255,255,0.05); border: 1px solid transparent; border-radius: 6px;
-  cursor: pointer;
-  transition: border-color var(--jlv-transition), background var(--jlv-transition), color var(--jlv-transition);
+/* 展开/折叠切换按钮的高亮态（展开中） */
+.jlv-dh-tool.active {
+  background: color-mix(in srgb, var(--jlv-focus) 26%, transparent);
+  border-color: color-mix(in srgb, var(--jlv-focus) 55%, transparent);
+  color: var(--jlv-info);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--jlv-focus) 25%, transparent);
 }
-.jlv-depth__trigger:hover { background: rgba(255,255,255,0.1); color: var(--jlv-fg); border-color: rgba(255,255,255,0.08); }
-.jlv-depth__trigger svg { color: var(--jlv-dim); transition: transform var(--jlv-transition); }
-.jlv-depth.open .jlv-depth__trigger svg { transform: rotate(180deg); }
-.jlv-depth__menu {
-  position: absolute; top: calc(100% + 4px); right: 0; z-index: 30;
-  min-width: 100%; padding: 3px;
-  background: var(--jlv-panel-bg);
-  border: 1px solid var(--jlv-border);
-  border-radius: var(--jlv-radius-2);
-  box-shadow: var(--jlv-shadow-2);
-  display: flex; flex-direction: column;
-}
-.jlv-depth__item {
-  display: flex; align-items: center; gap: 6px; padding: 4px 10px;
-  border: none; border-radius: var(--jlv-radius-1); background: transparent;
-  color: var(--jlv-fg); font-family: inherit; font-size: var(--jlv-font-size-sm);
-  text-align: left; cursor: pointer; white-space: nowrap;
-  transition: background var(--jlv-transition);
-}
-.jlv-depth__item:hover { background: var(--jlv-card-hover); }
-.jlv-depth__item.selected { background: var(--jlv-selection); color: var(--jlv-selection-fg); font-weight: 600; }
+.jlv-dh-tool:disabled { opacity: .32; cursor: default; }
 
 /* ---------------- JSON 树（原型 .tree-body） ---------------- */
 .jlv-tree-body {

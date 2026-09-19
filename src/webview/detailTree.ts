@@ -47,6 +47,14 @@ type TreeNode = HTMLElement & TreeNodeMeta;
 /** Row HTMLElement + 缓存元数据。 */
 type TreeRow = HTMLElement & TreeRowMeta;
 
+/** 右栏头部工具的导航回调（上一条 / 下一条 JSON 条目）。 */
+export interface DetailTreeNavHandlers {
+  /** 切换到上一条 JSON 条目。 */
+  onPrevRecord?(): void;
+  /** 切换到下一条 JSON 条目。 */
+  onNextRecord?(): void;
+}
+
 export interface DetailTreeController {
   /** 面板根元素（`.jlv-col-detail`），供宿主放入布局。 */
   readonly root: HTMLElement;
@@ -58,6 +66,8 @@ export interface DetailTreeController {
   showError(message: string, line?: number): void;
   /** 清空（未选中）。 */
   clear(): void;
+  /** 设置上一条/下一条按钮的启用状态。 */
+  setNavEnabled(prev: boolean, next: boolean): void;
   /** 释放监听器。 */
   dispose(): void;
 }
@@ -95,15 +105,12 @@ function matchMediaReduced(): boolean {
   );
 }
 
-export function createDetailTree(host: HTMLElement): DetailTreeController {
+export function createDetailTree(host: HTMLElement, navHandlers: DetailTreeNavHandlers = {}): DetailTreeController {
   /* 右栏：大卡片（原型 .col-detail > .detail-card > .detail-header + 树体） */
   const root = document.createElement('aside');
   root.className = 'jlv-col-detail';
   const card = document.createElement('div');
   card.className = 'jlv-detail-card';
-
-  /* document 级监听器引用（供 dispose 清理）。 */
-  let closeDepthMenuOnDocClick: ((e: MouseEvent) => void) | null = null;
 
   const header = document.createElement('div');
   header.className = 'jlv-detail-header';
@@ -126,58 +133,33 @@ export function createDetailTree(host: HTMLElement): DetailTreeController {
   const tools = document.createElement('div');
   tools.className = 'jlv-dh-tools';
 
+  /* 展开/折叠切换：单个按钮，展开态高亮，再点一次折叠 */
   const btnExpandAll = document.createElement('button');
   btnExpandAll.type = 'button';
   btnExpandAll.className = 'jlv-dh-tool';
-  btnExpandAll.title = '展开所有层级（大数组仍分段预览）';
-  btnExpandAll.setAttribute('aria-label', '展开所有层级（大数组仍分段预览）');
-  btnExpandAll.dataset.act = 'expandAll';
+  btnExpandAll.title = '展开所有层级（再次点击可全部折叠）';
+  btnExpandAll.setAttribute('aria-label', '展开所有层级（再次点击可全部折叠）');
+  btnExpandAll.setAttribute('aria-pressed', 'false');
+  btnExpandAll.dataset.act = 'expandToggle';
   btnExpandAll.appendChild(icon('', ICON_EXPAND));
 
-  const btnCollapseAll = document.createElement('button');
-  btnCollapseAll.type = 'button';
-  btnCollapseAll.className = 'jlv-dh-tool';
-  btnCollapseAll.title = '只保留顶层';
-  btnCollapseAll.setAttribute('aria-label', '只保留顶层');
-  btnCollapseAll.dataset.act = 'collapseAll';
-  btnCollapseAll.appendChild(icon('', ICON_COLLAPSE));
+  const btnPrevRecord = document.createElement('button');
+  btnPrevRecord.type = 'button';
+  btnPrevRecord.className = 'jlv-dh-tool';
+  btnPrevRecord.title = '上一条 JSON 条目';
+  btnPrevRecord.setAttribute('aria-label', '上一条 JSON 条目');
+  btnPrevRecord.disabled = true;
+  btnPrevRecord.appendChild(icon('', ICON_PREV));
+  btnPrevRecord.addEventListener('click', () => navHandlers.onPrevRecord?.());
 
-  // 展开深度选择：自绘下拉
-  let selectedDepth = 2;
-  const depthWrap = document.createElement('div');
-  depthWrap.className = 'jlv-depth';
-  const depthTrigger = document.createElement('button');
-  depthTrigger.type = 'button';
-  depthTrigger.className = 'jlv-depth__trigger';
-  depthTrigger.title = '展开到第 N 层';
-  const depthLabel = document.createElement('span');
-  depthLabel.className = 'jlv-depth__label';
-  depthLabel.textContent = '2 层';
-  depthTrigger.appendChild(depthLabel);
-  depthTrigger.insertAdjacentHTML('beforeend', chevronSvg());
-  const depthMenu = document.createElement('div');
-  depthMenu.className = 'jlv-depth__menu';
-  depthMenu.hidden = true;
-  for (let i = 1; i <= 6; i++) {
-    const text = `${i} 层`;
-    const optBtn = document.createElement('button');
-    optBtn.type = 'button';
-    optBtn.className = 'jlv-depth__item';
-    optBtn.dataset.level = String(i);
-    optBtn.textContent = text;
-    depthMenu.appendChild(optBtn);
-  }
-  depthWrap.appendChild(depthTrigger);
-  depthWrap.appendChild(depthMenu);
-  syncDepthMenu();
-
-  const btnExpandLevel = document.createElement('button');
-  btnExpandLevel.type = 'button';
-  btnExpandLevel.className = 'jlv-dh-tool';
-  btnExpandLevel.dataset.act = 'expandLevel';
-  btnExpandLevel.title = '展开到该层';
-  btnExpandLevel.setAttribute('aria-label', '展开到该层');
-  btnExpandLevel.appendChild(icon('', ICON_LEVEL));
+  const btnNextRecord = document.createElement('button');
+  btnNextRecord.type = 'button';
+  btnNextRecord.className = 'jlv-dh-tool';
+  btnNextRecord.title = '下一条 JSON 条目';
+  btnNextRecord.setAttribute('aria-label', '下一条 JSON 条目');
+  btnNextRecord.disabled = true;
+  btnNextRecord.appendChild(icon('', ICON_NEXT));
+  btnNextRecord.addEventListener('click', () => navHandlers.onNextRecord?.());
 
   const btnCopy = document.createElement('button');
   btnCopy.type = 'button';
@@ -186,7 +168,7 @@ export function createDetailTree(host: HTMLElement): DetailTreeController {
   btnCopy.setAttribute('aria-label', '复制 JSON');
   btnCopy.appendChild(icon('', ICON_COPY));
 
-  tools.append(btnExpandAll, btnCollapseAll, depthWrap, btnExpandLevel, btnCopy);
+  tools.append(btnExpandAll, btnPrevRecord, btnNextRecord, btnCopy);
   header.append(dhLeft, tools);
 
   /* 树体 */
@@ -208,6 +190,17 @@ export function createDetailTree(host: HTMLElement): DetailTreeController {
   let disposed = false;
   /** 最近一次由用户 toggle 展开的路径：重建后仅该节点播抽屉动画（设计体系 §4.1）。 */
   let lastExpandedKey: string | null = null;
+  /** 展开模式：'level1' 只展开顶层 | 'all' 全部展开（切换按钮高亮）。 */
+  let expandMode: 'level1' | 'all' = 'level1';
+
+  /** 依据 expandMode 刷新切换按钮的视觉状态（高亮 + aria-pressed）。 */
+  function syncExpandToggle(): void {
+    const active = expandMode === 'all';
+    btnExpandAll.classList.toggle('active', active);
+    btnExpandAll.setAttribute('aria-pressed', String(active));
+    btnExpandAll.title = active ? '全部折叠到顶层' : '展开所有层级（再次点击可全部折叠）';
+    btnExpandAll.setAttribute('aria-label', btnExpandAll.title);
+  }
 
   /** 更新头部：Record # 徽标 + 源行（切换记录时轻弹）。 */
   function setRecordHeader(line: number | undefined): void {
@@ -462,68 +455,33 @@ export function createDetailTree(host: HTMLElement): DetailTreeController {
 
   /* ---------------- 事件 ---------------- */
 
-  function syncDepthMenu(): void {
-    depthLabel.textContent = `${selectedDepth} 层`;
-    depthMenu.querySelectorAll<HTMLElement>('.jlv-depth__item').forEach((it) =>
-      it.classList.toggle('selected', Number(it.dataset.level) === selectedDepth)
-    );
-  }
-  function setDepthMenu(open: boolean): void {
-    depthMenu.hidden = !open;
-    depthWrap.classList.toggle('open', open);
-  }
-
-  depthTrigger.addEventListener('click', (e) => {
-    e.stopPropagation();
-    setDepthMenu(!!depthMenu.hidden);
-    if (!depthMenu.hidden) {
-      const cur = depthMenu.querySelector<HTMLElement>('.jlv-depth__item.selected');
-      cur?.scrollIntoView({ block: 'nearest' });
-    }
-  });
-  depthMenu.addEventListener('click', (e) => {
-    e.stopPropagation();
-    const item = (e.target as HTMLElement).closest<HTMLElement>('.jlv-depth__item');
-    if (!item) return;
-    selectedDepth = Number(item.dataset.level);
-    syncDepthMenu();
-    setDepthMenu(false);
-  });
-  // 点击下拉外任意处关闭菜单。
-  closeDepthMenuOnDocClick = () => setDepthMenu(false);
-  document.addEventListener('click', closeDepthMenuOnDocClick);
-  root.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && !depthMenu.hidden) setDepthMenu(false);
-  });
-
   tools.addEventListener('click', (e) => {
     const btn = (e.target as HTMLElement).closest<HTMLElement>('[data-act]');
     if (!btn) return;
     const act = btn.dataset.act;
-    if (act === 'expandAll') {
-      // 全部展开：增量式逐层瀑布（不整树重建，无刷新感）
-      state.expandAll();
-      const rows = Array.from(body.querySelectorAll<HTMLElement>('.jlv-tree-row[data-container="1"]'));
-      chunkedExpand(rows);
-    } else if (act === 'collapseAll') {
-      // 全部折叠：逐个抽屉收回（错峰），保留缓存，不整树重建
-      state.collapseAll();
-      const rows = body.querySelectorAll<HTMLElement>('.jlv-tree-row[data-container="1"]');
-      let i = 0;
-      rows.forEach((row) => {
-        const depth = Number(row.dataset.depth);
-        if (depth === 0 || !row.classList.contains('expanded')) return;
-        const node = row.closest<HTMLElement>('.jlv-tree-node');
-        if (node) void collapseNodeLocal(row, node, i * 30);
-        i++;
-      });
-    } else if (act === 'expandLevel') {
-      state.expandToLevel(selectedDepth);
-      // 展开到 N 层：分批增量式（depth < N 的容器）
-      const rows = Array.from(body.querySelectorAll<HTMLElement>('.jlv-tree-row[data-container="1"]')).filter(
-        (row) => Number(row.dataset.depth) < selectedDepth
-      );
-      chunkedExpand(rows);
+    if (act === 'expandToggle') {
+      if (expandMode === 'level1') {
+        // 全部展开：增量式逐层瀑布（不整树重建，无刷新感）
+        expandMode = 'all';
+        syncExpandToggle();
+        state.expandAll();
+        const rows = Array.from(body.querySelectorAll<HTMLElement>('.jlv-tree-row[data-container="1"]'));
+        chunkedExpand(rows);
+      } else {
+        // 全部折叠：逐个抽屉收回（错峰），保留缓存，不整树重建
+        expandMode = 'level1';
+        syncExpandToggle();
+        state.collapseAll();
+        const rows = body.querySelectorAll<HTMLElement>('.jlv-tree-row[data-container="1"]');
+        let i = 0;
+        rows.forEach((row) => {
+          const depth = Number(row.dataset.depth);
+          if (depth === 0 || !row.classList.contains('expanded')) return;
+          const node = row.closest<HTMLElement>('.jlv-tree-node');
+          if (node) void collapseNodeLocal(row, node, i * 30);
+          i++;
+        });
+      }
     }
   });
 
@@ -714,8 +672,10 @@ export function createDetailTree(host: HTMLElement): DetailTreeController {
       currentLine = line;
       setRecordHeader(line);
       selectedSegs = [];
+      // 默认「完全折叠」：所有容器折叠，仅展示顶层字段 + 容器摘要预览。
+      // 仅当用户通过「全部展开」切换为 all 模式时整棵展开。
       state.collapseAll();
-      state.expandToLevel(1);
+      if (expandMode === 'all') state.expandAll();
       for (const k of Object.keys(revealed)) delete revealed[k];
       render();
       replayRowAnim(); // 切换记录：字段逐条出现
@@ -754,17 +714,17 @@ export function createDetailTree(host: HTMLElement): DetailTreeController {
       selectedSegs = [];
       render();
     },
+    setNavEnabled(prev, next) {
+      btnPrevRecord.disabled = !prev;
+      btnNextRecord.disabled = !next;
+    },
     dispose() {
       disposed = true;
-      // 清理 document 级监听器（关键：否则 webview 关闭后依然驻留）。
-      if (closeDepthMenuOnDocClick) {
-        document.removeEventListener('click', closeDepthMenuOnDocClick);
-        closeDepthMenuOnDocClick = null;
-      }
       root.remove();
     },
   };
 
+  syncExpandToggle();
   render();
   return controller;
 }
@@ -805,10 +765,10 @@ function icon(className: string, svg: string): HTMLElement {
 
 const ICON_EXPAND =
   '<svg width="12" height="12" viewBox="0 0 16 16"><path d="M2 3h12M2 7h12M6 11h4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><path d="M8 11l-1.5 1.5L8 14l1.5-1.5z" fill="currentColor"/></svg>';
-const ICON_COLLAPSE =
-  '<svg width="12" height="12" viewBox="0 0 16 16"><path d="M2 5h12M2 9h12M2 13h12" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>';
-const ICON_LEVEL =
-  '<svg width="12" height="12" viewBox="0 0 16 16"><path d="M3 3v6a2 2 0 0 0 2 2h8M9 7l3 3-3 3" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const ICON_PREV =
+  '<svg width="12" height="12" viewBox="0 0 16 16"><path d="M10 3L5 8l5 5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const ICON_NEXT =
+  '<svg width="12" height="12" viewBox="0 0 16 16"><path d="M6 3l5 5-5 5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 const ICON_COPY =
   '<svg width="12" height="12" viewBox="0 0 16 16"><rect x="5" y="5" width="8" height="9" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M11 2.5H4.5A1.5 1.5 0 0 0 3 4v7.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>';
 

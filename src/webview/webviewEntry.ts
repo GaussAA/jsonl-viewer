@@ -21,7 +21,7 @@ import {
 import type { RecordEntry } from './virtualScroll.ts';
 import { VirtualRecordList } from './virtualScroll.ts';
 import { createToolbar, ToolbarInfo } from './toolbar.ts';
-import { createDetailTree } from './detailTree.ts';
+import { createDetailTree, type DetailTreeNavHandlers } from './detailTree.ts';
 import { createVSCodeApi, RpcBus } from './rpc.ts';
 import {
   mergePersistedState,
@@ -44,44 +44,31 @@ function injectStyle(): void {
   style.textContent = CSS_TEXT;
   document.head.appendChild(style);
 
-  /* --- 滚动条：只做两件事 ---
-   * 1. 和 VS Code 协作：VS Code 默认 scrollbar-width: thin（薄），这正是我们想要的，不要对抗
-   * 2. 只覆盖颜色：用我们的极淡色调
-   *
-   * 关键事实：
-   * - Windows + Electron = overlay scrollbars（浮动、自动隐藏）
-   * - overlay 模式下 ::-webkit-scrollbar 伪元素被 Chromium 完全忽略
-   * - 只有标准 CSS scrollbar-width / scrollbar-color 对 overlay 生效
-   * - classic 模式下两者都生效
-   * 所以我们：标准 CSS 为主，::-webkit-scrollbar 作为 classic 模式的 bonus
+  /* --- 滚动条：完全隐藏（不显示、不占位），保留滚动能力 ---
+   * VS Code webview 会注入 `* { scrollbar-width: thin !important }`，
+   * 这里用同级别 !important 且更高的选择器覆盖为 none，并隐藏 webkit 伪元素。
+   * 隐藏后鼠标滚轮 / 触摸 / 键盘翻页仍可正常滚动，只是不再显示可见滚动条。
    */
   const PROTECTED = 'data-jlv-scrollbar';
   const s = document.createElement('style');
   s.setAttribute(PROTECTED, '');
   s.textContent = `
-    /* 滚动容器：thin（与 VS Code 一致）+ 自定义颜色 */
-    .jlv-list-wrap, .jlv-tree-body {
-      scrollbar-width: thin !important;
-      scrollbar-color: rgba(255,255,255,0.06) transparent !important;
+    /* 隐藏所有滚动条但不禁止滚动 */
+    html, body, #app,
+    .jlv-list-wrap, .jlv-tree-body,
+    .jlv-layout-list, .jlv-float-panel {
+      scrollbar-width: none !important;
+      scrollbar-color: transparent transparent !important;
     }
-    /* hover 加深（标准 CSS） */
-    .jlv-list-wrap:hover, .jlv-tree-body:hover {
-      scrollbar-color: rgba(255,255,255,0.16) transparent !important;
-    }
-    /* classic 模式 bonus：更精细的 thumb 圆角 + 4px 宽度 */
-    .jlv-list-wrap::-webkit-scrollbar, .jlv-tree-body::-webkit-scrollbar {
-      width: 4px !important; height: 4px !important;
-    }
-    .jlv-list-wrap::-webkit-scrollbar-track, .jlv-tree-body::-webkit-scrollbar-track {
+    html::-webkit-scrollbar, body::-webkit-scrollbar, #app::-webkit-scrollbar,
+    .jlv-list-wrap::-webkit-scrollbar, .jlv-tree-body::-webkit-scrollbar,
+    .jlv-layout-list::-webkit-scrollbar, .jlv-float-panel::-webkit-scrollbar {
+      width: 0 !important;
+      height: 0 !important;
+      display: none !important;
       background: transparent !important;
     }
-    .jlv-list-wrap::-webkit-scrollbar-thumb, .jlv-tree-body::-webkit-scrollbar-thumb {
-      background: rgba(255,255,255,0.06) !important;
-      border-radius: 999px !important;
-    }
-    .jlv-list-wrap:hover::-webkit-scrollbar-thumb, .jlv-tree-body:hover::-webkit-scrollbar-thumb {
-      background: rgba(255,255,255,0.16) !important;
-    }
+    ::-webkit-scrollbar { width: 0 !important; height: 0 !important; display: none !important; }
   `;
   document.head.appendChild(s);
 }
@@ -173,6 +160,8 @@ const SEARCH_LIMIT = 5000;
 /** 左栏默认宽度与可调宽度持久化键（拖拽分栏用）。 */
 const DEFAULT_LIST_WIDTH = 320;
 const LIST_WIDTH_KEY = 'jsonlViewer.listWidth';
+/** 左栏折叠状态持久化键。 */
+const LIST_COLLAPSED_KEY = 'jsonlViewer.listCollapsed';
 
 /** 便捷：返回左栏宽度持久化键。 */
 function listWidthFromStore(): number | null {
@@ -185,6 +174,21 @@ function saveListWidth(w: number): void {
     localStorage.setItem(LIST_WIDTH_KEY, String(w));
   } catch {
     /* localStorage 不可用时忽略（不影响功能）。 */
+  }
+}
+
+function listCollapsedFromStore(): boolean {
+  try {
+    return localStorage.getItem(LIST_COLLAPSED_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+function saveListCollapsed(collapsed: boolean): void {
+  try {
+    localStorage.setItem(LIST_COLLAPSED_KEY, collapsed ? '1' : '0');
+  } catch {
+    /* ignore */
   }
 }
 
@@ -242,6 +246,7 @@ function main(): void {
     list.scrollToLine(line);
     state.selectedLine = line;
     void showDetailForLine(line);
+    updateNavEnabled();
   }
 
   function runSearch(query: string): void {
@@ -329,6 +334,7 @@ function main(): void {
         list.setTranslation(state.filterMap);
         list.refresh();
         schedulePersist();
+        updateNavEnabled();
       })
       .catch(() => {
         if (state.filterInFlight?.rid === requestId) state.filterInFlight = null;
@@ -342,6 +348,7 @@ function main(): void {
     toolbar.setFilterTruncated(false);
     list.setTranslation(null);
     schedulePersist();
+    updateNavEnabled();
   }
 
   function applyLayout(layout: FieldLayout): void {
@@ -377,31 +384,157 @@ function main(): void {
   toolbar.update({ fileName: '', status: 'connecting', statusText: '连接中…' });
 
   /* ---------------- 详情面板（JSON 树，Task 5） ---------------- */
-  const detail = createDetailTree(rootEl);
+  const navHandlers: DetailTreeNavHandlers = {};
+  const detail = createDetailTree(rootEl, navHandlers);
 
   /* ---------------- 主体布局：严格左右两栏 ---------------- */
   /* 左栏 = 列头(文件/搜索/筛选/统计) + 记录列表；右栏 = 详情面板(自带工具头) */
   const leftCol = document.createElement('div');
   leftCol.className = 'jlv-col-list';
 
-  /* ---------------- 左右两栏分隔条（可拖拽调节宽度） ---------------- */
+  /* ---------------- 左右两栏分隔条（可拖拽调节宽度 + 折叠按钮） ---------------- */
   const resizer = document.createElement('div');
   resizer.className = 'jlv-resizer';
   resizer.title = '拖动调整左右栏宽度（双击恢复默认）';
+
+  // 折叠按钮（居中在 resizer 上）
+  const collapseBtn = document.createElement('button');
+  collapseBtn.type = 'button';
+  collapseBtn.className = 'jlv-resizer__toggle';
+  collapseBtn.title = '收起左栏';
+  collapseBtn.setAttribute('aria-label', '收起左栏');
+  collapseBtn.innerHTML = ICON_COLLAPSE_LEFT;
+  resizer.appendChild(collapseBtn);
+
+  // 展开按钮（折叠后显示在右栏边缘）
+  const expandBtn = document.createElement('button');
+  expandBtn.type = 'button';
+  expandBtn.className = 'jlv-col-list__expand';
+  expandBtn.title = '展开左栏';
+  expandBtn.setAttribute('aria-label', '展开左栏');
+  expandBtn.innerHTML = ICON_EXPAND_RIGHT;
+  expandBtn.hidden = true;
+  rootEl.appendChild(expandBtn);
+
+  let listCollapsed = false;
+  let listAnimTimer: ReturnType<typeof setTimeout> | undefined;
+  /** 收起/展开动画时长与缓动（与设计体系 --jlv-dur-slow / --jlv-ease 对齐）。 */
+  const COL_ANIM_MS = 300;
+  const COL_EASE = 'cubic-bezier(0.16, 1, 0.3, 1)';
+  /** 最近一次展开态下的左栏宽度（用于展开动画的初始边距）。 */
+  let expandedWidthPx: number;
+
+  /** 直接设置折叠/展开的最终 UI 状态（按钮显隐 + 持久化）。 */
+  function applyCollapsedUI(collapsed: boolean): void {
+    listCollapsed = collapsed;
+    leftCol.classList.toggle('collapsed', collapsed);
+    // resizer 保持恒定 5px，不随收起变化 → 避免动画结束那一刻右栏因 resizer 宽度跳变产生 5px 抖动
+    collapseBtn.hidden = collapsed;
+    expandBtn.hidden = !collapsed;
+    expandBtn.title = '展开左栏';
+    // 收起/展开不影响当前页数据，无需重建目录 DOM
+    saveListCollapsed(collapsed);
+    updateNavEnabled();
+  }
+
+  /** 清除 JS 注入的过渡/滑移样式；宽度由 .collapsed 或内联 width 决定（保留展开宽度）。
+   *  必须同时清 flexBasis：动画期间写入了内联 flex-basis，而左栏是 flex:0 0 auto，
+   *  flex-basis 优先于 width 决定尺寸；不清除会导致 resizer 拖拽改 width 失效。 */
+  function resetColInline(): void {
+    leftCol.style.transition = '';
+    leftCol.style.transform = '';
+    leftCol.style.marginRight = '';
+    leftCol.style.opacity = '';
+    leftCol.style.flexBasis = '';
+  }
+
+  const reduceMotion = (): boolean =>
+    typeof window.matchMedia === 'function' &&
+    window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  /**
+   * 收起/展开「拉抽屉」动画：
+   *   - 收起：左栏整体 translateX 0 → -W（向外移出）+ margin-right 0 → -W（右栏向右让出的空间收拢、
+   *           实际是右栏顺势左移补位）。不加淡入淡出。
+   *   - 展开：左栏 translateX -W → 0（向内移入）+ margin-right -W → 0（右栏右移归位）。
+   * 因 margin-right 与右栏占据的 slot 宽度保持在动画结束前同步（负边距让右栏提前满幅），
+   * 所以动画结束归零 flex 槽位时右栏宽度已就位 → 无结尾抖动。
+   */
+  function setListCollapsed(collapsed: boolean): void {
+    if (reduceMotion()) {
+      clearTimeout(listAnimTimer);
+      resetColInline();
+      applyCollapsedUI(collapsed);
+      return;
+    }
+    const W = expandedWidthPx;
+    clearTimeout(listAnimTimer);
+    const trans = `transform ${COL_ANIM_MS}ms ${COL_EASE}, margin-right ${COL_ANIM_MS}ms ${COL_EASE}`;
+    // 按钮显隐即时切换，便于反向操作
+    collapseBtn.hidden = collapsed;
+    expandBtn.hidden = !collapsed;
+    expandBtn.title = '展开左栏';
+
+    if (collapsed) {
+      // 收起：抽屉向外移出
+      leftCol.classList.remove('collapsed');
+      leftCol.style.width = `${W}px`;
+      leftCol.style.flexBasis = `${W}px`;
+      leftCol.style.minWidth = '0';
+      leftCol.style.overflow = 'hidden';
+      leftCol.style.transform = 'translateX(0)';
+      leftCol.style.marginRight = '0px';
+      leftCol.style.transition = 'none';
+      void leftCol.offsetWidth; // 强制提交起始帧
+      leftCol.style.transition = trans;
+      leftCol.style.transform = `translateX(-${W}px)`;
+      leftCol.style.marginRight = `-${W}px`;
+    } else {
+      // 展开：抽屉向内移入
+      applyCollapsedUI(false); // 还原占位（宽度回到展开值）
+      leftCol.style.width = `${W}px`;
+      leftCol.style.flexBasis = `${W}px`;
+      leftCol.style.minWidth = '0';
+      leftCol.style.overflow = 'hidden';
+      leftCol.style.transition = 'none';
+      leftCol.style.transform = `translateX(-${W}px)`;
+      leftCol.style.marginRight = `-${W}px`; // 使右栏保持当前满幅，避免先跳位
+      void leftCol.offsetWidth; // 强制提交起始帧
+      leftCol.style.transition = trans;
+      leftCol.style.transform = 'translateX(0)';
+      leftCol.style.marginRight = '0px';
+    }
+
+    // 动画结束后：清掉滑移/过渡，落到静态折叠态（宽度归零由 .collapsed 完成）
+    listAnimTimer = setTimeout(() => {
+      resetColInline();
+      applyCollapsedUI(collapsed);
+    }, COL_ANIM_MS + 40);
+  }
+
+  collapseBtn.addEventListener('click', () => setListCollapsed(true));
+  expandBtn.addEventListener('click', () => setListCollapsed(false));
 
   function clampListWidth(w: number): number {
     return Math.max(180, Math.min(w, Math.max(DEFAULT_LIST_WIDTH, window.innerWidth * 0.6)));
   }
   function applyListWidth(w: number): void {
-    leftCol.style.width = `${clampListWidth(w)}px`;
+    const cw = clampListWidth(w);
+    leftCol.style.width = `${cw}px`;
+    expandedWidthPx = cw;
   }
   // 恢复上次拖拽宽度
   const savedW = listWidthFromStore();
+  expandedWidthPx = savedW ?? DEFAULT_LIST_WIDTH;
   if (savedW !== null) applyListWidth(savedW);
+  // 恢复折叠状态
+  if (listCollapsedFromStore()) setListCollapsed(true);
 
   let dragStartX = 0;
   let dragStartW = 0;
   resizer.addEventListener('pointerdown', (e) => {
+    if (listCollapsed) return; // 折叠态不允许拖拽
+    if ((e.target as HTMLElement).closest('.jlv-resizer__toggle')) return; // 折叠按钮不触发拖拽
     resizer.classList.add('active');
     dragStartX = e.clientX;
     dragStartW = leftCol.getBoundingClientRect().width;
@@ -414,11 +547,14 @@ function main(): void {
   const endDrag = (e: PointerEvent): void => {
     if (!resizer.classList.contains('active')) return;
     resizer.classList.remove('active');
-    saveListWidth(clampListWidth(dragStartW + (e.clientX - dragStartX)));
+    const cw = clampListWidth(dragStartW + (e.clientX - dragStartX));
+    saveListWidth(cw);
+    expandedWidthPx = cw;
   };
   resizer.addEventListener('pointerup', endDrag);
   resizer.addEventListener('pointercancel', endDrag);
   resizer.addEventListener('dblclick', () => {
+    if (listCollapsed) return;
     applyListWidth(DEFAULT_LIST_WIDTH);
     saveListWidth(DEFAULT_LIST_WIDTH);
   });
@@ -452,8 +588,11 @@ function main(): void {
       state.selectedLine = line;
       list.select(line);
       void showDetailForLine(line);
+      updateNavEnabled();
     },
     onRangeChange: (displayFirst, displayLast) => {
+      // 分页/翻页已改变当前可视页 → 立即刷新范围文本（不依赖后面是否有实际拉取）。
+      updateToolbar();
       // 展示位 -> 真实行：过滤态下把可视区展示位映射为真实行号去拉取。
       const map = state.filterMap;
       if (map && map.length > 0) {
@@ -480,6 +619,73 @@ function main(): void {
   rootEl.appendChild(resizer);
   rootEl.appendChild(detail.root);
   rootEl.appendChild(banner.root);
+
+  /* ---------------- prev / next 导航 ---------------- */
+
+  /** 获取当前可见记录总数（考虑过滤态）。 */
+  function getTotalVisible(): number {
+    return state.filterMap ? state.filterMap.length : (state.overview?.totalLines ?? 0);
+  }
+
+  /** 将展示位索引转为真实行号（过滤态/全量态统一）。 */
+  function displayToReal(d: number): number {
+    return state.filterMap ? state.filterMap[d] : d;
+  }
+
+  /** 获取当前选中行在展示序列中的索引；返回 -1 表示无选中或不在范围。 */
+  function selectedDisplayIndex(): number {
+    const line = state.selectedLine;
+    if (line === undefined) return -1;
+    if (state.filterMap) {
+      return state.filterMap.indexOf(line);
+    }
+    if (state.overview && line >= 0 && line < state.overview.totalLines) return line;
+    return -1;
+  }
+
+  /** 更新详情面板导航按钮（上一条/下一条）的启用状态。 */
+  function updateNavEnabled(): void {
+    const total = getTotalVisible();
+    if (total <= 0) {
+      detail.setNavEnabled(false, false);
+      return;
+    }
+    const idx = selectedDisplayIndex();
+    if (idx < 0) {
+      // 无选中时：允许两边导航（会从第一条或最后一条开始）
+      detail.setNavEnabled(true, true);
+      return;
+    }
+    detail.setNavEnabled(idx > 0, idx < total - 1);
+  }
+
+  navHandlers.onPrevRecord = () => {
+    const total = getTotalVisible();
+    if (total <= 0) return;
+    const idx = selectedDisplayIndex();
+    const target = idx < 0 ? total - 1 : idx - 1;
+    if (target < 0) return;
+    const real = displayToReal(target);
+    list.focus(real);
+    state.selectedLine = real;
+    void showDetailForLine(real);
+    updateNavEnabled();
+    // 导航后自动展开左栏（如果已折叠）
+    if (listCollapsed) setListCollapsed(false);
+  };
+  navHandlers.onNextRecord = () => {
+    const total = getTotalVisible();
+    if (total <= 0) return;
+    const idx = selectedDisplayIndex();
+    const target = idx < 0 ? 0 : idx + 1;
+    if (target >= total) return;
+    const real = displayToReal(target);
+    list.focus(real);
+    state.selectedLine = real;
+    void showDetailForLine(real);
+    updateNavEnabled();
+    if (listCollapsed) setListCollapsed(false);
+  };
 
   /* ---------------- 详情面板：按需请求完整 JSON ---------------- */
 
@@ -631,6 +837,16 @@ function main(): void {
     state.persistKey = stateKey(payload.uri);
     list.setTotalRows(payload.totalLines);
     updateToolbar();
+    updateNavEnabled();
+
+    // 打开文件默认选中第一条并展示其 JSON；右侧细节树已内置「仅展开顶层、嵌套折叠」的默认态。
+    if (state.selectedLine === undefined && payload.totalLines > 0) {
+      state.selectedLine = 0;
+      list.select(0);
+      list.scrollToLine(0);
+      void showDetailForLine(0);
+      updateNavEnabled();
+    }
 
     // 读取已持久化偏好（无则 savedLoaded 仍置 true，便于后续在此刻合并）。
     void bus
@@ -652,6 +868,7 @@ function main(): void {
         state.overview = ov;
         list.setTotalRows(ov.totalLines);
         updateToolbar();
+        updateNavEnabled();
       })
       .catch(() => {
         /* init 已含概览，这里失败可忽略；且不触发错误横幅。 */
@@ -712,6 +929,7 @@ function main(): void {
       list.setTotalRows(ov.totalLines);
       updateToolbar();
       detail.clear();
+      updateNavEnabled();
       // 重新拉字段推断（供摘要卡片 / 过滤下拉）。
       void bus
         .request<{ fields: FieldLike[] }>(HostEndpoint.GET_SAMPLE_FIELDS, {})
@@ -752,6 +970,7 @@ function main(): void {
   const cleanup = (): void => {
     if (cleanupCalled) return;
     cleanupCalled = true;
+    if (listAnimTimer) clearTimeout(listAnimTimer);
     bus.dispose();
     scheduleFetch.dispose();
     list.dispose();
@@ -761,5 +980,12 @@ function main(): void {
   };
   window.addEventListener('beforeunload', cleanup);
 }
+
+/** 折叠左栏按钮图标（<<）。 */
+const ICON_COLLAPSE_LEFT =
+  '<svg width="10" height="10" viewBox="0 0 16 16"><path d="M10 3L5 8l5 5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+/** 展开左栏按钮图标（>>）。 */
+const ICON_EXPAND_RIGHT =
+  '<svg width="10" height="10" viewBox="0 0 16 16"><path d="M6 3l5 5-5 5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 
 main();
