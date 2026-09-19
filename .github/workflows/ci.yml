@@ -21,16 +21,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 与 package.json 的 `packageManager` 对齐（pnpm@12.4.2）。
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 12
-
-      - name: Setup Node.js ${{ matrix.node-version }}
+      # actions/setup-node@v4 内建支持 pnpm-version，单一入口避免
+      # 与 pnpm/action-setup 冲突（GitHub 报 "Multiple versions of pnpm"）。
+      # 与 package.json 的 packageManager 对齐（pnpm@12.4.2）。
+      - name: Setup Node.js ${{ matrix.node-version }} + pnpm 12
         uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
+          pnpm-version: 12
           cache: pnpm
 
       - name: Install dependencies
@@ -69,15 +67,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 12
-
-      - name: Setup Node.js 22
+      # setup-node 内建 pnpm-version，避免与 pnpm/action-setup 冲突。
+      - name: Setup Node.js 22 + pnpm 12
         uses: actions/setup-node@v4
         with:
           node-version: 22
+          pnpm-version: 12
           cache: pnpm
 
       - name: Install dependencies

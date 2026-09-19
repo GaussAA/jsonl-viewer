@@ -29,15 +29,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 12
-
-      - name: Setup Node.js 22
+      # setup-node 内建 pnpm-version，单一入口，避免与 pnpm/action-setup 冲突。
+      - name: Setup Node.js 22 + pnpm 12
         uses: actions/setup-node@v4
         with:
           node-version: 22
+          pnpm-version: 12
           cache: pnpm
 
       - name: Install dependencies
