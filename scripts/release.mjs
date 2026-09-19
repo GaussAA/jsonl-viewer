@@ -61,7 +61,13 @@ if (dirty) {
 }
 // tag 可追溯性：已存在则必须指向当前 HEAD，否则退出（防止产物不可溯源）。
 const tag = `v${version}`;
-const tagSha = execSync(`git rev-parse -q --verify ${tag}`, { cwd: root, encoding: 'utf8' }).trim();
+let tagSha = '';
+try {
+  // rev-parse 对不存在的 tag 返回非零退出码（execSync 会抛），用 try 容错表示「tag 不存在」。
+  tagSha = execSync(`git rev-parse -q --verify ${tag}`, { cwd: root, encoding: 'utf8' }).trim();
+} catch {
+  tagSha = '';
+}
 if (tagSha) {
   const head = execSync('git rev-parse HEAD', { cwd: root, encoding: 'utf8' }).trim();
   if (tagSha !== head) {
