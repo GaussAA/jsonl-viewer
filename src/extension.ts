@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import * as vscode from 'vscode';
 import { DataService } from './host/dataService.ts';
 import {
@@ -20,14 +21,10 @@ const WEBVIEW_SCRIPT = 'webview.js';
 /** Supported extension globs, must mirror the custom editor selector. */
 const SUPPORTED_GLOB = /\.(jsonl|ndjson|jsonlines)$/i;
 
-/** 日志输出面板：用户可在“输出 → JSONL Viewer”中查看宿主收发情况，便于排障。 */
-let output: vscode.OutputChannel;
+/** 日志输出面板：用户可在"输出 → JSONL Viewer"中查看宿主收发情况，便于排障。 */
+let output: vscode.OutputChannel | undefined;
 function hostLog(message: string): void {
-  try {
-    output.appendLine(message);
-  } catch {
-    /* OutputChannel 未创建时忽略 */
-  }
+  if (output) output.appendLine(message);
 }
 function hostErr(message: string): void {
   hostLog(`[ERROR] ${message}`);
@@ -259,15 +256,13 @@ export function activate(context: vscode.ExtensionContext): void {
 }
 
 export function deactivate(): void {
-  // Nothing to tear down yet; the provider/webviews are disposed via context.subscriptions.
+  // context.subscriptions 会自动清理 provider / 命令 / 文件事件；
+  // 这里额外关闭 OutputChannel（它不在 subscriptions 里）。
+  output?.dispose();
+  output = undefined;
 }
 
 function getNonce(): string {
-  const text = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
-  let out = '';
-  for (let i = 0; i < 32; i++) {
-    out += text[Math.floor(Math.random() * text.length)];
-  }
-  return out;
+  return randomBytes(16).toString('base64');
 }
 

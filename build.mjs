@@ -1,12 +1,18 @@
 // esbuild build script.
 // Produces:
-//   - dist/extension.js  -> extension host main entry (CommonJS, `vscode` external)
+//   - dist/extension.js  -> extension host main entry (ESM, `vscode` + `node:*` external)
 //   - dist/webview.js    -> webview front-end bundle (IIFE for the sandboxed webview)
 //
 // Usage:
 //   node build.mjs                 # full non-minified build (used by `pnpm compile`)
 //   node build.mjs --minify        # minified, tree-shaken (used by `pnpm build`)
 //   node build.mjs --watch         # watch mode (used by `pnpm watch`)
+//
+// Module system convention:
+//   - Extension host (NodeJS 运行时)：ESM，对应 package.json 的 `"type": "module"`。
+//     VS Code 从 1.100 (April 2025) 起正式支持 ESM 扩展入口，engines.vscode 已提升至 ^1.100.0。
+//   - Webview (浏览器沙箱)：IIFE，通过 `<script>` 加载，不经过 Node 模块解析。
+//     IIFE 是自包含的纯 JS 片段，与 Node ESM 是两个独立运行时，不属于"混用"。
 
 import { build, context } from 'esbuild';
 import { mkdir } from 'node:fs/promises';
@@ -23,48 +29,58 @@ const common = {
   legalComments: 'none',
 };
 
-// Extension host runs in Node; leave `vscode` and Node built-ins as externals.
-const nodeExternals = { external: ['vscode', 'node:*'] };
+// Extension host：ESM，运行在 NodeJS 上，`vscode` 和 Node built-ins 由宿主提供。
+const extensionExternals = { external: ['vscode', 'node:*'] };
+
+// Webview：IIFE，运行在 webview 沙箱（浏览器），**没有** Node built-ins，
+// 必须内联所有依赖（包括 esbuild 自身可能注入的 `node:*` shim）。
+// 因此 webview bundle **不**设置 externals。
 
 async function main() {
   await mkdir('dist', { recursive: true });
 
   if (dev) {
-    const ctx = await context({
+    // Watch 模式：extension 和 webview 必须拆成两个 context，
+    // 因为 esbuild 不允许同一 context 的不同 entry 使用不同 format。
+    const extCtx = await context({
       ...common,
-      entryPoints: {
-        extension: 'src/extension.ts',
-        webview: 'src/webview/webviewEntry.ts',
-      },
+      entryPoints: { extension: 'src/extension.ts' },
       outdir: 'dist',
-      format: 'cjs',
-      ...nodeExternals,
-      // The host entry must be CommonJS: VS Code loads it via require().
-      // webview.ts is bundled here too but is loaded through a <script> in an
-      // IIFE form; to keep this watch build simple we emit both as CJS (the
-      // webview file still works, though non-minified) on watch.
-      plugins: [],
+      format: 'esm',
+      platform: 'node',
+      ...extensionExternals,
     });
-    await ctx.watch();
-    console.log('[build] watching for changes...');
+    const webCtx = await context({
+      ...common,
+      entryPoints: { webview: 'src/webview/webviewEntry.ts' },
+      outdir: 'dist',
+      format: 'iife',
+      platform: 'browser',
+      globalName: 'JlvWebview',
+    });
+    await Promise.all([extCtx.watch(), webCtx.watch()]);
+    console.log('[build] watching (extension ESM + webview IIFE)...');
     return;
   }
 
-  // 1) Extension main entry -> CommonJS, never bundle the `vscode` module.
+  // 1) Extension main entry -> ESM，never bundle the `vscode` module.
   await build({
     ...common,
     entryPoints: { extension: 'src/extension.ts' },
     outdir: 'dist',
-    format: 'cjs',
-    ...nodeExternals,
+    format: 'esm',
+    platform: 'node',
+    ...extensionExternals,
   });
 
-  // 2) Webview front-end -> IIFE (runs inside the webview sandbox, no CommonJS).
+  // 2) Webview front-end -> IIFE（runs inside the webview sandbox, no Node module system).
   await build({
     ...common,
     entryPoints: { webview: 'src/webview/webviewEntry.ts' },
     outdir: 'dist',
     format: 'iife',
+    platform: 'browser',
+    globalName: 'JlvWebview',
   });
 
   console.log('[build] done.');

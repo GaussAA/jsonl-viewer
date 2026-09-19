@@ -6,14 +6,14 @@
 
 ## 1. 前置要求
 
-- Node.js ≥ 22.18（`pnpm test` 用 `node --test` 直跑 `.ts`，依赖 Node 22.18+ 的类型擦除；低于此版本测试会失败），包管理器使用 **pnpm**（本项目统一用 pnpm，不用 npm 安装依赖）。
+- **VS Code ≥ 1.100**（或 TRAE 内置 VS Code 1.100+）。扩展宿主（extension host）入口采用 **ESM**，VS Code 1.100 (April 2025) 起正式支持 ESM 扩展入口，低于此版本无法加载扩展。
+- **Node.js ≥ 22.18**。本项目全局 `"type": "module"`，`pnpm test` 用 `node --test` 直跑 `.ts` 也依赖 Node 22.18+ 的类型擦除；低于此版本测试会失败。包管理器使用 **pnpm**（本项目统一用 pnpm，不用 npm 安装依赖）。
 - 先在项目根目录安装依赖：
 
   ```bash
   pnpm install
   ```
 
-- [VS Code](https://code.visualstudio.com/)（或 TRAE）用于安装 `.vsix`。
 - `@vscode/vsce` 已列为 devDependency，无需全局安装。
 
 ---

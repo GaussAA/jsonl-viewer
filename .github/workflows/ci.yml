@@ -1,0 +1,116 @@
+name: CI
+
+# 代码合并门禁：每次 push / PR 都运行两层检查
+#   Job 1 verify            —— 纯 Node 环境：typecheck → unit test → build（与 release.mjs 预检一致）
+#   Job 2 integration-test  —— 真实 VS Code Extension Host：验证扩展能被宿主发现 + activate 成功
+# 任一失败即阻断合并，保证发布产物可追溯、可复现。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  # ── 层 1：静态 + 单元 + 构建 ──────────────────────────────────────────────
+  verify:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [22, 24]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 与 package.json 的 `packageManager` 对齐（pnpm@12.4.2）。
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 12
+
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: pnpm
+
+      - name: Install dependencies
+        # frozen-lockfile：pnpm-lock.yaml 必须与 package.json 一致，否则 CI 失败，
+        # 防止本地升级依赖但忘记提交 lockfile 而导致的漂移。
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Test
+        # `node --test` 直跑 src/**/*.test.ts，依赖 Node 22.18+ 的类型擦除（见 engines.node）。
+        run: pnpm test
+
+      - name: Build
+        run: pnpm build
+
+  # ── 层 2：真实 VS Code Extension Host 集成测试 ────────────────────────────
+  # 验证扩展能被 VS Code 宿主发现 + activate 完整执行。
+  # 两维矩阵：OS（Ubuntu/Windows/macOS）× VS Code 版本（最低支持/稳定线/insiders）
+  #   - 最低支持 1.100.0   —— engines.vscode 的 floor，确保 ESM 入口真正能在 1.100 起工作
+  #   - stable              —— 当前生产线，默认用户的实际运行环境
+  #   - insiders            —— nightly 构建，提前发现 Microsoft 即将发布的变更回归
+  # Linux 上 VS Code 是 Electron 应用，需要 xvfb-run 提供虚拟显示服务器。
+  # 9 个 job 并行，任一失败即阻断合并。
+  integration-test:
+    needs: verify
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        # 版本号用精确字符串（1.100.0），stable/insiders 是 @vscode/test-electron 的别名
+        vscode-version: ['1.100.0', 'stable', 'insiders']
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 12
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Compile
+        run: pnpm compile
+
+      # VS Code Electron 包缓存：key 带版本号，避免不同版本互相污染。
+      # @vscode/test-electron 默认缓存到 process.cwd()/.vscode-test/（项目本地），
+      # 也会回退到 ~/.vscode-test/。两边都缓存，最大化命中概率。
+      - name: Cache VS Code Electron (${{ matrix.vscode-version }} on ${{ runner.os }})
+        uses: actions/cache@v4
+        with:
+          path: |
+            .vscode-test
+            ~/.vscode-test
+          key: vscode-${{ matrix.vscode-version }}-${{ runner.os }}
+
+      - name: Install xvfb (Linux only)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y xvfb
+
+      # 统一通过环境变量注入版本，runner 脚本读 VSCODE_TEST_VERSION。
+      # 本地跑 pnpm test:integration 不传变量 → 默认 stable，行为不变。
+      - name: Run integration tests (Linux, VS Code ${{ matrix.vscode-version }})
+        if: runner.os == 'Linux'
+        env:
+          VSCODE_TEST_VERSION: ${{ matrix.vscode-version }}
+        run: xvfb-run -a pnpm test:integration
+
+      - name: Run integration tests (VS Code ${{ matrix.vscode-version }})
+        if: runner.os != 'Linux'
+        env:
+          VSCODE_TEST_VERSION: ${{ matrix.vscode-version }}
+        run: pnpm test:integration
