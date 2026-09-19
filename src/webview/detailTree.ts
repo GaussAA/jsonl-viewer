@@ -33,7 +33,7 @@ export interface DetailTreeController {
   /** 加载中占位。 */
   showLoading(): void;
   /** 展示错误行信息。 */
-  showError(message: string): void;
+  showError(message: string, line?: number): void;
   /** 清空（未选中）。 */
   clear(): void;
   /** 释放监听器。 */
@@ -450,7 +450,7 @@ export function createDetailTree(host: HTMLElement): DetailTreeController {
 
   depthTrigger.addEventListener('click', (e) => {
     e.stopPropagation();
-    setDepthMenu(depthMenu.hidden);
+    setDepthMenu(!!depthMenu.hidden);
     if (!depthMenu.hidden) {
       const cur = depthMenu.querySelector<HTMLElement>('.jlv-depth__item.selected');
       cur?.scrollIntoView({ block: 'nearest' });
@@ -706,8 +706,11 @@ export function createDetailTree(host: HTMLElement): DetailTreeController {
       label.textContent = '加载中…';
       hint.appendChild(label);
     },
-    showError(message) {
+    showError(message, line) {
       currentValue = undefined;
+      currentLine = line;
+      // 坏行也更新页头（此前遗漏：页头停留在上一个 Record #N）。
+      setRecordHeader(line);
       render();
       const hint = body.querySelector<HTMLElement>('.jlv-tree-hint');
       if (!hint) return;

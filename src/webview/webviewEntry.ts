@@ -455,7 +455,7 @@ function main(): void {
     const cached = state.cache.get(line);
     if (cached && cached.ok === false) {
       cancelDetailRequest();
-      detail.showError(cached.error ?? '该行不是合法 JSON。');
+      detail.showError(cached.error ?? '该行不是合法 JSON。', line);
       return;
     }
 
