@@ -175,9 +175,6 @@ importers:
       '@vscode/vsce':
         specifier: ^4.0.0
         version: 4.0.0
-      '@vscode/webview-ui-toolkit':
-        specifier: ^1.4.0
-        version: 1.4.0(react@19.3.0)
       esbuild:
         specifier: ^0.24.0
         version: 0.24.2
@@ -385,20 +382,6 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@microsoft/fast-element@1.14.0':
-    resolution: {integrity: sha512-zXvuSOzvsu8zDTy9eby8ix8VqLop2rwKRgp++ZN2kTCsoB3+QJVoaGD2T/Cyso2ViZQFXNpiNCVKfnmxBvmWkQ==}
-
-  '@microsoft/fast-foundation@2.50.0':
-    resolution: {integrity: sha512-8mFYG88Xea1jZf2TI9Lm/jzZ6RWR8x29r24mGuLojNYqIR2Bl8+hnswoV6laApKdCbGMPKnsAL/O68Q0sRxeVg==}
-
-  '@microsoft/fast-react-wrapper@0.3.25':
-    resolution: {integrity: sha512-jKzmk2xJV93RL/jEFXEZgBvXlKIY4N4kXy3qrjmBfFpqNi3VjY+oUTWyMnHRMC5EUhIFxD+Y1VD4u9uIPX3jQw==}
-    peerDependencies:
-      react: '>=16.9.0'
-
-  '@microsoft/fast-web-utilities@5.4.1':
-    resolution: {integrity: sha512-ReWYncndjV3c8D8iq9tp7NcFNc1vbVHvcBFPME2nNFKNbS1XCesYZGlIlf3ot5EmuOXPlrzUHOWzQ2vFpIkqDg==}
-
   '@napi-rs/keyring-darwin-arm64@1.3.0':
     resolution: {integrity: sha512-pl76hJvdYUBn6I24bXiOBMA9nbDapo3I5B+f3OorjDU4dUMSypXeKbOVehJe8fhgTiH24flMyTS3aAIy43xegQ==}
     engines: {node: '>= 10'}
@@ -566,12 +549,6 @@ packages:
     engines: {node: '>= 22'}
     hasBin: true
 
-  '@vscode/webview-ui-toolkit@1.4.0':
-    resolution: {integrity: sha512-modXVHQkZLsxgmd5yoP3ptRC/G8NBDD+ob+ngPiWNQdlrH6H1xR/qgOBD85bfU3BhOB5sZzFWBwwhp9/SfoHww==}
-    deprecated: This package has been deprecated, https://github.com/microsoft/vscode-webview-ui-toolkit/issues/561
-    peerDependencies:
-      react: '>=16.9.0'
-
   agent-base@7.1.4:
     resolution: {integrity: sha512-MnA+YT8fwfJPgBx3m60MNqakm30XOkyIoH1y6huTQvC0PwZG7ki8NacLBcrPbNoo8vEZy7Jpuk7+jMO+CUovTQ==}
     engines: {node: '>= 14'}
@@ -672,9 +649,6 @@ packages:
     resolution: {integrity: sha512-+9egpBW8I3CD5XPe0n6BfT5fxLzxrlDzqydF3aviG+9ni1lDC/OvMHcxqEFV0+LANZG5R1bFMWfUrjVsdwxJvA==}
     engines: {node: '>=18'}
     hasBin: true
-
-  exenv-es6@1.1.1:
-    resolution: {integrity: sha512-vlVu3N8d6yEMpMsEm+7sUBAI81aqYYuEvfK0jNqmdb/OPXzzH7QWDDnVjMvDSY47JdHEqx/dfC/q8WkfoTmpGQ==}
 
   fdir@6.5.0:
     resolution: {integrity: sha512-tIbYtZbucOs0BRGqPJkshJUYdL+SDH7dVM8gjy+ERp3WAUjLEFJE+02kanyHtwjWOnwrKYBiwAmM0p4kLJAnXg==}
@@ -828,10 +802,6 @@ packages:
     resolution: {integrity: sha512-h6fhOIaRrID2CbEY2fqs+7t+UXZo+MLAnU5gRIq85uFtdiUPCdsApMlHhXogKVM4HM2DVbIjGNTTYH2OcmP1vA==}
     engines: {node: '>=0.6'}
 
-  react@19.3.0:
-    resolution: {integrity: sha512-E8LUcbtBWt20bbl2YoHfx4ZDBdxVTfOKtCZn9cDSJ4l6/nuoApcpIBcj47t2wZoVX8g2ZHuMHbiShgCR1T5Sog==}
-    engines: {node: '>=0.10.0'}
-
   read@1.0.7:
     resolution: {integrity: sha512-rSOKNYUmaxy0om1BNjMN4ezNT6VKK+2xF4GBhc81mkH7L60i6dp8qPYrkndNLT3QPphoII3maL9PVC9XmhHwVQ==}
     engines: {node: '>=0.8'}
@@ -878,9 +848,6 @@ packages:
   structured-source@4.0.0:
     resolution: {integrity: sha512-qGzRFNJDjFieQkl/sVOI2dUjHKRyL9dAJi2gCPGJLbJHBIkyOHxjuocpIEfbLioX+qSJpvbYdT49/YCdMznKxA==}
 
-  tabbable@5.3.3:
-    resolution: {integrity: sha512-QD9qKY3StfbZqWOPLp0++pOrAVb/HbUi5xCc8cUo4XjP19808oaMiDzn0leBY5mCespIBM0CIZePzZjgzR83kA==}
-
   textextensions@6.11.0:
     resolution: {integrity: sha512-tXJwSr9355kFJI3lbCkPpUH5cP8/M0GGy2xLO34aZCjMXBaK3SoPnZwr/oWmo1FdCnELcs4npdCIOFtq9W3ruQ==}
     engines: {node: '>=4'}
@@ -888,9 +855,6 @@ packages:
   tinyglobby@0.2.17:
     resolution: {integrity: sha512-wXR/dYpcqKmfWpEdZjiKJOwCNFndD0DMnrW/cYjVGttEkBfVgcLFHoNrlj47mjOVic9yyNu65alsgF4NQyTa2g==}
     engines: {node: '>=12.0.0'}
-
-  tslib@1.14.1:
-    resolution: {integrity: sha512-Xni35NKzjgMrwevysHTCArtLDpPvye8zV/0E4EyYn43P7/7qvQwPh9BGkHewbMulVntbigmcT7rdX3BNo9wRJg==}
 
   tslib@2.8.1:
     resolution: {integrity: sha512-oJFu94HQb+KVduSUQL7wnpmqnfmLsOA/nAh6b6EH0wCEoK0/mPeXU6c3wKDV83MkOuHPRHtSXKKU99IBazS/2w==}
@@ -1104,25 +1068,6 @@ snapshots:
   '@esbuild/win32-x64@0.24.2':
     optional: true
 
-  '@microsoft/fast-element@1.14.0': {}
-
-  '@microsoft/fast-foundation@2.50.0':
-    dependencies:
-      '@microsoft/fast-element': 1.14.0
-      '@microsoft/fast-web-utilities': 5.4.1
-      tabbable: 5.3.3
-      tslib: 1.14.1
-
-  '@microsoft/fast-react-wrapper@0.3.25(react@19.3.0)':
-    dependencies:
-      '@microsoft/fast-element': 1.14.0
-      '@microsoft/fast-foundation': 2.50.0
-      react: 19.3.0
-
-  '@microsoft/fast-web-utilities@5.4.1':
-    dependencies:
-      exenv-es6: 1.1.1
-
   '@napi-rs/keyring-darwin-arm64@1.3.0':
     optional: true
 
@@ -1282,14 +1227,6 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  '@vscode/webview-ui-toolkit@1.4.0(react@19.3.0)':
-    dependencies:
-      '@microsoft/fast-element': 1.14.0
-      '@microsoft/fast-foundation': 2.50.0
-      '@microsoft/fast-react-wrapper': 0.3.25(react@19.3.0)
-      react: 19.3.0
-      tslib: 2.8.1
-
   agent-base@7.1.4: {}
 
   azure-devops-node-api@12.5.0:
@@ -1395,8 +1332,6 @@ snapshots:
       '@esbuild/win32-arm64': 0.24.2
       '@esbuild/win32-ia32': 0.24.2
       '@esbuild/win32-x64': 0.24.2
-
-  exenv-es6@1.1.1: {}
 
   fdir@6.5.0(picomatch@4.0.7):
     optionalDependencies:
@@ -1552,8 +1487,6 @@ snapshots:
       es-define-property: 1.0.1
       side-channel: 1.1.1
 
-  react@19.3.0: {}
-
   read@1.0.7:
     dependencies:
       mute-stream: 0.0.8
@@ -1602,8 +1535,6 @@ snapshots:
     dependencies:
       boundary: 2.0.0
 
-  tabbable@5.3.3: {}
-
   textextensions@6.11.0:
     dependencies:
       editions: 6.22.0
@@ -1612,8 +1543,6 @@ snapshots:
     dependencies:
       fdir: 6.5.0(picomatch@4.0.7)
       picomatch: 4.0.7
-
-  tslib@1.14.1: {}
 
   tslib@2.8.1: {}
 

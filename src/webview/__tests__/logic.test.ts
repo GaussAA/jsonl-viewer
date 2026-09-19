@@ -4,9 +4,9 @@ import {
   computeFetchWindow,
   formatValue,
   LRUCache,
+  segmentSortedLines,
   summarizeRecord,
   ThrottleQueue,
-  VirtualListLayout,
 } from '../logic.ts';
 
 const tick = () => new Promise<void>((res) => setImmediate(res));
@@ -74,6 +74,32 @@ test('computeFetchWindow: wantEnd<=wantStart -> null', () => {
   assert.equal(computeFetchWindow(8, 3, () => false), null);
 });
 
+test('segmentSortedLines: 连续命中 -> 单个连续段', () => {
+  const map = [100, 101, 102, 103];
+  assert.deepEqual(segmentSortedLines(map, 0, 4), [{ first: 100, lastExclusive: 104 }]);
+});
+
+test('segmentSortedLines: 稀疏命中 -> 按相邻性分段', () => {
+  const map = [100, 5000000, 5000001, 9000000];
+  assert.deepEqual(segmentSortedLines(map, 0, 4), [
+    { first: 100, lastExclusive: 101 },
+    { first: 5000000, lastExclusive: 5000002 },
+    { first: 9000000, lastExclusive: 9000001 },
+  ]);
+});
+
+test('segmentSortedLines: 只取 [start,end) 子范围', () => {
+  const map = [10, 11, 100, 101, 102, 500];
+  assert.deepEqual(segmentSortedLines(map, 2, 5), [{ first: 100, lastExclusive: 103 }]);
+});
+
+test('segmentSortedLines: 边界防御（空/越界）', () => {
+  assert.deepEqual(segmentSortedLines([], 0, 0), []);
+  assert.deepEqual(segmentSortedLines([5, 6], 1, 1), []);
+  assert.deepEqual(segmentSortedLines([5, 6], -1, 1), []);
+  assert.deepEqual(segmentSortedLines([5, 6], 0, 3), []);
+});
+
 /* ----------------------- 节流 + 合并调度 ----------------------- */
 
 test('ThrottleQueue: 同窗口多次 push 只执行一次（取最新）', async () => {
@@ -110,84 +136,7 @@ test('ThrottleQueue: 执行期间新值只作为尾随一次处理，不并行',
   q.dispose();
 });
 
-/* --------------------- 虚拟列表位置数学 --------------------- */
-
-function invariant(L: VirtualListLayout, scrollTop: number): void {
-  const i = L.findStartIndex(scrollTop);
-  assert.ok(L.getItemOffset(i) <= scrollTop + 1, `offset(i)<=scrollTop (i=${i}, scrollTop=${scrollTop})`);
-  assert.ok(
-    i === 0 || L.getItemOffset(i - 1) <= scrollTop,
-    `previous row starts at or before scrollTop (i-1=${i - 1})`
-  );
-}
-
-test('VirtualListLayout: 默认等高下累计偏移与 scrollTop->line', () => {
-  const L = new VirtualListLayout(50);
-  assert.equal(L.getItemOffset(0), 0);
-  assert.equal(L.getItemOffset(1), 50);
-  assert.equal(L.getItemOffset(2), 100);
-  assert.equal(L.findStartIndex(0), 0);
-  assert.equal(L.findStartIndex(25), 0);
-  assert.equal(L.findStartIndex(50), 1);
-  assert.equal(L.findStartIndex(120), 2);
-});
-
-test('VirtualListLayout: 可变行高由实测覆盖并作废后续偏移', () => {
-  const L = new VirtualListLayout(50);
-  L.setSize(0, 20);
-  L.setSize(1, 30);
-  // 偏移基于实测 + 默认补齐
-  assert.equal(L.getItemOffset(0), 0);
-  assert.equal(L.getItemOffset(1), 20);
-  assert.equal(L.getItemOffset(2), 50); // 20+30
-  assert.equal(L.totalSize(3), 50 + 50); // 最后一行(2) 用默认 50
-  assert.equal(L.findStartIndex(30), 1); // 偏移 0,20,50 -> 30 落于行1
-  assert.equal(L.findStartIndex(20), 1);
-  assert.equal(L.findStartIndex(19), 0);
-  invariant(L, 30);
-});
-
-test('VirtualListLayout: 修改高度后反向修正（setSize 使后续偏移重算）', () => {
-  const L = new VirtualListLayout(40);
-  L.setSize(0, 100); // 行 0 变高
-  L.getItemOffset(1); // 100
-  L.setSize(0, 40); // 改回
-  assert.equal(L.getItemOffset(1), 40); // 作废后重算
-  assert.equal(L.getItemOffset(2), 80);
-});
-
-test('VirtualListLayout: 可视区裁剪（默认 overscan 参与）', () => {
-  const L = new VirtualListLayout(50);
-  // 视口 120px、overscan 2
-  const { first, lastExclusive } = L.getVisibleRange(0, 120, 2);
-  assert.equal(first, 0);
-  assert.ok(lastExclusive >= 2); // 至少盖住可视（行0,1,2）
-  // lastExclusive 为 5（0..3 扫描 + overscan2）
-});
-
-test('VirtualListLayout: scrollTop<->line 双向映射一致性', () => {
-  const L = new VirtualListLayout(47);
-  // 不规则高度
-  L.setSize(3, 90);
-  L.setSize(7, 12);
-  for (const off of [0, 47, 100, 200, 47 * 5 + 40]) {
-    invariant(L, off);
-    const line = L.findStartIndex(off);
-    const start = L.getItemOffset(line);
-    assert.ok(start <= off);
-  }
-});
-
-test('VirtualListLayout: totalSize 返回整列表末行结束偏移', () => {
-  const L = new VirtualListLayout(30);
-  assert.equal(L.totalSize(0), 0);
-  L.setSize(0, 60);
-  assert.equal(L.totalSize(1), 60);
-  L.setSize(2, 10);
-  assert.equal(L.totalSize(4), 60 + 30 + 10 + 30);
-});
-
-/* --------------------- 摘要 / 格式化 --------------------- */
+/* --------------------- 缺失拉取窗口 --------------------- */
 
 test('summarizeRecord: 优先使用字段推断，缺少时回退顶层 key', () => {
   const rec = { name: 'alice', age: 30, tags: ['a', 'b'], note: 'x' };

@@ -5,13 +5,9 @@
  * 是虚拟滚动正确性的单一事实来源。包含：
  *   - LRUCache             : 记录缓存（容量上限，命中即提升 recency）。
  *   - ThrottleQueue        : 「节流 + 合并」调度器，合并同窗口请求、避免请求风暴。
- *   - VirtualListLayout    : 可变行高虚拟列表的位置数学（scrollTop <-> line 双向 + 可视区裁剪）。
  *   - computeFetchWindow   : 计算「应新拉取」的缺失行的连续窗口，避免重复解析已缓存行。
+ *   - segmentSortedLines   : 过滤态下把命中行按相邻性分段（稀疏匹配不拉大区间）。
  *   - 摘要格式化           : formatValue / summarizeRecord / truncate / 概览数字格式化。
- *
- * 行高策略：默认行高 + 已渲染行「实测覆盖」。仅记录精确访问到的行（存储以 Map<line,height>，
- * 稀疏、与可视区成正比）。任意两条（默认高度、实测高度）之间用二分定位 + 从锚点向前累计，
- * 因此单个滚轮事件的计算量 O(可见区)，与总行数无关。
  */
 
 /* ------------------------------ LRU 缓存 ------------------------------ */
@@ -115,8 +111,15 @@ export class ThrottleQueue<T> {
       while (this.pending) {
         const v = this.latest as T;
         this.pending = false;
-        // await：worker 内可以通过异步节奏聚合，期间新 push 只更新 latest。
-        await this.worker(v);
+        try {
+          // await：worker 内可以通过异步节奏聚合，期间新 push 只更新 latest。
+          await this.worker(v);
+        } catch (e) {
+          // M6：worker 失败时丢弃当前值（若无更新的值），避免宿主持续报错时无限重试。
+          // 若执行期间已有新 push（latest !== v），保留新值交给尾随 drain。
+          if (this.latest === v) this.latest = undefined;
+          console.error('[ThrottleQueue] worker 失败，已跳过该批次:', e);
+        }
       }
     } finally {
       this.running = false;
@@ -148,145 +151,6 @@ export class ThrottleQueue<T> {
   }
 }
 
-/* ------------------- 可变行高虚拟列表位置数学 ------------------- */
-
-interface ItemMeta {
-  /** 从列表顶（第 0 行）到本行起始的累计像素偏移。 */
-  offset: number;
-  /** 本行的像素高度（实测或回退默认）。 */
-  size: number;
-}
-
-/** 可视区裁剪参数：可视行上/下各多渲染 N 行为缓冲区。 */
-export const OVERSCAN_ROWS = 10;
-
-/**
- * 可变行高虚拟列表的「位置引擎」（纯逻辑，可用任何数据源驱动）。
- *
- * 维护：
- *   - `measured: Map<line,px>`  实际测量到的行高（稀疏，只含渲染过的行）。
- *   - `meta: ItemMeta[]`        累计偏移缓存（0..lastBuilt 精确、其后按默认高度补足），
- *                                惰性构建，只随实际访问/渲染向前推进，两次访问间 O(1) 命中。
- *
- * 任意高度被修改（setSize）时，将其后的累计偏移作废，保证偏移永远一致。
- */
-export class VirtualListLayout {
-  private readonly meta: ItemMeta[] = [];
-  private readonly measured = new Map<number, number>();
-  defaultSize: number;
-
-  constructor(defaultSize: number = DEFAULT_ROW_HEIGHT) {
-    this.defaultSize = defaultSize;
-  }
-
-  /** 确保 meta 已构建到 index（含），不足则按 measured/default 顺序补齐。 */
-  private ensureMeta(index: number): void {
-    const from = this.meta.length;
-    if (from > index) return;
-    let offset = from === 0 ? 0 : this.meta[from - 1].offset + this.meta[from - 1].size;
-    let i = from;
-    while (i <= index) {
-      const size = this.measured.get(i) ?? this.defaultSize;
-      this.meta.push({ offset, size });
-      offset += size;
-      i++;
-    }
-  }
-
-  /** 第 index 行起始的累计偏移（line -> scrollTop 方向）。 */
-  getItemOffset(index: number): number {
-    if (index < 0) return 0;
-    this.ensureMeta(index);
-    return this.meta[index].offset;
-  }
-
-  /** 第 index 行的像素高度（实测优先，否则默认）。 */
-  getItemSize(index: number): number {
-    return this.measured.get(index) ?? this.defaultSize;
-  }
-
-  /** 已测量到的行高；未测量则 undefined。 */
-  getMeasured(index: number): number | undefined {
-    return this.measured.get(index);
-  }
-
-  /** 设行高并作废其后的累计偏移。 */
-  setSize(index: number, size: number): void {
-    const clamped = Number.isFinite(size) && size > 0 ? size : this.defaultSize;
-    if (this.measured.get(index) === clamped) return;
-    this.measured.set(index, clamped);
-    this.resetFrom(index);
-  }
-
-  /** meta 只保留 [0, index)，其后的作废（下次访问会基于真实 measured 重建）。 */
-  private resetFrom(index: number): void {
-    if (index <= 0) {
-      this.meta.length = 0;
-      return;
-    }
-    this.meta.length = Math.min(this.meta.length, index);
-  }
-
-  /**
-   * scrollTop -> line 方向：返回顶行位于该偏移处的行号。
-   * 用一个「按默认高度估算的行号」先建立精确前缀，再二分 + 少量向前补齐，
-   * 使典型滚动场景为 O(1)～O(可见区)；极端大跳转一次摊销 O(目标行/默认高)。
-   */
-  findStartIndex(scrollTop: number): number {
-    if (scrollTop <= 0) return 0;
-    // 以默认高度估算为下界，保证能覆盖到的偏移足够二分（若前面有更高的实测行，这里还会再补）。
-    const est = Math.max(0, Math.floor(scrollTop / this.defaultSize));
-    this.ensureMeta(est);
-    let guard = 0;
-    while (this.meta[this.meta.length - 1].offset <= scrollTop) {
-      this.ensureMeta(this.meta.length); // 追加一行
-      if (++guard > 1_000_000) break; // 防御
-    }
-    // 二分：最大的 i，使 meta[i].offset <= scrollTop
-    let lo = 0;
-    let hi = this.meta.length - 1;
-    let ans = 0;
-    while (lo <= hi) {
-      const mid = (lo + hi) >> 1;
-      if (this.meta[mid].offset <= scrollTop) {
-        ans = mid;
-        lo = mid + 1;
-      } else {
-        hi = mid - 1;
-      }
-    }
-    return ans;
-  }
-
-  /**
-   * 可视区裁剪：由 scrollTop + 视口高度 -> [first, lastExclusive)，上下各带 overscan 行缓冲。
-   */
-  getVisibleRange(
-    scrollTop: number,
-    viewportHeight: number,
-    overscan = OVERSCAN_ROWS
-  ): { first: number; lastExclusive: number } {
-    const first = Math.max(0, this.findStartIndex(scrollTop) - overscan);
-    let end = first;
-    const limitPx = scrollTop + viewportHeight;
-    let guard = 0;
-    while (this.getItemOffset(end) <= limitPx) {
-      end++;
-      if (++guard > 5_000_000) break; // 防御越界
-    }
-    end += overscan;
-    return { first, lastExclusive: end };
-  }
-
-  /** 整列表的总像素高度（含最后一行的高度）。 */
-  totalSize(totalRows: number): number {
-    if (totalRows <= 0) return 0;
-    this.ensureMeta(totalRows - 1);
-    const last = totalRows - 1;
-    return this.meta[last].offset + this.meta[last].size;
-  }
-}
-
 /* ------------------- 缺失拉取窗口 ------------------- */
 
 export interface FetchWindow {
@@ -312,6 +176,33 @@ export function computeFetchWindow(
   return { start: s, count: e - s };
 }
 
+/**
+ * 把升序行号数组 [start, end)（半开）按「相邻性」切成若干连续段。
+ * 用于过滤态下只拉取实际命中的行——稀疏匹配（如命中行分布在第 100 与第 500 万行）
+ * 时，避免请求横跨数百万行的连续大区间。
+ * 返回的半开区间段：{ first, lastExclusive }。
+ */
+export function segmentSortedLines(
+  sorted: readonly number[],
+  start: number,
+  end: number
+): { first: number; lastExclusive: number }[] {
+  if (end <= start || start < 0 || end > sorted.length) return [];
+  const segs: { first: number; lastExclusive: number }[] = [];
+  let segStart = sorted[start];
+  let prev = segStart;
+  for (let i = start + 1; i < end; i++) {
+    const cur = sorted[i];
+    if (cur !== prev + 1) {
+      segs.push({ first: segStart, lastExclusive: prev + 1 });
+      segStart = cur;
+    }
+    prev = cur;
+  }
+  segs.push({ first: segStart, lastExclusive: prev + 1 });
+  return segs;
+}
+
 /* ------------------- 摘要格式化 ------------------- */
 
 export interface FieldLike {
@@ -320,8 +211,6 @@ export interface FieldLike {
   freq?: number;
 }
 
-/** 列表卡片的默认行高估算（px）。 */
-export const DEFAULT_ROW_HEIGHT = 64;
 /** 顶层摘要字段个数上限。 */
 export const MAX_TOP_LEVEL_KEYS = 4;
 /** 单字段展示的字符串最大长度（超出省略）。 */

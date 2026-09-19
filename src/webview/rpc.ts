@@ -33,6 +33,14 @@ interface Pending {
   settled: boolean;
 }
 
+/** 请求被覆盖式取消（supersede）时抛出的错误类型。 */
+export class CancelledError extends Error {
+  constructor(message = 'request superseded') {
+    super(message);
+    this.name = 'CancelledError';
+  }
+}
+
 /**
  * 从全局取出 VS Code 注入的 acquireVsCodeApi 并生成 API。
  * 传入可选的 global 对象以便单测注入假实现；默认读 globalThis。
@@ -61,17 +69,25 @@ export interface RequestOptions {
 
 export class RpcBus {
   private readonly pending = new Map<string, Pending>();
-  private initHandlers = new Set<InitHandler>();
-  private jumpHandlers = new Set<JumpHandler>();
-  private staleHandlers = new Set<StaleHandler>();
-  private errorHandlers = new Set<ErrorHandler>();
+  private readonly initHandlers = new Set<InitHandler>();
+  private readonly jumpHandlers = new Set<JumpHandler>();
+  private readonly staleHandlers = new Set<StaleHandler>();
+  private readonly errorHandlers = new Set<ErrorHandler>();
+  private readonly api: VSCodeApi;
 
-  constructor(private readonly api: VSCodeApi) {
-    globalThis.addEventListener('message', this.onMessage);
+  // 注意：不用参数属性语法（Node 类型擦除运行 TS 单测时不支持）。
+  constructor(api: VSCodeApi) {
+    this.api = api;
+    // 防御：非浏览器环境（如 node:test 单测）可能没有全局 message 事件，降级为 no-op。
+    if (typeof globalThis.addEventListener === 'function') {
+      globalThis.addEventListener('message', this.onMessage);
+    }
   }
 
   dispose(): void {
-    globalThis.removeEventListener('message', this.onMessage);
+    if (typeof globalThis.removeEventListener === 'function') {
+      globalThis.removeEventListener('message', this.onMessage);
+    }
     for (const [, p] of this.pending) {
       if (p.timer) clearTimeout(p.timer);
     }
@@ -134,12 +150,17 @@ export class RpcBus {
   }
 
   /**
-   * 请求在途取消：示意宿主中断（宿主可能忽略），并本地把该 requestId 标记为 superseded，
-   * 使迟到的响应被丢弃（不会写入错误数据 / 不会触发 UI 更新）。
+   * 请求在途取消：示意宿主中断（宿主可能忽略），并立即结算本地 Promise
+   * （抛 CancelledError），使迟到的响应被丢弃——不残留 pending 表项，也不等 15s 超时。
    */
   supersede(requestId: string): void {
     const p = this.pending.get(requestId);
-    if (p) p.superseded = true;
+    if (p && !p.settled) {
+      p.settled = true;
+      this.pending.delete(requestId);
+      if (p.timer) clearTimeout(p.timer);
+      p.reject(new CancelledError());
+    }
     this.api.postMessage({ type: HostEndpoint.CANCEL, requestId });
   }
 

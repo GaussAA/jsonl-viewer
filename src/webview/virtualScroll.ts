@@ -204,7 +204,11 @@ export class VirtualRecordList {
     const input = this.sideEl.querySelector<HTMLInputElement>('.jlv-pager-input');
     if (!input) return;
     const n = Number(input.value);
-    if (!Number.isFinite(n)) return;
+    // 非法/越界值回退原页码（设计体系 §3.3：非法输入不跳转）。
+    if (!Number.isFinite(n) || n < 1 || Math.floor(n) > this.pages) {
+      input.value = String(this.page + 1);
+      return;
+    }
     this.goToPage(Math.floor(n) - 1);
     input.value = String(this.page + 1);
   }
@@ -234,6 +238,11 @@ export class VirtualRecordList {
 
     const cards = Array.from(this.inner.children) as HTMLElement[];
     if (animate && cards.length > 0) {
+      // reduced-motion：动画被样式禁用，出口直接完成（不等固定时长）。
+      if (matchMediaReduced()) {
+        this.rebuild();
+        return;
+      }
       // 出口：旧卡片逐个向左滑出
       cards.forEach((c, i) => {
         c.classList.add('jlv-card-leaving');
@@ -258,6 +267,7 @@ export class VirtualRecordList {
     if (this.totalRows <= 0) {
       const empty = document.createElement('div');
       empty.className = 'jlv-empty';
+      empty.setAttribute('role', 'status'); // 空态/无结果变化播报给读屏
       const filtered = this.translation !== null && this.translation.length === 0;
 
       const icon = document.createElement('div');
@@ -310,6 +320,7 @@ export class VirtualRecordList {
     const real = this.realLine(d);
     const card = document.createElement('div');
     card.className = 'jlv-record-card';
+    card.id = `jlv-opt-${real}`;
     card.dataset.line = String(real);
     card.setAttribute('role', 'option');
     card.addEventListener('click', () => {
@@ -361,6 +372,7 @@ export class VirtualRecordList {
     copy.type = 'button';
     copy.className = 'jlv-card-line__copy';
     copy.title = `复制行号 L${real + 1}`;
+    copy.setAttribute('aria-label', `复制行号 L${real + 1}`);
     copy.innerHTML = ICON_COPY;
     copy.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -384,7 +396,7 @@ export class VirtualRecordList {
         .map((it) => {
           const cls = previewKind(it.display);
           const val = it.display.length > 40 ? `${it.display.slice(0, 40)}…` : it.display;
-          return `<span class="key">${it.key}</span>: <span class="${cls}">${escapeHtml(val)}</span>`;
+          return `<span class="key">${escapeHtml(it.key)}</span>: <span class="${cls}">${escapeHtml(val)}</span>`;
         })
         .join(' · ');
     }
@@ -418,11 +430,16 @@ export class VirtualRecordList {
   }
 
   private applySelection(): void {
+    let activeId: string | undefined;
     for (const el of Array.from(this.inner.children) as HTMLElement[]) {
       const isSel = Number(el.dataset.line) === this.selectedLine;
       el.classList.toggle('selected', isSel);
       el.setAttribute('aria-selected', isSel ? 'true' : 'false');
+      if (isSel && el.id) activeId = el.id;
     }
+    // 同步 listbox 的 activedescendant，读屏可感知选中行（仅当选中的行在当前页）。
+    if (activeId) this.scrollEl.setAttribute('aria-activedescendant', activeId);
+    else this.scrollEl.removeAttribute('aria-activedescendant');
   }
 
   /** 重建分页条（两行：导航+窗口页码 / 跳页+统计）。 */
@@ -493,7 +510,7 @@ export class VirtualRecordList {
     this.sideEl.appendChild(summary);
   }
 
-  /** 滚动/切换分页到指定真实行所在页，并选中该行。 */
+  /** 滚动/切换分页到指定真实行所在页，并选中该行（同时联动详情面板）。 */
   private reveal(real: number): void {
     const d = this.displayPosOf(real);
     if (d < 0) {
@@ -501,14 +518,15 @@ export class VirtualRecordList {
       this.clampPage();
       this.render(true);
       this.select(real);
-      return;
+    } else {
+      const targetPage = Math.floor(d / this.pageSize);
+      if (targetPage !== this.page) {
+        this.page = targetPage;
+        this.render(true);
+      }
+      this.select(real);
     }
-    const targetPage = Math.floor(d / this.pageSize);
-    if (targetPage !== this.page) {
-      this.page = targetPage;
-      this.render(true);
-    }
-    this.select(real);
+    this.cb.onSelect(real); // 键盘导航也要加载右栏详情（此前遗漏，功能级缺陷）
   }
 
   /** 目录键盘导航。 */
@@ -543,7 +561,11 @@ export class VirtualRecordList {
       e.preventDefault();
       this.goToPage(e.key === 'PageDown' ? this.page + 1 : this.page - 1);
       const d = Math.min(this.pageStart(), this.totalRows - 1);
-      if (d >= 0) this.select(this.realLine(d));
+      if (d >= 0) {
+        const real = this.realLine(d);
+        this.select(real);
+        this.cb.onSelect(real);
+      }
       return;
     }
 
@@ -553,7 +575,20 @@ export class VirtualRecordList {
       this.page = Math.floor(d / this.pageSize);
       this.clampPage();
       this.render(true);
-      this.select(this.realLine(d));
+      const real = this.realLine(d);
+      this.select(real);
+      this.cb.onSelect(real);
+      return;
+    }
+
+    // Enter：激活当前选中行（加载详情），无选中时选当前页第一行。
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      const real =
+        this.selectedLine !== undefined && this.displayPosOf(this.selectedLine) >= 0
+          ? this.selectedLine
+          : this.realLine(this.pageStart());
+      this.reveal(real);
       return;
     }
 
@@ -564,6 +599,14 @@ export class VirtualRecordList {
 }
 
 /* ------------------- 卡片辅助（原型预览） ------------------- */
+
+/** 用户是否偏好减少动态效果（prefers-reduced-motion）。 */
+function matchMediaReduced(): boolean {
+  return (
+    typeof window.matchMedia === 'function' &&
+    window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  );
+}
 
 function jsonKindOfValue(value: unknown): string {
   if (value === null) return 'null';

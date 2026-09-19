@@ -226,6 +226,13 @@ body {
 
 /* 按钮行（原型 .toolbar-actions / .btn）——宽度自适应文本 */
 .jlv-toolbar-actions { display: flex; align-items: center; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
+.jlv-filter-note {
+  display: block; margin-top: 8px; font-size: 11px;
+  color: color-mix(in srgb, var(--jlv-warn) 90%, var(--jlv-fg));
+  background: color-mix(in srgb, var(--jlv-warn) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--jlv-warn) 25%, transparent);
+  border-radius: 6px; padding: 4px 8px;
+}
 .jlv-btn {
   display: inline-flex; align-items: center; gap: 5px;
   font-size: 11px; color: var(--jlv-dim); padding: 5px 12px;
@@ -359,7 +366,7 @@ body {
   border: 1px solid rgba(255,255,255,0.05);
   border-radius: 10px;
 }
-.jlv-pager-nav { display: flex; align-items: center; gap: 1px; }
+.jlv-pager-nav { display: flex; align-items: center; gap: 1px; flex-wrap: wrap; }
 .jlv-pager-btn {
   width: 26px; height: 22px; padding: 0;
   background: rgba(255,255,255,0.04); border: none; border-radius: 5px; cursor: pointer;
@@ -377,7 +384,7 @@ body {
 }
 .jlv-pager-btn.jlv-pager-navbtn { width: 20px; color: var(--jlv-dim); font-size: 12px; }
 .jlv-pager-ellipsis { width: 20px; text-align: center; color: var(--jlv-dim); opacity: .5; font-size: 11px; flex-shrink: 0; user-select: none; }
-.jlv-pager-side { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.jlv-pager-side { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
 .jlv-pager-summary { font-family: var(--jlv-mono); white-space: nowrap; color: var(--jlv-dim); }
 .jlv-pager-input-wrap { display: inline-flex; align-items: center; gap: 4px; font-size: 10px; color: var(--jlv-dim); white-space: nowrap; }
 .jlv-pager-input {
@@ -517,7 +524,11 @@ body {
 .jlv-tree-row .toggler svg { transition: transform 150ms var(--jlv-ease); transform: rotate(0deg); }
 /* 未展开朝右 ▶（默认 0°），已展开朝下 ▼（90°） */
 .jlv-tree-row.expanded .toggler svg { transform: rotate(90deg); }
-.jlv-tree-row .jlv-key { color: var(--jlv-key); flex: none; }
+.jlv-tree-row .jlv-key {
+  color: var(--jlv-key); flex: none;
+  /* 长字段名省略 + hover 看全名（M11：此前被 overflow-x:hidden 硬截断且无 title） */
+  max-width: 42%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .jlv-tree-row .jlv-colon { color: var(--jlv-dim); opacity: .7; flex-shrink: 0; }
 .jlv-tree-row .jlv-value { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .jlv-tree-row .jlv-value.str { color: var(--jlv-string); }

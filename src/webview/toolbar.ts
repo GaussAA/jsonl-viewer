@@ -49,6 +49,7 @@ export function createToolbar(host: HTMLElement, handlers: ToolbarHandlers = {})
   setFields(fields: readonly FieldOption[] | null): void;
   setLayout(layout: FieldLayout): void;
   setSearchResult(total: number, index: number): void;
+  setFilterTruncated(truncated: boolean): void;
 } {
   const root = document.createElement('div');
   root.className = 'jlv-toolbar';
@@ -96,16 +97,14 @@ export function createToolbar(host: HTMLElement, handlers: ToolbarHandlers = {})
   searchClear.type = 'button';
   searchClear.className = 'jlv-search-clear';
   searchClear.title = '清除搜索';
+  searchClear.setAttribute('aria-label', '清除搜索');
   searchClear.hidden = true;
   searchClear.innerHTML = ICON_CLEAR;
 
   const matchInfo = document.createElement('span');
   matchInfo.className = 'jlv-search-count';
   matchInfo.hidden = true;
-
-  const searchKbd = document.createElement('span');
-  searchKbd.className = 'jlv-search-kbd';
-  searchKbd.textContent = '⌘K';
+  matchInfo.setAttribute('aria-live', 'polite'); // 搜索计数变化播报给读屏
 
   const navGroup = document.createElement('div');
   navGroup.style.cssText = 'display:flex;align-items:center;gap:4px;flex:none;';
@@ -114,16 +113,18 @@ export function createToolbar(host: HTMLElement, handlers: ToolbarHandlers = {})
   prevBtn.className = 'jlv-nav-btn';
   prevBtn.textContent = '↑';
   prevBtn.title = '上一个匹配';
+  prevBtn.setAttribute('aria-label', '上一个匹配');
   prevBtn.disabled = true;
   const nextBtn = document.createElement('button');
   nextBtn.type = 'button';
   nextBtn.className = 'jlv-nav-btn';
   nextBtn.textContent = '↓';
   nextBtn.title = '下一个匹配';
+  nextBtn.setAttribute('aria-label', '下一个匹配');
   nextBtn.disabled = true;
   navGroup.append(prevBtn, nextBtn);
 
-  search.append(iconSpan('jlv-search-ic', ICON_SEARCH), searchInputEl, searchClear, matchInfo, searchKbd, navGroup);
+  search.append(iconSpan('jlv-search-ic', ICON_SEARCH), searchInputEl, searchClear, matchInfo, navGroup);
   root.appendChild(search);
 
   const updateClear = (): void => {
@@ -151,8 +152,16 @@ export function createToolbar(host: HTMLElement, handlers: ToolbarHandlers = {})
   const rangeEl = document.createElement('span');
   rangeEl.className = 'jlv-page-info';
 
+  // 过滤结果截断提示（M7：宿主结果被截断时 UI 不再静默显示不全的匹配集）。
+  const filterNoteEl = document.createElement('span');
+  filterNoteEl.className = 'jlv-filter-note';
+  filterNoteEl.hidden = true;
+  filterNoteEl.setAttribute('aria-live', 'polite');
+  filterNoteEl.textContent = '过滤结果较多，已截断（约前 5 万条）';
+
   actions.append(filterBtn, customizeBtn, rangeEl);
   root.appendChild(actions);
+  root.appendChild(filterNoteEl);
 
   /* ---------- 过滤面板（原型 .jlv-float-panel） ---------- */
   let filterPanel: HTMLElement | null = null;
@@ -177,7 +186,7 @@ export function createToolbar(host: HTMLElement, handlers: ToolbarHandlers = {})
     title: string,
     anchor: HTMLElement,
     onClose?: () => void
-  ): { panel: HTMLElement; close(): void } => {
+  ): { panel: HTMLElement; close(): void; open(): void } => {
     const panel = document.createElement('div');
     panel.className = 'jlv-float-panel';
     // 定位：锚定触发按钮下方（fixed + 显式 top/left，防视口默认位置）
@@ -192,6 +201,7 @@ export function createToolbar(host: HTMLElement, handlers: ToolbarHandlers = {})
     closeBtn.className = 'jlv-panel-close';
     closeBtn.textContent = '✕';
     closeBtn.title = '关闭';
+    closeBtn.setAttribute('aria-label', '关闭');
     h3.append(titleSpan, closeBtn);
     panel.appendChild(h3);
     document.body.appendChild(panel);
@@ -202,14 +212,33 @@ export function createToolbar(host: HTMLElement, handlers: ToolbarHandlers = {})
       setTimeout(() => {
         panel.style.display = 'none';
         panel.classList.remove('closing');
-      }, 100);
+      }, 120); // 与样式 --dur-fast:120ms 对齐（此前 100ms 会截断淡出）
     };
     closeBtn.addEventListener('click', close);
-    return { panel, close };
+    // 打开：显示 + 焦点移入第一个可聚焦控件（M9：此前焦点留在触发按钮，读屏/键盘迷失）
+    const open = (): void => {
+      panel.style.display = 'block';
+      const first = panel.querySelector<HTMLElement>('button, input, select');
+      (first ?? closeBtn).focus();
+    };
+    // Esc 关闭面板（焦点在面板内时）
+    panel.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') close();
+    });
+    // 外点关闭：点击面板外（且不在触发按钮上）即收起（M9：与原型行为对齐）
+    document.addEventListener('pointerdown', (e) => {
+      if (panel.style.display === 'none') return;
+      const t = e.target as HTMLElement;
+      if (panel.contains(t) || anchor.contains(t)) return;
+      close();
+    });
+    return { panel, close, open };
   };
 
   const buildFilterPanel = (): void => {
-    const { panel, close } = panelShell('字段筛选', filterBtn, () => filterBtn.classList.remove('active'));
+    const { panel, close, open } = panelShell('字段筛选', filterBtn, () =>
+      filterBtn.classList.remove('active')
+    );
     const fieldSel = document.createElement('select');
     fieldSel.title = '字段';
     populateFieldSel(fieldSel);
@@ -279,7 +308,9 @@ export function createToolbar(host: HTMLElement, handlers: ToolbarHandlers = {})
     panel.appendChild(acts);
 
     (panel as unknown as { _fieldSel?: HTMLSelectElement })._fieldSel = fieldSel;
-    filterPanel = panel;
+    // 面板复用实例上附加 open/close，供触发按钮切换时调用
+    Object.assign(panel, { close, open });
+    filterPanel = panel as HTMLElement & { open(): void; close(): void };
   };
 
   filterBtn.addEventListener('click', () => {
@@ -291,14 +322,15 @@ export function createToolbar(host: HTMLElement, handlers: ToolbarHandlers = {})
     if (!filterPanel || !document.body.contains(filterPanel)) {
       // 首次创建：直接显示（避免 display 状态误判导致需点两次）
       buildFilterPanel();
-      const panel = filterPanel as HTMLElement;
-      panel.style.display = 'block';
+      const panel = filterPanel as HTMLElement & { open(): void; close(): void };
+      panel.open();
       filterBtn.classList.add('active');
       return;
     }
-    const panel = filterPanel as HTMLElement;
+    const panel = filterPanel as HTMLElement & { open(): void; close(): void };
     const visible = panel.style.display !== 'none';
-    panel.style.display = visible ? 'none' : 'block';
+    if (visible) panel.close();
+    else panel.open();
     filterBtn.classList.toggle('active', !visible);
   });
 
@@ -307,7 +339,9 @@ export function createToolbar(host: HTMLElement, handlers: ToolbarHandlers = {})
   let panelLayout: FieldLayout = { pinned: [], order: [], hidden: [], maxKeys: 4 };
 
   const buildLayoutPanel = (): void => {
-    const { panel, close } = panelShell('字段定制', customizeBtn, () => customizeBtn.classList.remove('active'));
+    const { panel, close, open } = panelShell('字段定制', customizeBtn, () =>
+      customizeBtn.classList.remove('active')
+    );
 
     const head = document.createElement('div');
     head.className = 'jlv-panel-head';
@@ -335,7 +369,8 @@ export function createToolbar(host: HTMLElement, handlers: ToolbarHandlers = {})
     (panel as unknown as { _emit?: () => void; _list?: HTMLElement; _maxInput?: HTMLInputElement })._emit = emit;
     (panel as unknown as { _list?: HTMLElement })._list = list;
     (panel as unknown as { _maxInput?: HTMLInputElement })._maxInput = maxInput;
-    layoutPanel = panel;
+    Object.assign(panel, { close, open });
+    layoutPanel = panel as HTMLElement & { open(): void; close(): void };
   };
 
   const readLayoutFromDom = (): FieldLayout => {
@@ -476,14 +511,15 @@ export function createToolbar(host: HTMLElement, handlers: ToolbarHandlers = {})
       // 首次创建：直接显示
       buildLayoutPanel();
       rebuildLayoutRows();
-      const panel = layoutPanel as HTMLElement;
-      panel.style.display = 'block';
+      const panel = layoutPanel as HTMLElement & { open(): void; close(): void };
+      panel.open();
       customizeBtn.classList.add('active');
       return;
     }
-    const panel = layoutPanel as HTMLElement;
+    const panel = layoutPanel as HTMLElement & { open(): void; close(): void };
     const visible = panel.style.display !== 'none';
-    panel.style.display = visible ? 'none' : 'block';
+    if (visible) panel.close();
+    else panel.open();
     customizeBtn.classList.toggle('active', !visible);
   });
 
@@ -566,6 +602,11 @@ export function createToolbar(host: HTMLElement, handlers: ToolbarHandlers = {})
     matchInfo.textContent = `${shown}/${total}`;
   };
 
+  /** M7：过滤结果被宿主截断时显示提示。 */
+  const setFilterTruncated = (truncated: boolean): void => {
+    filterNoteEl.hidden = !truncated;
+  };
+
   return {
     root,
     els,
@@ -575,6 +616,7 @@ export function createToolbar(host: HTMLElement, handlers: ToolbarHandlers = {})
     setFields,
     setLayout,
     setSearchResult,
+    setFilterTruncated,
   };
 }
 

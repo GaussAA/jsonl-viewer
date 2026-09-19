@@ -24,7 +24,7 @@ import type { FieldCondition } from '../webview/queryLogic.ts';
 export interface SearchScope {
   /** 起（含），默认 0。 */
   startLine?: number;
-  /** 止（含），默认全文件最后一行。 */
+  /** 止（不含），默认全文件最后一行之后。 */
   endLine?: number;
 }
 
@@ -77,9 +77,13 @@ export async function searchLines(
       : await fullTextHit(line, reader, li, q, opts.caseInsensitive);
 
     if (hit) {
+      if (matches.length >= maxResults) {
+        // 达上限立即终止扫描（M1：此前仅停 push 仍扫完全文件，高频词搜索整文件 O(bytes) 浪费）。
+        truncated = true;
+        break;
+      }
+      matches.push(line);
       total++;
-      if (matches.length < maxResults) matches.push(line);
-      else truncated = true;
     }
 
     if ((line - start) % scanEvery === scanEvery - 1) await yieldToLoop();
@@ -166,8 +170,12 @@ export async function filterLines(
     if (!r.ok || r.value === undefined) continue;
     const value = recordFieldValue(r.value, cond.field);
     if (matchesFilter(value, cond)) {
-      if (matches.length < maxResults) matches.push(line);
-      else truncated = true;
+      if (matches.length >= maxResults) {
+        // 达上限立即终止扫描（M1：此前仅停 push 仍扫完全文件）。
+        truncated = true;
+        break;
+      }
+      matches.push(line);
     }
     if ((line - start) % scanEvery === scanEvery - 1) await yieldToLoop();
   }

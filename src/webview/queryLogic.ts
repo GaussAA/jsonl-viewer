@@ -301,7 +301,8 @@ export function mergePersistedState(
   const s = saved as Record<string, unknown>;
   const merged = { ...current };
 
-  if (s.fieldLayout) {
+  if (s.fieldLayout && typeof s.fieldLayout === 'object') {
+    // M13：仅接受合法对象——脏数据（非对象）不覆盖当前布局。
     merged.fieldLayout = normalizeFieldLayout(s.fieldLayout, knownKeys ?? null);
   }
   if (s.filter && typeof s.filter === 'object') {

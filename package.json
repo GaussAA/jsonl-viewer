@@ -24,7 +24,8 @@
     "Other"
   ],
   "engines": {
-    "vscode": "^1.85.0"
+    "vscode": "^1.85.0",
+    "node": ">=22.18"
   },
   "main": "./dist/extension.js",
   "activationEvents": [
@@ -86,7 +87,6 @@
     "@types/node": "^20.14.0",
     "@types/vscode": "^1.85.0",
     "@vscode/vsce": "^4.0.0",
-    "@vscode/webview-ui-toolkit": "^1.4.0",
     "esbuild": "^0.24.0",
     "typescript": "^5.4.0"
   },

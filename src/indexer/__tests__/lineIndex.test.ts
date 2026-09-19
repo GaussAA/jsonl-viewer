@@ -77,7 +77,6 @@ test('混入坏 JSON 行：单个坏行以 \\n 为单位切分时定位依旧准
 
 test('跨 chunk 的 \\n 边界在极小 chunk 下正确（强制边界采样）', async () => {
   // chunk=可以保证某个换行位于切片末尾/开头，逐字节切分也验证无遗漏
-  const s = 'x'.repeat(1);
   const perLine: number[] = [];
   for (let i = 0; i < 30; i++) perLine.push(i * 1);
   const content = Array.from({ length: 30 }, (_, i) => `${'k'.repeat(0)}${i}`).join('\n') + '\n';

@@ -80,7 +80,6 @@ export class LineIndex implements LineIndexStats {
       | Iterable<Buffer | string>,
     opts: LineIndexOpts = {}
   ): Promise<LineIndex> {
-    const chunkSize = opts.chunkSize ?? 1024 * 1024;
     const reportInterval = opts.reportInterval ?? 4 * 1024 * 1024;
     const onProgress = opts.onProgress;
 

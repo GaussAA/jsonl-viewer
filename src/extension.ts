@@ -44,7 +44,12 @@ function hostErr(message: string): void {
  * and "jump to source line" error location.
  */
 export class JsonlCustomEditorProvider implements vscode.CustomTextEditorProvider {
-  constructor(private readonly context: vscode.ExtensionContext) {}
+  private readonly context: vscode.ExtensionContext;
+
+  // 注意：不用参数属性语法（Node 类型擦除运行 TS 单测时不支持）。
+  constructor(context: vscode.ExtensionContext) {
+    this.context = context;
+  }
 
   async resolveCustomTextEditor(
     document: vscode.TextDocument,
@@ -114,13 +119,6 @@ export class JsonlCustomEditorProvider implements vscode.CustomTextEditorProvide
                   const st = Date.now();
                   const init = initReply(await data.getOverview());
                   hostLog(`init 回执构建完成 (${Date.now() - st}ms)`);
-                  // 随 init 主动推送一次抽样窗口的错误统计（webview 顶栏红标 / 概要）。
-                  void data
-                    .getErrorSummary()
-                    .then((payload) =>
-                      post({ type: HostReply.ERROR_SUMMARY, payload } as RpcMessage)
-                    )
-                    .catch(() => {});
                   return init;
                 },
                 async (_r) => data.getOverview(),
@@ -133,10 +131,10 @@ export class JsonlCustomEditorProvider implements vscode.CustomTextEditorProvide
                 async (_r, line) => data.readRecord(line),
                 (requestId) => {
                   cancel.add(requestId);
-                  // NOTE: 具体的在途请求中断由 Task 7 落地（如 AbortController）。
+                  // 可中断链路：readRecords/search/filter 逐行检查 cancel 集合，
+                  // 被取消即提前返回；其余轻量请求（抽样/详情/偏好）不响应中断。
                 },
                 async (_r, count) => data.getSampleFields(count),
-                async (_r, range) => data.getErrorLines(range),
                 async (line) => void (await jumpToSource(line)),
                 // Task 6：全文/字段搜索（宿主流式扫描；被 cancel 则中断）。
                 async (_r, query, field, scope) => {

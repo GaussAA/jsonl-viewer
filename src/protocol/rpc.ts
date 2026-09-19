@@ -24,8 +24,6 @@ export const HostEndpoint = {
   READ_RECORD: 'readRecord',
   SEARCH: 'search',
   FILTER: 'filter',
-  /** 查询某一范围的坏行集合（红标错误行）。 */
-  GET_ERROR_LINES: 'getErrorLines',
   /** 跳转到源文件对应行（坏行定位）。 */
   JUMP_TO_SOURCE: 'jumpToSource',
   /** 取消/中断某一在途请求（Task 7 使用，先留接口）。 */
@@ -44,10 +42,6 @@ export const HostReply = {
   OVERVIEW: 'overview',
   SAMPLE_FIELDS: 'sampleFields',
   RECORDS: 'records',
-  /** 坏行集合查询结果。 */
-  ERROR_LINES: 'errorLines',
-  /** 抽样范围错误统计（本次修改后由 host 主动推送）。 */
-  ERROR_SUMMARY: 'errorSummary',
   /** 搜索结果（匹配行号 + 总数）。 */
   SEARCH_RESULTS: 'searchResults',
   /** 字段过滤结果（匹配行号，null 表示不过滤=全量）。 */
@@ -81,30 +75,6 @@ export interface SampleFieldsPayload {
   total: number;
   /** 实际扫描的行数上限（min 抽样数, 总行数）。 */
   scanned: number;
-}
-
-/** 坏行集合查询范围（半开区间 [startLine, startLine+count)）。 */
-export interface ErrorLinesRange {
-  startLine: number;
-  count: number;
-}
-
-export interface ErrorLinesPayload {
-  /** 升序的坏行 lineId 集合。 */
-  lines: number[];
-}
-
-export interface ErrorSummaryPayload {
-  /** 抽样有效记录数。 */
-  totalValid: number;
-  /** 抽样范围内坏行数（含空行）。 */
-  totalInvalid: number;
-  /** 抽样行数（min 抽样数, 总行数）。 */
-  totalLines: number;
-  /** 抽样范围坏行 lineId（升序）。 */
-  errorLines: number[];
-  /** 抽样行数上限。 */
-  sampleLines: number;
 }
 
 export interface RecordsPayload {
@@ -170,7 +140,6 @@ export type HostRequest =
   | { type: typeof HostEndpoint.READ_RECORD; requestId: string; line: number }
   | { type: typeof HostEndpoint.SEARCH; requestId: string; query: string; field?: string; scope?: string }
   | { type: typeof HostEndpoint.FILTER; requestId: string; field?: string; op?: string; value?: string }
-  | { type: typeof HostEndpoint.GET_ERROR_LINES; requestId: string; range?: ErrorLinesRange }
   | { type: typeof HostEndpoint.JUMP_TO_SOURCE; requestId: string; line: number }
   | { type: typeof HostEndpoint.CANCEL; requestId: string }
   | { type: typeof HostEndpoint.PERSIST_STATE; requestId: string; key: string; value: unknown }
@@ -183,10 +152,8 @@ export type HostResponse =
   | { type: typeof HostReply.OVERVIEW; requestId: string; payload: OverviewPayload }
   | { type: typeof HostReply.SAMPLE_FIELDS; requestId: string; payload: SampleFieldsPayload }
   | { type: typeof HostReply.RECORDS; requestId: string; payload: RecordsPayload }
-  | { type: typeof HostReply.ERROR_LINES; requestId: string; payload: ErrorLinesPayload }
   | { type: typeof HostReply.SEARCH_RESULTS; requestId: string; payload: SearchResultsPayload }
   | { type: typeof HostReply.FILTER_RESULTS; requestId: string; payload: FilterResultsPayload }
-  | { type: typeof HostReply.ERROR_SUMMARY; payload: ErrorSummaryPayload }
   | { type: typeof HostReply.RESULT; requestId: string; payload: unknown }
   | { type: typeof HostReply.ERROR; requestId?: string; message: string }
   | { type: typeof HostReply.JUMP_TO_SOURCE; payload: JumpToSourcePayload }
@@ -266,7 +233,6 @@ export async function dispatchMessage(
       total: 0,
       scanned: 0,
     } satisfies SampleFieldsPayload),
-  onGetErrorLines: (r: string, range?: ErrorLinesRange) => Promise<number[]> | number[] = async () => [],
   onJumpToSource: (line: number, requestId: string) => void | Promise<void> = () => {},
   onSearch: (r: string, query: string, field?: string, scope?: string) => Promise<SearchResultsPayload> | SearchResultsPayload = async () => ({ matches: [], total: 0, truncated: false }),
   onFilter: (r: string, field?: string, op?: string, value?: string) => Promise<FilterResultsPayload> | FilterResultsPayload = async () => ({ matches: null, total: 0 }),
@@ -303,14 +269,6 @@ export async function dispatchMessage(
           HostReply.SAMPLE_FIELDS,
           msg.requestId,
           await onGetSampleFields(msg.requestId, msg.count)
-        ),
-      };
-    case HostEndpoint.GET_ERROR_LINES:
-      return {
-        response: okReply(
-          HostReply.ERROR_LINES,
-          msg.requestId,
-          { lines: await onGetErrorLines(msg.requestId, msg.range) } satisfies ErrorLinesPayload
         ),
       };
     case HostEndpoint.JUMP_TO_SOURCE:

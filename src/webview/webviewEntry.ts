@@ -15,6 +15,7 @@ import {
   computeFetchWindow,
   FieldLike,
   LRUCache,
+  segmentSortedLines,
   ThrottleQueue,
 } from './logic.ts';
 import type { RecordEntry } from './virtualScroll.ts';
@@ -264,11 +265,14 @@ function main(): void {
       return;
     }
     state.filterCond = cond;
-    const { requestId, promise } = bus.request<{ matches: number[] | null }>(HostEndpoint.FILTER, {
-      field: cond.field,
-      op: cond.op,
-      value: cond.value,
-    });
+    const { requestId, promise } = bus.request<{ matches: number[] | null; truncated?: boolean }>(
+      HostEndpoint.FILTER,
+      {
+        field: cond.field,
+        op: cond.op,
+        value: cond.value,
+      }
+    );
     state.filterInFlight = { rid: requestId, superseded: false };
 
     void promise
@@ -277,6 +281,8 @@ function main(): void {
         state.filterInFlight = null;
         const matches = res?.matches;
         state.filterMap = matches && matches.length > 0 ? matches : [];
+        // M7：宿主结果被截断时不再静默显示不全的匹配集。
+        toolbar.setFilterTruncated(!!res?.truncated);
         // 保留滚动位置尽力：不清 scrollTop，直接重建翻译。
         list.setTranslation(state.filterMap);
         list.refresh();
@@ -284,12 +290,14 @@ function main(): void {
       })
       .catch(() => {
         if (state.filterInFlight?.rid === requestId) state.filterInFlight = null;
+        toolbar.setFilterTruncated(false);
       });
   }
 
   function clearFilterForCond(): void {
     state.filterCond = null;
     state.filterMap = null;
+    toolbar.setFilterTruncated(false);
     list.setTranslation(null);
     schedulePersist();
   }
@@ -409,13 +417,12 @@ function main(): void {
       if (map && map.length > 0) {
         const end = Math.min(displayLast, map.length);
         if (displayFirst < end) {
-          const s = map[displayFirst];
-          const e = map[end - 1];
-          scheduleFetch.push({ first: s, lastExclusive: e + 1 });
+          // 稀疏匹配时只拉取实际命中的行（按相邻性分段），避免请求横跨数百万行的连续大区间。
+          scheduleFetch.push(segmentSortedLines(map, displayFirst, end));
         }
         return;
       }
-      scheduleFetch.push({ first: displayFirst, lastExclusive: displayLast });
+      scheduleFetch.push([{ first: displayFirst, lastExclusive: displayLast }]);
     },
     onJumpToSource: (line) => {
       // 右键「定位到源码行」：请宿主打开源文件并定位到该行（坏行定位同通道）。
@@ -476,18 +483,26 @@ function main(): void {
   }
 
   /* ---------------- 按需拉取调度器 ---------------- */
-  const scheduleFetch = new ThrottleQueue<{ first: number; lastExclusive: number }>(40, async (win) => {
-    await fetchWindow(win);
-  });
+  const scheduleFetch = new ThrottleQueue<{ first: number; lastExclusive: number }[]>(
+    40,
+    async (windows) => {
+      // 逐段串行拉取；任一段被 supersede/超时即放弃剩余段（已有更新的窗口请求接手）。
+      for (const win of windows) {
+        const ok = await fetchWindow(win);
+        if (!ok) return;
+      }
+    }
+  );
 
-  async function fetchWindow(win: { first: number; lastExclusive: number }): Promise<void> {
+  /** 拉取单个连续窗口。返回 false 表示被取消/超时/无需拉取（调用方应停止后续段）。 */
+  async function fetchWindow(win: { first: number; lastExclusive: number }): Promise<boolean> {
     const ov = state.overview;
-    if (!ov) return;
+    if (!ov) return false;
     const total = ov.totalLines;
     const s = clamp(win.first, 0, total);
     const e = clamp(win.lastExclusive, s, total);
     const missing = computeFetchWindow(s, e, (line) => state.cache.has(line) || state.pending.has(line));
-    if (!missing) return;
+    if (!missing) return false;
 
     // 覆盖式取消：若上一请求仍在途，本地标记并请宿主尽力中断。
     if (state.inFlight && !state.inFlight.superseded) {
@@ -505,14 +520,18 @@ function main(): void {
 
     try {
       const payload = await promise;
-      if (state.inFlight?.rid !== requestId || state.inFlight.superseded) return;
-      if (payload.items.length === 0) return;
+      if (state.inFlight?.rid !== requestId || state.inFlight.superseded) return false;
+      if (payload.items.length === 0) return false;
       for (const it of payload.items) {
         state.cache.set(it.line, { value: it.value, ok: it.ok, error: it.error });
         if (it.line + 1 > state.maxLoaded) state.maxLoaded = it.line + 1;
       }
       // 可视区已有真实数据，重绘展示。
       list.refresh();
+      return true;
+    } catch {
+      // 被 supersede 取消或超时：忽略（已有更新的窗口请求接手），避免 unhandled rejection。
+      return false;
     } finally {
       for (let i = 0; i < missing.count; i++) state.pending.delete(missing.start + i);
       if (state.inFlight?.rid === requestId) state.inFlight = null;
@@ -639,7 +658,14 @@ function main(): void {
       state.searchTruncated = false;
       state.filterMap = null;
       state.filterCond = null;
+      // M14：搜索词与持久化定时器一并复位，避免重载后旧过滤被写回持久化。
+      state.searchQuery = '';
+      if (state.persistTimer) {
+        clearTimeout(state.persistTimer);
+        state.persistTimer = undefined;
+      }
       toolbar.setSearchResult(0, 0);
+      toolbar.setFilterTruncated(false);
       list.setTranslation(null);
       list.setTotalRows(ov.totalLines);
       updateToolbar();

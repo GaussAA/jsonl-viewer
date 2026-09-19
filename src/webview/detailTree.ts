@@ -53,12 +53,24 @@ function formatScalar(value: string | number | boolean, kind: string): { text: s
   } else {
     text = String(value);
   }
-  return { text, title: text.length > MAX_SCALAR_TEXT ? text : '' };
+  if (text.length > MAX_SCALAR_TEXT) {
+    // 只把截断后的文本放进 DOM（避免超大文本节点卡顿），全文放 title（hover 可看）。
+    return { text: `${text.slice(0, MAX_SCALAR_TEXT)}…`, title: text };
+  }
+  return { text, title: '' };
 }
 
 /** 构造内联 SVG 折叠箭头。 */
 function chevronSvg(): string {
   return `<svg viewBox="0 0 10 10" width="9" height="9" aria-hidden="true" focusable="false"><polygon points="2,1 8,5 2,9" fill="currentColor"></polygon></svg>`;
+}
+
+/** 用户是否偏好减少动态效果（prefers-reduced-motion）。 */
+function matchMediaReduced(): boolean {
+  return (
+    typeof window.matchMedia === 'function' &&
+    window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  );
 }
 
 export function createDetailTree(host: HTMLElement): DetailTreeController {
@@ -90,14 +102,18 @@ export function createDetailTree(host: HTMLElement): DetailTreeController {
   tools.className = 'jlv-dh-tools';
 
   const btnExpandAll = document.createElement('button');
+  btnExpandAll.type = 'button';
   btnExpandAll.className = 'jlv-dh-tool';
   btnExpandAll.title = '展开所有层级（大数组仍分段预览）';
+  btnExpandAll.setAttribute('aria-label', '展开所有层级（大数组仍分段预览）');
   btnExpandAll.dataset.act = 'expandAll';
   btnExpandAll.appendChild(icon('', ICON_EXPAND));
 
   const btnCollapseAll = document.createElement('button');
+  btnCollapseAll.type = 'button';
   btnCollapseAll.className = 'jlv-dh-tool';
   btnCollapseAll.title = '只保留顶层';
+  btnCollapseAll.setAttribute('aria-label', '只保留顶层');
   btnCollapseAll.dataset.act = 'collapseAll';
   btnCollapseAll.appendChild(icon('', ICON_COLLAPSE));
 
@@ -131,14 +147,18 @@ export function createDetailTree(host: HTMLElement): DetailTreeController {
   syncDepthMenu();
 
   const btnExpandLevel = document.createElement('button');
+  btnExpandLevel.type = 'button';
   btnExpandLevel.className = 'jlv-dh-tool';
   btnExpandLevel.dataset.act = 'expandLevel';
   btnExpandLevel.title = '展开到该层';
+  btnExpandLevel.setAttribute('aria-label', '展开到该层');
   btnExpandLevel.appendChild(icon('', ICON_LEVEL));
 
   const btnCopy = document.createElement('button');
+  btnCopy.type = 'button';
   btnCopy.className = 'jlv-dh-tool';
   btnCopy.title = '复制 JSON';
+  btnCopy.setAttribute('aria-label', '复制 JSON');
   btnCopy.appendChild(icon('', ICON_COPY));
 
   tools.append(btnExpandAll, btnCollapseAll, depthWrap, btnExpandLevel, btnCopy);
@@ -147,6 +167,8 @@ export function createDetailTree(host: HTMLElement): DetailTreeController {
   /* 树体 */
   const body = document.createElement('div');
   body.className = 'jlv-tree-body';
+  body.setAttribute('role', 'tree');
+  body.setAttribute('aria-label', 'JSON 内容');
 
   card.append(header, body);
   root.appendChild(card);
@@ -201,6 +223,13 @@ export function createDetailTree(host: HTMLElement): DetailTreeController {
   /** 收起动画：当前高度 → 0 抽屉收回 + 淡出，播完 resolve。 */
   function animateClose(el: HTMLElement, delayMs = 0): Promise<void> {
     return new Promise((resolve) => {
+      // reduced-motion：动画被样式禁用，收回直接完成（不等固定时长）。
+      if (matchMediaReduced()) {
+        el.style.height = '0px';
+        el.style.opacity = '0';
+        resolve();
+        return;
+      }
       el.style.transition = 'none';
       el.style.height = `${el.scrollHeight}px`;
       el.style.opacity = '1';
@@ -316,6 +345,12 @@ export function createDetailTree(host: HTMLElement): DetailTreeController {
     row.dataset.treeKey = pathKey(segs);
     if (segs.length > 0 && pathKey(segs) === pathKey(selectedSegs)) row.classList.add('selected');
 
+    // 可访问性：树行语义。容器行可聚焦（Enter/Space 展开折叠）；标量行供读屏游走。
+    row.setAttribute('role', 'treeitem');
+    row.setAttribute('aria-level', String(depth + 1));
+    row.tabIndex = container ? 0 : -1;
+    if (container) row.setAttribute('aria-expanded', 'false');
+
     // 折叠箭头（容器才有；标量用占位对齐）
     const toggler = document.createElement('span');
     toggler.className = 'toggler';
@@ -328,7 +363,9 @@ export function createDetailTree(host: HTMLElement): DetailTreeController {
     if (segs.length === 0) {
       keyEl.textContent = '$';
     } else {
-      keyEl.textContent = segTextKey(last);
+      const keyText = segTextKey(last);
+      keyEl.textContent = keyText;
+      keyEl.title = keyText; // 长 key 被省略时 hover 看全名
       if (last.kind === 'index') keyEl.classList.add('jlv-index');
     }
 
@@ -353,6 +390,7 @@ export function createDetailTree(host: HTMLElement): DetailTreeController {
       // 容器：根据展开状态决定「摘要预览」或完整子树
       const expanded = depth < MAX_RENDER_DEPTH && state.isExpanded(segs, depth);
       row.classList.add(expanded ? 'expanded' : 'collapsed');
+      row.setAttribute('aria-expanded', String(expanded));
 
       const preview = document.createElement('span');
       preview.className = `jlv-value ${kindClass(kind)} jlv-summary`;
@@ -372,6 +410,9 @@ export function createDetailTree(host: HTMLElement): DetailTreeController {
           more.className = 'jlv-load-more';
           more.dataset.parent = pathKey(segs);
           more.textContent = `… 还有 ${remaining} 项，点击加载更多`;
+          more.tabIndex = 0;
+          more.setAttribute('role', 'button');
+          more.setAttribute('aria-label', `还有 ${remaining} 项，加载更多`);
           blockInner.appendChild(more);
         }
         // 仅对「用户本次 toggle 展开的节点」播抽屉动画；批量重建（切换/全部展开/加载更多）保持干脆
@@ -436,14 +477,8 @@ export function createDetailTree(host: HTMLElement): DetailTreeController {
     if (act === 'expandAll') {
       // 全部展开：增量式逐层瀑布（不整树重建，无刷新感）
       state.expandAll();
-      const rows = body.querySelectorAll<HTMLElement>('.jlv-tree-row[data-container="1"]');
-      let i = 0;
-      rows.forEach((row) => {
-        if (row.classList.contains('expanded')) return;
-        const node = row.closest<HTMLElement>('.jlv-tree-node');
-        if (node) expandNodeLocal(row, node, i * 30);
-        i++;
-      });
+      const rows = Array.from(body.querySelectorAll<HTMLElement>('.jlv-tree-row[data-container="1"]'));
+      chunkedExpand(rows);
     } else if (act === 'collapseAll') {
       // 全部折叠：逐个抽屉收回（错峰），保留缓存，不整树重建
       state.collapseAll();
@@ -458,18 +493,38 @@ export function createDetailTree(host: HTMLElement): DetailTreeController {
       });
     } else if (act === 'expandLevel') {
       state.expandToLevel(selectedDepth);
-      // 展开到 N 层：逐层展开增量式（depth <= N 的容器）
-      const rows = body.querySelectorAll<HTMLElement>('.jlv-tree-row[data-container="1"]');
-      let i = 0;
-      rows.forEach((row) => {
-        const depth = Number(row.dataset.depth);
-        if (depth >= selectedDepth || row.classList.contains('expanded')) return;
-        const node = row.closest<HTMLElement>('.jlv-tree-node');
-        if (node) expandNodeLocal(row, node, i * 30);
-        i++;
-      });
+      // 展开到 N 层：分批增量式（depth < N 的容器）
+      const rows = Array.from(body.querySelectorAll<HTMLElement>('.jlv-tree-row[data-container="1"]')).filter(
+        (row) => Number(row.dataset.depth) < selectedDepth
+      );
+      chunkedExpand(rows);
     }
   });
+
+  /**
+   * M8：分批展开容器行——每批同步构建 50 行后让出主线程（rAF/idle），
+   * 避免深树全量展开时一次性同步建整棵子树 DOM 卡住主线程。
+   * 动画错峰仅对当批生效（每批从 0 重新计数，封顶 10 行）。
+   */
+  function chunkedExpand(rows: HTMLElement[]): void {
+    let i = 0;
+    const CHUNK = 50;
+    const step = (): void => {
+      const end = Math.min(i + CHUNK, rows.length);
+      for (; i < end; i++) {
+        const row = rows[i];
+        if (row.classList.contains('expanded')) continue;
+        const node = row.closest<HTMLElement>('.jlv-tree-node');
+        if (node) expandNodeLocal(row, node, (i % 10) * 30);
+      }
+      if (i < rows.length) {
+        const w = window as { requestIdleCallback?: (cb: () => void, o?: { timeout?: number }) => void };
+        if (typeof w.requestIdleCallback === 'function') w.requestIdleCallback(step, { timeout: 80 });
+        else setTimeout(step, 16);
+      }
+    };
+    step();
+  }
 
   // 复制 JSON：脉冲反馈（设计体系 §4.1）
   btnCopy.addEventListener('click', () => {
@@ -535,6 +590,7 @@ export function createDetailTree(host: HTMLElement): DetailTreeController {
     if (val) val.textContent = '';
     row.classList.add('expanded');
     row.classList.remove('collapsed');
+    row.setAttribute('aria-expanded', 'true');
     if (block) animateOpen(block, delayMs);
   }
 
@@ -548,9 +604,27 @@ export function createDetailTree(host: HTMLElement): DetailTreeController {
     }
     row.classList.add('collapsed');
     row.classList.remove('expanded');
+    row.setAttribute('aria-expanded', 'false');
     if (block) return animateClose(block, delayMs);
     return Promise.resolve();
   }
+
+  /* 键盘可达：Enter/Space 在树行上触发展开/折叠，在「加载更多」上加载。 */
+  body.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    const target = e.target as HTMLElement;
+    if (target.closest('button')) return; // button 自身处理 Enter/Space
+    const more = target.closest<HTMLElement>('.jlv-load-more');
+    if (more) {
+      e.preventDefault();
+      more.click(); // 合成 click 冒泡到下方 click handler
+      return;
+    }
+    const row = target.closest<HTMLElement>('.jlv-tree-row');
+    if (!row) return;
+    e.preventDefault();
+    row.click(); // 复用点击逻辑（容器 toggle / 标量选中）
+  });
 
   body.addEventListener('click', async (e) => {
     const target = e.target as HTMLElement;

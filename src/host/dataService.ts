@@ -23,10 +23,8 @@ import { inferFields } from '../infer/inferFields.ts';
 import { filterLines, searchLines } from './searchEngine.ts';
 import type { FieldCondition } from '../webview/queryLogic.ts';
 import type { FilterLinesResult, SearchLinesResult } from './searchEngine.ts';
-import {
-  buildRecordsPayload,
-  ErrorLinesRange,
-  ErrorSummaryPayload,
+import { buildRecordsPayload } from '../protocol/rpc.ts';
+import type {
   OverviewPayload,
   RecordsPayload,
   SampleFieldsPayload,
@@ -68,29 +66,55 @@ export class DataService {
   private readonly knownBadLines = new Set<number>();
   /** 构建索引时的文件快照（用来检测文件是否已变更）。 */
   private snapshot: FileSnapshot | undefined;
+  /**
+   * 生命周期代际：dispose/reload 时递增，使在途索引构建失效
+   * （构建完成检测到代际变化即丢弃结果，不写回成员，防止 fd 泄漏与索引复活）。
+   */
+  private generation = 0;
 
-  constructor(
-    private readonly uri: string,
-    private readonly path: string,
-    private readonly opts: DataServiceOptions = {}
-  ) {}
+  private readonly uri: string;
+  private readonly path: string;
+  private readonly opts: DataServiceOptions;
 
-  /** 惰性构建（并发安全：多次同时调用只构建一次）。 */
+  // 注意：不用参数属性语法（Node 类型擦除运行 TS 单测时不支持）。
+  constructor(uri: string, path: string, opts: DataServiceOptions = {}) {
+    this.uri = uri;
+    this.path = path;
+    this.opts = opts;
+  }
+
+  /** 惰性构建（并发安全：多次同时调用只构建一次；失败后允许重试）。 */
   private ensureIndex(): Promise<LineIndex> {
     if (this.index) return Promise.resolve(this.index);
     if (!this.building) {
+      const gen = this.generation;
       this.building = (async () => {
         const stream = createReadStream(this.path);
-        const li = await LineIndex.build(stream, {
-          chunkSize: 1024 * 1024,
-          reportInterval: 4 * 1024 * 1024,
-          onProgress: this.opts.onProgress,
-        });
-        this.reader = await openFileReader(this.path);
-        this.index = li;
-        // 记下本次索引对应的磁盘快照，供后续「文件变更」检测作基线。
-        this.snapshot = await this.currentSnapshot();
-        return li;
+        try {
+          const li = await LineIndex.build(stream, {
+            chunkSize: 1024 * 1024,
+            reportInterval: 4 * 1024 * 1024,
+            onProgress: this.opts.onProgress,
+          });
+          if (gen !== this.generation) return li; // 已被 dispose/reload 废弃
+          const reader = await openFileReader(this.path);
+          if (gen !== this.generation) {
+            // 打开读取器期间再次被废弃：关闭自己打开的句柄后放弃。
+            if (reader.close) await reader.close().catch(() => {});
+            return li;
+          }
+          this.reader = reader;
+          this.index = li;
+          // 记下本次索引对应的磁盘快照，供后续「文件变更」检测作基线。
+          this.snapshot = await this.currentSnapshot();
+          return li;
+        } catch (e) {
+          // 失败后允许重试：清空 building，否则后续所有请求会永久 reject。
+          this.building = undefined;
+          throw e;
+        } finally {
+          stream.destroy();
+        }
       })();
     }
     return this.building;
@@ -141,6 +165,10 @@ export class DataService {
   ): Promise<RecordsPayload> {
     const li = await this.ensureIndex();
     const reader = this.reader!;
+    // M3：入口整数化校验——脏行号（NaN/小数/负数）不进入读批，也不污染 knownBadLines。
+    if (!Number.isInteger(startLine) || startLine < 0 || !Number.isInteger(count) || count <= 0) {
+      return buildRecordsPayload(0, [], li.totalLines);
+    }
     // 真正的可中断：CancelToken 置位时逐行检测并提前停，宿主不再把剩余窗口扫完。
     const items = await readBatch(startLine, count, li, reader, {
       ...this.opts.readLine,
@@ -155,6 +183,9 @@ export class DataService {
   async readRecord(line: number): Promise<{ value?: unknown; error?: string; ok: boolean }> {
     const li = await this.ensureIndex();
     const reader = this.reader!;
+    if (!Number.isInteger(line) || line < 0) {
+      return { value: undefined, error: '无效行号', ok: false };
+    }
     const r = await readRecordAt(line, li, reader, this.opts.readLine);
     if (!r.ok) this.knownBadLines.add(line);
     return { value: r.value, error: r.error, ok: r.ok };
@@ -168,31 +199,6 @@ export class DataService {
     const res = await inferFields(reader, li, { sampleLines: n });
     for (const line of res.errorLines) this.knownBadLines.add(line);
     return { fields: res.fields, total: res.total, scanned: res.scanned };
-  }
-
-  /**
-   * 查询给定范围内的坏行集合（默认抽样窗口）。只扫描该范围并缓存坏行 lineId，
-   * 已确认的坏行直接命中缓存，不做第二次解析。
-   */
-  async getErrorLines(range?: ErrorLinesRange): Promise<number[]> {
-    const li = await this.ensureIndex();
-    const reader = this.reader!;
-    const start = range ? range.startLine : 0;
-    const count = range ? range.count : (this.opts.sampleLines ?? 200);
-    const end = Math.min(start + count, li.totalLines);
-    const out: number[] = [];
-    for (let line = start; line < end; line++) {
-      if (this.knownBadLines.has(line)) {
-        out.push(line);
-        continue;
-      }
-      const r = await readRecordAt(line, li, reader, this.opts.readLine);
-      if (!r.ok) {
-        this.knownBadLines.add(line);
-        out.push(line);
-      }
-    }
-    return out;
   }
 
   /**
@@ -256,33 +262,25 @@ export class DataService {
     return this.index?.totalLines ?? 0;
   }
 
-  /** 抽样窗口的错误统计（host 主动推送 errorSummary 用）。 */
-  async getErrorSummary(): Promise<ErrorSummaryPayload> {
-    const li = await this.ensureIndex();
-    const sampleLines = this.opts.sampleLines ?? 200;
-    const errorLines = await this.getErrorLines();
-    const scanned = Math.min(sampleLines, li.totalLines);
-    return {
-      totalValid: Math.max(0, scanned - errorLines.length),
-      totalInvalid: errorLines.length,
-      totalLines: scanned,
-      errorLines,
-      sampleLines,
-    };
-  }
-
   /** 返回当前索引（尚未构建则 undefined），用于惰性进度/概要栏。 */
   peekIndex(): LineIndex | undefined {
-    return this.index ?? (this.building ? undefined : undefined);
+    return this.index;
   }
 
   async dispose(): Promise<void> {
+    // 递增代际，使在途索引构建失效（其检测代际变化后丢弃结果，不写回成员）。
+    this.generation++;
+    const building = this.building;
+    this.building = undefined;
+    if (building) {
+      // 等待在途构建结束，避免其自开文件句柄在完成后无人关闭。
+      await building.catch(() => {});
+    }
     if (this.reader && this.reader.close) {
       await this.reader.close().catch(() => {});
     }
     this.reader = undefined;
     this.index = undefined;
-    this.building = undefined;
     this.snapshot = undefined;
     this.knownBadLines.clear();
   }
