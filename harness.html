@@ -6,6 +6,29 @@
 <style>
   html, body, #app { height: 100%; margin: 0; }
   body { background: #1e1e1e; }
+  /* === 滚动条（与 extension.ts HTML 模板内联样式保持一致） === */
+  html, body { scrollbar-width: auto !important; scrollbar-color: rgba(255,255,255,0.06) transparent !important; }
+  html::-webkit-scrollbar, body::-webkit-scrollbar { width: 4px !important; height: 4px !important; }
+  html::-webkit-scrollbar-track, body::-webkit-scrollbar-track { background: transparent !important; }
+  html::-webkit-scrollbar-thumb, body::-webkit-scrollbar-thumb {
+    background: rgba(255,255,255,0.06) !important;
+    border-radius: 999px !important;
+    transition: background .2s ease !important;
+  }
+  html::-webkit-scrollbar-thumb:hover, body::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.18) !important; }
+  html::-webkit-scrollbar-thumb:active, body::-webkit-scrollbar-thumb:active { background: rgba(255,255,255,0.28) !important; }
+  html::-webkit-scrollbar-corner, body::-webkit-scrollbar-corner { background: transparent !important; }
+  /* 滚动容器也必须显式声明 + !important，覆盖 VS Code 可能的 * { scrollbar-width: thin !important } 注入 */
+  .jlv-list-wrap, .jlv-tree-body { scrollbar-width: auto !important; scrollbar-color: rgba(255,255,255,0.06) transparent !important; }
+  .jlv-list-wrap::-webkit-scrollbar, .jlv-tree-body::-webkit-scrollbar { width: 4px !important; height: 4px !important; }
+  .jlv-list-wrap::-webkit-scrollbar-track, .jlv-tree-body::-webkit-scrollbar-track { background: transparent !important; }
+  .jlv-list-wrap::-webkit-scrollbar-thumb, .jlv-tree-body::-webkit-scrollbar-thumb {
+    background: rgba(255,255,255,0.06) !important;
+    border-radius: 999px !important;
+  }
+  .jlv-list-wrap:hover::-webkit-scrollbar-thumb, .jlv-tree-body:hover::-webkit-scrollbar-thumb {
+    background: rgba(255,255,255,0.16) !important;
+  }
 </style>
 </head>
 <body>

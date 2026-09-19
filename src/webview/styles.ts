@@ -85,6 +85,8 @@ export const CSS_TEXT = `
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
 html, body, #app { height: 100%; overflow: hidden; }
+html, body { width: 100%; }
+#app { width: 100%; }
 [hidden] { display: none !important; }
 body {
   display: flex;
@@ -108,14 +110,6 @@ body {
   .jlv-col-detail { min-height: 400px; }
 }
 
-/* ---------------- 淡化滚动条（原型：6px 极淡） ---------------- */
-*::-webkit-scrollbar { width: 6px; height: 6px; }
-*::-webkit-scrollbar-track { background: transparent; }
-*::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.14); border-radius: var(--jlv-radius-full); }
-*::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.28); }
-*::-webkit-scrollbar-thumb:active { background: rgba(255,255,255,0.4); }
-*::-webkit-scrollbar-corner { background: transparent; }
-
 /* 焦点可见环 */
 :focus-visible { outline: 2px solid var(--jlv-focus); outline-offset: -1px; }
 
@@ -130,7 +124,7 @@ body {
   flex-direction: column;
   gap: 10px;
   padding: 14px 12px 10px 14px;
-  background: var(--jlv-panel-bg);
+  background: transparent;
   overflow: hidden;
 }
 
@@ -408,6 +402,7 @@ body {
 .jlv-col-detail {
   flex: 1 1 0;
   min-width: 0;
+  width: 0;                     /* 与 flex:1 配套：强制从 0 开始分配宽度，不随内容膨胀 */
   max-width: 100%;
   background: var(--jlv-bg);
   padding: 14px 14px 10px 10px;
@@ -415,6 +410,7 @@ body {
 }
 .jlv-detail-card {
   flex: 1; min-height: 0; min-width: 0;
+  max-width: 100%;
   background: rgba(255,255,255,0.022); border: 1px solid rgba(255,255,255,0.05);
   border-radius: var(--jlv-radius-4); overflow: hidden;
   display: flex; flex-direction: column;
@@ -496,28 +492,31 @@ body {
 
 /* ---------------- JSON 树（原型 .tree-body） ---------------- */
 .jlv-tree-body {
-  flex: 1; min-height: 0; min-width: 0;
+  flex: 1; min-height: 0; min-width: 0; max-width: 100%;
   padding: 16px 20px 20px;
   overflow-y: auto;
   overflow-x: hidden;
-  font-family: var(--jlv-mono); font-size: 12px; line-height: 1.85;
+  font-family: var(--jlv-mono); font-size: 13px; line-height: 1.8;
+  box-sizing: border-box;
 }
+/* 树节点容器（作为 flex 子项必须 min-width:0 否则会撑破父级宽度约束） */
+.jlv-tree-node { min-width: 0; max-width: 100%; box-sizing: border-box; }
+
 /* 切换记录：字段逐条出现（舒缓错峰） */
 .jlv-tree-body.animating .jlv-tree-row { animation: jlv-row-in 420ms var(--jlv-ease) backwards; }
 .jlv-tree-row {
-  display: flex; align-items: baseline; gap: 4px;
-  padding: 3px 6px; border-radius: 5px;
-  cursor: pointer;
-  min-width: 0;
+  display: flex; align-items: flex-start; gap: 4px;
+  padding: 2px 6px; border-radius: 5px;
+  cursor: pointer; min-width: 0; width: 100%; box-sizing: border-box;
   transition: background .1s;
 }
 .jlv-tree-row:hover { background: rgba(255,255,255,0.04); }
 .jlv-tree-row.selected { background: color-mix(in srgb, var(--jlv-focus) 10%, transparent); }
 /* Toggler：SVG chevron 旋转 */
 .jlv-tree-row .toggler {
-  width: 14px; height: 14px; color: var(--jlv-dim); flex-shrink: 0;
+  width: 14px; height: 14px; color: var(--jlv-dim); flex: 0 0 14px;
   display: inline-flex; align-items: center; justify-content: center;
-  font-size: 0; border-radius: 3px;
+  font-size: 0; border-radius: 3px; margin-top: 1px;
   transition: color .12s;
 }
 .jlv-tree-row:hover .toggler { color: var(--jlv-fg); }
@@ -525,12 +524,19 @@ body {
 /* 未展开朝右 ▶（默认 0°），已展开朝下 ▼（90°） */
 .jlv-tree-row.expanded .toggler svg { transform: rotate(90deg); }
 .jlv-tree-row .jlv-key {
-  color: var(--jlv-key); flex: none;
-  /* 长字段名省略 + hover 看全名（M11：此前被 overflow-x:hidden 硬截断且无 title） */
-  max-width: 42%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--jlv-key); flex: 0 1 auto; min-width: 0;
+  font-weight: 600;
+  white-space: normal; overflow-wrap: anywhere;
 }
-.jlv-tree-row .jlv-colon { color: var(--jlv-dim); opacity: .7; flex-shrink: 0; }
-.jlv-tree-row .jlv-value { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.jlv-tree-row .jlv-colon {
+  color: var(--jlv-dim); opacity: .65; font-size: 12px;
+  flex: 0 0 auto; min-width: 0;
+}
+.jlv-tree-row .jlv-value {
+  font-size: 12.5px;
+  flex: 1 1 0; min-width: 0;
+  white-space: normal; overflow-wrap: anywhere;
+}
 .jlv-tree-row .jlv-value.str { color: var(--jlv-string); }
 .jlv-tree-row .jlv-value.num { color: var(--jlv-number); }
 .jlv-tree-row .jlv-value.bool { color: var(--jlv-bool); }
@@ -540,8 +546,9 @@ body {
 .jlv-tree-row .jlv-key.jlv-index { color: var(--jlv-number); opacity: .8; }
 
 /* 子树块：抽屉动画（JS 内联控制高度） */
-.jlv-tree-block { overflow: hidden; }
+.jlv-tree-block { overflow: hidden; min-width: 0; max-width: 100%; box-sizing: border-box; }
 .jlv-tree-block-inner {
+  min-width: 0; max-width: 100%; box-sizing: border-box;
   margin-left: 14px;
   padding-left: 10px;
   border-left: 1px solid rgba(255,255,255,0.06);

@@ -42,6 +42,47 @@ function injectStyle(): void {
   const style = document.createElement('style');
   style.textContent = CSS_TEXT;
   document.head.appendChild(style);
+
+  /* --- 滚动条：只做两件事 ---
+   * 1. 和 VS Code 协作：VS Code 默认 scrollbar-width: thin（薄），这正是我们想要的，不要对抗
+   * 2. 只覆盖颜色：用我们的极淡色调
+   *
+   * 关键事实：
+   * - Windows + Electron = overlay scrollbars（浮动、自动隐藏）
+   * - overlay 模式下 ::-webkit-scrollbar 伪元素被 Chromium 完全忽略
+   * - 只有标准 CSS scrollbar-width / scrollbar-color 对 overlay 生效
+   * - classic 模式下两者都生效
+   * 所以我们：标准 CSS 为主，::-webkit-scrollbar 作为 classic 模式的 bonus
+   */
+  const PROTECTED = 'data-jlv-scrollbar';
+  const s = document.createElement('style');
+  s.setAttribute(PROTECTED, '');
+  s.textContent = `
+    /* 滚动容器：thin（与 VS Code 一致）+ 自定义颜色 */
+    .jlv-list-wrap, .jlv-tree-body {
+      scrollbar-width: thin !important;
+      scrollbar-color: rgba(255,255,255,0.06) transparent !important;
+    }
+    /* hover 加深（标准 CSS） */
+    .jlv-list-wrap:hover, .jlv-tree-body:hover {
+      scrollbar-color: rgba(255,255,255,0.16) transparent !important;
+    }
+    /* classic 模式 bonus：更精细的 thumb 圆角 + 4px 宽度 */
+    .jlv-list-wrap::-webkit-scrollbar, .jlv-tree-body::-webkit-scrollbar {
+      width: 4px !important; height: 4px !important;
+    }
+    .jlv-list-wrap::-webkit-scrollbar-track, .jlv-tree-body::-webkit-scrollbar-track {
+      background: transparent !important;
+    }
+    .jlv-list-wrap::-webkit-scrollbar-thumb, .jlv-tree-body::-webkit-scrollbar-thumb {
+      background: rgba(255,255,255,0.06) !important;
+      border-radius: 999px !important;
+    }
+    .jlv-list-wrap:hover::-webkit-scrollbar-thumb, .jlv-tree-body:hover::-webkit-scrollbar-thumb {
+      background: rgba(255,255,255,0.16) !important;
+    }
+  `;
+  document.head.appendChild(s);
 }
 
 function clamp(v: number, lo: number, hi: number): number {
