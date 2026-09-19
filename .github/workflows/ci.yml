@@ -4,6 +4,12 @@ name: CI
 #   Job 1 verify            —— 纯 Node 环境：typecheck → unit test → build（与 release.mjs 预检一致）
 #   Job 2 integration-test  —— 真实 VS Code Extension Host：验证扩展能被宿主发现 + activate 成功
 # 任一失败即阻断合并，保证发布产物可追溯、可复现。
+#
+# pnpm 安装策略：
+#   setup-node@v4 只管 Node 版本 + 缓存 pnpm store，**不负责安装 pnpm 本身**
+#   pnpm 用 Node.js 内置的 corepack 激活（Node 16+ 自带 corepack）
+#   corepack enable 启用 corepack，corepack prepare 激活 packageManager 指定的 pnpm@12.4.2
+#   这样避免了同时用 pnpm/action-setup 和 setup-node 导致的 "Multiple versions of pnpm" 冲突
 
 on:
   push:
@@ -21,15 +27,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # actions/setup-node@v4 内建支持 pnpm-version，单一入口避免
-      # 与 pnpm/action-setup 冲突（GitHub 报 "Multiple versions of pnpm"）。
-      # 与 package.json 的 packageManager 对齐（pnpm@12.4.2）。
-      - name: Setup Node.js ${{ matrix.node-version }} + pnpm 12
+      - name: Setup Node.js ${{ matrix.node-version }}
         uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
-          pnpm-version: 12
+          # cache: pnpm 缓存的是 pnpm 的 store 目录，不是安装 pnpm 本身
           cache: pnpm
+
+      # 用 Node 内置 corepack 激活 pnpm，版本与 package.json 的 packageManager 对齐
+      - name: Enable pnpm via corepack
+        run: |
+          corepack enable
+          corepack prepare pnpm@12.4.2 --activate
+          pnpm --version
 
       - name: Install dependencies
         # frozen-lockfile：pnpm-lock.yaml 必须与 package.json 一致，否则 CI 失败，
@@ -67,13 +77,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # setup-node 内建 pnpm-version，避免与 pnpm/action-setup 冲突。
-      - name: Setup Node.js 22 + pnpm 12
+      - name: Setup Node.js 22
         uses: actions/setup-node@v4
         with:
           node-version: 22
-          pnpm-version: 12
           cache: pnpm
+
+      - name: Enable pnpm via corepack
+        run: |
+          corepack enable
+          corepack prepare pnpm@12.4.2 --activate
+          pnpm --version
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile

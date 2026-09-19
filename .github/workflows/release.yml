@@ -13,6 +13,8 @@
 #   c. 首次发布前本地跑一次 npx @vscode/vsce login 完成账户绑定（一次性）
 #
 # vsce 默认识别 VSCE_PAT 环境变量，不需要额外传参。
+#
+# pnpm 安装策略：与 ci.yml 统一，用 corepack 激活。
 
 name: Release
 
@@ -29,13 +31,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # setup-node 内建 pnpm-version，单一入口，避免与 pnpm/action-setup 冲突。
-      - name: Setup Node.js 22 + pnpm 12
+      - name: Setup Node.js 22
         uses: actions/setup-node@v4
         with:
           node-version: 22
-          pnpm-version: 12
           cache: pnpm
+
+      # 用 Node 内置 corepack 激活 pnpm，避免与 pnpm/action-setup 冲突
+      - name: Enable pnpm via corepack
+        run: |
+          corepack enable
+          corepack prepare pnpm@12.4.2 --activate
+          pnpm --version
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
