@@ -23,6 +23,7 @@ import { inferFields } from '../infer/inferFields.ts';
 import { filterLines, searchLines } from './searchEngine.ts';
 import type { FieldCondition } from '../webview/queryLogic.ts';
 import type { FilterLinesResult, SearchLinesResult } from './searchEngine.ts';
+import { INDEX_CHUNK_SIZE, INDEX_REPORT_INTERVAL, SEARCH_MAX_RESULTS, FILTER_MAX_RESULTS } from '../constants.ts';
 import { buildRecordsPayload } from '../protocol/rpc.ts';
 import type {
   OverviewPayload,
@@ -48,8 +49,6 @@ export type StaleCheckResult =
  * - 过滤：匹配行号同样封顶，避免「全行命中」的过滤把整文件行号载进 webview。
  * 可视区只展示前若干条，导航基于手头这批足够用；真正的全量行号需要时再按范围续取。
  */
-const SEARCH_MAX_RESULTS = 50_000;
-const FILTER_MAX_RESULTS = 50_000;
 
 export interface DataServiceOptions {
   onProgress?: (info: { bytesRead: number; lines: number; done: boolean }) => void;
@@ -92,8 +91,8 @@ export class DataService {
         const stream = createReadStream(this.path);
         try {
           const li = await LineIndex.build(stream, {
-            chunkSize: 1024 * 1024,
-            reportInterval: 4 * 1024 * 1024,
+            chunkSize: INDEX_CHUNK_SIZE,
+            reportInterval: INDEX_REPORT_INTERVAL,
             onProgress: this.opts.onProgress,
           });
           if (gen !== this.generation) return li; // 已被 dispose/reload 废弃

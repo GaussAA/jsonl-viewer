@@ -10,6 +10,7 @@
  */
 
 import type { FieldLike } from './logic.ts';
+import { escapeHtml } from './utils.ts';
 
 /** 目录每页固定条数。 */
 export const PAGE_SIZE = 20;
@@ -635,22 +636,7 @@ function previewKind(display: string): string {
   return 'str';
 }
 
-function escapeHtml(s: string): string {
-  return s.replace(/[&<>"']/g, (c) => {
-    switch (c) {
-      case '&':
-        return '&amp;';
-      case '<':
-        return '&lt;';
-      case '>':
-        return '&gt;';
-      case '"':
-        return '&quot;';
-      default:
-        return '&#39;';
-    }
-  });
-}
+/* escapeHtml 已提取到 utils.ts */
 
 /* ------------------- 复制行号 ------------------- */
 

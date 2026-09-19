@@ -27,6 +27,12 @@ const common = {
   target: ['es2022'],
   logLevel: 'info',
   legalComments: 'none',
+  // 仅 minify 模式：标记 console.log/warn/info 为 pure，未用返回值则整体剔除；
+  // 同时 drop debugger 语句。非 minify（开发）模式保留完整日志。
+  ...(minify && {
+    pure: ['console.log', 'console.warn', 'console.info'],
+    drop: ['debugger'],
+  }),
 };
 
 // Extension host：ESM，运行在 NodeJS 上，`vscode` 和 Node built-ins 由宿主提供。

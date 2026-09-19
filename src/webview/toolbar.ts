@@ -40,6 +40,26 @@ interface FieldOption {
   type?: string;
 }
 
+/** 浮动面板：HTMLElement + 运行时挂接的 open/close 方法 + 内部状态槽。 */
+interface FloatPanel<TState extends object = object> extends HTMLElement {
+  open(): void;
+  close(): void;
+  /** 内部状态槽（不同面板存不同字段）。用单个 __state 替代散落的 _xxx 属性，避免 as unknown as 污染。 */
+  __state?: TState;
+}
+
+/** 筛选面板的内部状态。 */
+interface FilterPanelState {
+  fieldSel: HTMLSelectElement;
+}
+
+/** 字段定制面板的内部状态。 */
+interface LayoutPanelState {
+  emit: () => void;
+  list: HTMLElement;
+  maxInput: HTMLInputElement;
+}
+
 export function createToolbar(host: HTMLElement, handlers: ToolbarHandlers = {}): {
   root: HTMLElement;
   update(info: Partial<ToolbarInfo> & { fileName?: string }): void;
@@ -50,6 +70,8 @@ export function createToolbar(host: HTMLElement, handlers: ToolbarHandlers = {})
   setLayout(layout: FieldLayout): void;
   setSearchResult(total: number, index: number): void;
   setFilterTruncated(truncated: boolean): void;
+  /** 释放 document 级监听器（webview 关闭时调用）。 */
+  destroy(): void;
 } {
   const root = document.createElement('div');
   root.className = 'jlv-toolbar';
@@ -164,7 +186,8 @@ export function createToolbar(host: HTMLElement, handlers: ToolbarHandlers = {})
   root.appendChild(filterNoteEl);
 
   /* ---------- 过滤面板（原型 .jlv-float-panel） ---------- */
-  let filterPanel: HTMLElement | null = null;
+  let filterPanel: FloatPanel<FilterPanelState> | null = null;
+  let filterPanelDispose: (() => void) | null = null;
   let panelFields: FieldOption[] = [];
 
   const populateFieldSel = (fieldSel: HTMLSelectElement): void => {
@@ -186,7 +209,13 @@ export function createToolbar(host: HTMLElement, handlers: ToolbarHandlers = {})
     title: string,
     anchor: HTMLElement,
     onClose?: () => void
-  ): { panel: HTMLElement; close(): void; open(): void } => {
+  ): {
+    panel: HTMLElement;
+    close(): void;
+    open(): void;
+    /** 释放 document 级监听器（webview dispose 时调用）。 */
+    dispose(): void;
+  } => {
     const panel = document.createElement('div');
     panel.className = 'jlv-float-panel';
     // 定位：锚定触发按钮下方（fixed + 显式 top/left，防视口默认位置）
@@ -226,19 +255,28 @@ export function createToolbar(host: HTMLElement, handlers: ToolbarHandlers = {})
       if (e.key === 'Escape') close();
     });
     // 外点关闭：点击面板外（且不在触发按钮上）即收起（M9：与原型行为对齐）
-    document.addEventListener('pointerdown', (e) => {
+    const docPointerDown = (e: PointerEvent): void => {
       if (panel.style.display === 'none') return;
       const t = e.target as HTMLElement;
       if (panel.contains(t) || anchor.contains(t)) return;
       close();
-    });
-    return { panel, close, open };
+    };
+    document.addEventListener('pointerdown', docPointerDown);
+    return {
+      panel,
+      close,
+      open,
+      dispose: () => {
+        document.removeEventListener('pointerdown', docPointerDown);
+      },
+    };
   };
 
   const buildFilterPanel = (): void => {
-    const { panel, close, open } = panelShell('字段筛选', filterBtn, () =>
+    const { panel, close, open, dispose } = panelShell('字段筛选', filterBtn, () =>
       filterBtn.classList.remove('active')
     );
+    filterPanelDispose = dispose;
     const fieldSel = document.createElement('select');
     fieldSel.title = '字段';
     populateFieldSel(fieldSel);
@@ -307,10 +345,10 @@ export function createToolbar(host: HTMLElement, handlers: ToolbarHandlers = {})
     acts.append(clearBtn, applyBtn);
     panel.appendChild(acts);
 
-    (panel as unknown as { _fieldSel?: HTMLSelectElement })._fieldSel = fieldSel;
-    // 面板复用实例上附加 open/close，供触发按钮切换时调用
     Object.assign(panel, { close, open });
-    filterPanel = panel as HTMLElement & { open(): void; close(): void };
+    const fp = panel as FloatPanel<FilterPanelState>;
+    fp.__state = { fieldSel };
+    filterPanel = fp;
   };
 
   filterBtn.addEventListener('click', () => {
@@ -322,26 +360,26 @@ export function createToolbar(host: HTMLElement, handlers: ToolbarHandlers = {})
     if (!filterPanel || !document.body.contains(filterPanel)) {
       // 首次创建：直接显示（避免 display 状态误判导致需点两次）
       buildFilterPanel();
-      const panel = filterPanel as HTMLElement & { open(): void; close(): void };
-      panel.open();
+      filterPanel?.open();
       filterBtn.classList.add('active');
       return;
     }
-    const panel = filterPanel as HTMLElement & { open(): void; close(): void };
-    const visible = panel.style.display !== 'none';
-    if (visible) panel.close();
-    else panel.open();
+    const visible = filterPanel.style.display !== 'none';
+    if (visible) filterPanel.close();
+    else filterPanel.open();
     filterBtn.classList.toggle('active', !visible);
   });
 
   /* ---------- 字段定制面板 ---------- */
-  let layoutPanel: HTMLElement | null = null;
+  let layoutPanelDispose: (() => void) | null = null;
+  let layoutPanel: FloatPanel<LayoutPanelState> | null = null;
   let panelLayout: FieldLayout = { pinned: [], order: [], hidden: [], maxKeys: 4 };
 
   const buildLayoutPanel = (): void => {
-    const { panel, close, open } = panelShell('字段定制', customizeBtn, () =>
+    const { panel, close, open, dispose } = panelShell('字段定制', customizeBtn, () =>
       customizeBtn.classList.remove('active')
     );
+    layoutPanelDispose = dispose;
 
     const head = document.createElement('div');
     head.className = 'jlv-panel-head';
@@ -366,16 +404,15 @@ export function createToolbar(host: HTMLElement, handlers: ToolbarHandlers = {})
     maxInput.addEventListener('change', emit);
     restoreBtn.addEventListener('click', () => onRestoreDefault());
 
-    (panel as unknown as { _emit?: () => void; _list?: HTMLElement; _maxInput?: HTMLInputElement })._emit = emit;
-    (panel as unknown as { _list?: HTMLElement })._list = list;
-    (panel as unknown as { _maxInput?: HTMLInputElement })._maxInput = maxInput;
     Object.assign(panel, { close, open });
-    layoutPanel = panel as HTMLElement & { open(): void; close(): void };
+    const lp = panel as FloatPanel<LayoutPanelState>;
+    lp.__state = { emit, list, maxInput };
+    layoutPanel = lp;
   };
 
   const readLayoutFromDom = (): FieldLayout => {
-    const list = layoutPanel && ((layoutPanel as unknown as { _list?: HTMLElement })._list as HTMLElement);
-    const rows = list ? Array.from(list.querySelectorAll<HTMLElement>('.jlv-layout-row')) : [];
+    const st = layoutPanel?.__state;
+    const rows = st ? Array.from(st.list.querySelectorAll<HTMLElement>('.jlv-layout-row')) : [];
     const pinned: string[] = [];
     const order: string[] = [];
     const hidden: string[] = [];
@@ -387,8 +424,7 @@ export function createToolbar(host: HTMLElement, handlers: ToolbarHandlers = {})
       else if (row.classList.contains('pinned')) pinned.push(key);
       else order.push(key);
     }
-    const maxInput = layoutPanel && (layoutPanel as unknown as { _maxInput?: HTMLInputElement })._maxInput;
-    const maxKeys = maxInput ? Number(maxInput.value) || 4 : panelLayout.maxKeys;
+    const maxKeys = st ? Number(st.maxInput.value) || 4 : panelLayout.maxKeys;
     return { pinned, order, hidden, maxKeys };
   };
 
@@ -403,7 +439,7 @@ export function createToolbar(host: HTMLElement, handlers: ToolbarHandlers = {})
 
   const rebuildLayoutRows = (): void => {
     if (!layoutPanel) return;
-    const list = (layoutPanel as unknown as { _list?: HTMLElement })._list as HTMLElement;
+    const list = layoutPanel.__state?.list;
     if (!list) return;
     list.textContent = '';
 
@@ -497,7 +533,7 @@ export function createToolbar(host: HTMLElement, handlers: ToolbarHandlers = {})
   const applyLayoutToPanel = (layout: FieldLayout): void => {
     panelLayout = layout;
     rebuildLayoutRows();
-    const maxInput = layoutPanel && (layoutPanel as unknown as { _maxInput?: HTMLInputElement })._maxInput;
+    const maxInput = layoutPanel?.__state?.maxInput;
     if (maxInput) maxInput.value = String(layout.maxKeys);
   };
 
@@ -511,15 +547,13 @@ export function createToolbar(host: HTMLElement, handlers: ToolbarHandlers = {})
       // 首次创建：直接显示
       buildLayoutPanel();
       rebuildLayoutRows();
-      const panel = layoutPanel as HTMLElement & { open(): void; close(): void };
-      panel.open();
+      layoutPanel?.open();
       customizeBtn.classList.add('active');
       return;
     }
-    const panel = layoutPanel as HTMLElement & { open(): void; close(): void };
-    const visible = panel.style.display !== 'none';
-    if (visible) panel.close();
-    else panel.open();
+    const visible = layoutPanel.style.display !== 'none';
+    if (visible) layoutPanel.close();
+    else layoutPanel.open();
     customizeBtn.classList.toggle('active', !visible);
   });
 
@@ -567,7 +601,7 @@ export function createToolbar(host: HTMLElement, handlers: ToolbarHandlers = {})
 
   const setFields = (fields: readonly FieldOption[] | null): void => {
     panelFields = fields ? [...fields] : [];
-    const fieldSel = filterPanel && (filterPanel as unknown as { _fieldSel?: HTMLSelectElement })._fieldSel;
+    const fieldSel = filterPanel?.__state?.fieldSel;
     if (fieldSel) populateFieldSel(fieldSel);
     if (layoutPanel) {
       panelLayout = trimLayoutToFields(panelLayout, new Set(panelFields.map((f) => f.key)));
@@ -607,6 +641,14 @@ export function createToolbar(host: HTMLElement, handlers: ToolbarHandlers = {})
     filterNoteEl.hidden = !truncated;
   };
 
+  /** 释放 document 级监听器（webview 关闭时调用）。防止内存泄漏。 */
+  const destroy = (): void => {
+    filterPanelDispose?.();
+    filterPanelDispose = null;
+    layoutPanelDispose?.();
+    layoutPanelDispose = null;
+  };
+
   return {
     root,
     els,
@@ -617,6 +659,7 @@ export function createToolbar(host: HTMLElement, handlers: ToolbarHandlers = {})
     setLayout,
     setSearchResult,
     setFilterTruncated,
+    destroy,
   };
 }
 

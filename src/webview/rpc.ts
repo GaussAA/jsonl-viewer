@@ -15,6 +15,7 @@ import {
   makeRequestId,
 } from '../protocol/rpc.ts';
 import type { InitPayload, JumpToSourcePayload, RpcMessage, StaleFilePayload } from '../protocol/rpc.ts';
+import { RPC_TIMEOUT_MS } from '../constants.ts';
 
 /** webview 侧向宿主发消息 API 的最小接口（即 acquireVsCodeApi 的返回）。 */
 export interface VSCodeApi {
@@ -131,7 +132,7 @@ export class RpcBus {
       p.resolve = resolve as (v: unknown) => void;
       p.reject = reject;
     });
-    const timeoutMs = opts.timeoutMs ?? 15_000;
+    const timeoutMs = opts.timeoutMs ?? RPC_TIMEOUT_MS;
     p.timer = setTimeout(() => {
       if (p.settled) return;
       p.settled = true;

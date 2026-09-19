@@ -9,6 +9,7 @@
 
 import type { FileHandle } from 'node:fs/promises';
 import { LineIndex } from '../indexer/lineIndex.ts';
+import { MAX_LINE_BYTES } from '../constants.ts';
 
 /** 解析单行的结果。合法行返回 value；非法行返回 error（含定位）。 */
 export type JsonParseResult =
@@ -92,8 +93,6 @@ function trimLineEnding(buf: Buffer, len: number): number {
   return len;
 }
 
-const decodeBuffer = (buf: Buffer, len: number): string => buf.subarray(0, len).toString('utf8');
-
 /** 将 [start, end) 原始字节区间读成一行文本，剥离行尾 `\r\n`/`\n`。 */
 export async function readLineAt(
   reader: ByteReader,
@@ -101,8 +100,22 @@ export async function readLineAt(
   end: number,
   opts: ReadRecordOpts = {}
 ): Promise<string> {
-  if (end < start) throw new RangeError(`readLineAt: end(${end}) < start(${start})`);
-  const max = opts.maxLineBytes ?? 16 * 1024 * 1024;
+  const buf = await readLineBuffer(reader, start, end, opts);
+  return buf.toString('utf8');
+}
+
+/**
+ * 轻量级只读 Buffer 版本：宿主全文搜索路径专用，避免 UTF-8 解码开销。
+ * 返回剥离了行尾 \r\n/\n 的原始字节切片（subarray，无拷贝）。
+ */
+export async function readLineBuffer(
+  reader: ByteReader,
+  start: number,
+  end: number,
+  opts: ReadRecordOpts = {}
+): Promise<Buffer> {
+  if (end < start) throw new RangeError(`readLineBuffer: end(${end}) < start(${start})`);
+  const max = opts.maxLineBytes ?? MAX_LINE_BYTES;
   const len = end - start;
   if (len > max) {
     throw new Error(
@@ -110,7 +123,8 @@ export async function readLineAt(
     );
   }
   const buf = await reader.readBytes(start, len);
-  return decodeBuffer(buf, trimLineEnding(buf, buf.length));
+  const trimmedLen = trimLineEnding(buf, buf.length);
+  return buf.subarray(0, trimmedLen);
 }
 
 /** 基于索引 + 读取器，按需读取并解析第 line 行。 */

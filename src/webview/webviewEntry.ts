@@ -34,6 +34,7 @@ import type { FieldCondition, FieldLayout } from './queryLogic.ts';
 import { HostEndpoint } from '../protocol/rpc.ts';
 import type { InitPayload, OverviewPayload, RecordsPayload, SearchResultsPayload } from '../protocol/rpc.ts';
 import { CSS_TEXT } from './styles.ts';
+import { INIT_TIMEOUT_MS } from '../constants.ts';
 
 /** 渲染用的记录形状（与 LRUCache 值一致）。 */
 export type CachedRecord = RecordEntry & { value?: unknown };
@@ -440,7 +441,7 @@ function main(): void {
         bus.post(HostEndpoint.READY);
       });
     }
-  }, 8000);
+  }, INIT_TIMEOUT_MS);
 
   /* ---------------- 虚拟滚动列表 ---------------- */
   const list = new VirtualRecordList({
@@ -735,10 +736,30 @@ function main(): void {
   // 初始：向宿主报告就绪，等待 init 回执。
   bus.post(HostEndpoint.READY);
 
-  // 软刷新 / 尺寸变化：重新渲染当前可视窗口。
+  // 软刷新 / 尺寸变化：重新渲染当前可视区。
   window.addEventListener('resize', () => list.refresh());
 
-  updateToolbar();
+  update();
+
+  /* ---------- 生命周期清理 ----------
+   * VS Code webview 关闭时不会自动调用任何 dispose 回调——
+   * 我们在 beforeunload 里显式释放 document 级监听器。
+   * 关键：detailTree 的 document.click、toolbar.panelShell 的 document.pointerdown、
+   * ThrottleQueue 的 setTimeout、RpcBus 的 pending timers 都必须清理。
+   * 防御性双重保险：同一 window 上多注册一次 beforeunload 无害。
+   */
+  let cleanupCalled = false;
+  const cleanup = (): void => {
+    if (cleanupCalled) return;
+    cleanupCalled = true;
+    bus.dispose();
+    scheduleFetch.dispose();
+    list.dispose();
+    detail.dispose();
+    toolbar.destroy();
+    window.removeEventListener('resize', list.refresh);
+  };
+  window.addEventListener('beforeunload', cleanup);
 }
 
 main();

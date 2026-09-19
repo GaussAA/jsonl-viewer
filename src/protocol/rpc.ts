@@ -36,6 +36,9 @@ export const HostEndpoint = {
   RELOAD: 'fileReload',
 } as const;
 
+/** O(1) 查找表：把 HostEndpoint 所有值预编译成 Set，isHostEndpoint 每次调用不再 O(n) 遍历。 */
+const HOST_ENDPOINT_SET: ReadonlySet<string> = new Set(Object.values(HostEndpoint));
+
 /** host -> webview 响应端点。 */
 export const HostReply = {
   INIT: 'init',
@@ -178,12 +181,9 @@ export function isHostRequest(msg: unknown): msg is HostRequest {
   return isRpcMessage(msg) && isHostEndpoint((msg as { type: string }).type);
 }
 
-/** 判断某 type 是否为 HostEndpoint 的某个端点值（枚举键大写、值是端点名）。 */
+/** 判断某 type 是否为 HostEndpoint 的某个端点值（枚举键大写、值是端点名）。O(1) Set 查找。 */
 function isHostEndpoint(type: string): boolean {
-  for (const key of Object.keys(HostEndpoint)) {
-    if ((HostEndpoint as Record<string, string>)[key] === type) return true;
-  }
-  return false;
+  return HOST_ENDPOINT_SET.has(type);
 }
 
 function isObject(v: unknown): v is Record<string, unknown> {

@@ -23,11 +23,12 @@ const SUPPORTED_GLOB = /\.(jsonl|ndjson|jsonlines)$/i;
 
 /** 日志输出面板：用户可在"输出 → JSONL Viewer"中查看宿主收发情况，便于排障。 */
 let output: vscode.OutputChannel | undefined;
+let debugLogging = false; // 生产默认关闭，用户可在 devtools console 设置 `__JLV_DEBUG__ = true` 临时开启
 function hostLog(message: string): void {
-  if (output) output.appendLine(message);
+  if (output && debugLogging) output.appendLine(message);
 }
 function hostErr(message: string): void {
-  hostLog(`[ERROR] ${message}`);
+  if (output) output.appendLine(`[ERROR] ${message}`); // 错误始终输出
 }
 
 /**
@@ -186,7 +187,9 @@ export class JsonlCustomEditorProvider implements vscode.CustomTextEditorProvide
       }
       if (staleSignaled) return; // 已提示过，避免重复弹横幅
       staleSignaled = true;
-      post({ type: HostReply.FILE_STALE, payload: res } as RpcMessage);
+      // 类型已收窄为 { changed: true; deleted: boolean; message: string }，
+      // 恰好匹配 StaleFilePayload → 直接赋值给 FILE_STALE payload，无需 as RpcMessage 强转。
+      post({ type: HostReply.FILE_STALE, payload: { message: res.message, deleted: res.deleted } });
     }, 5000);
 
     // Tear down the underlying file handles (and the stale detector) on editor close.
