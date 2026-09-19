@@ -24,7 +24,7 @@
     "Other"
   ],
   "engines": {
-    "vscode": "^1.85.0",
+    "vscode": "^1.138.0",
     "node": ">=22.18"
   },
   "main": "./dist/extension.js",
