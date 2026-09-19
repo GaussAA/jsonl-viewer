@@ -14,7 +14,7 @@
 #
 # vsce 默认识别 VSCE_PAT 环境变量，不需要额外传参。
 #
-# pnpm 安装策略：与 ci.yml 统一，用 corepack 激活。
+# pnpm 安装策略：setup-node 只管 Node，pnpm/action-setup 全权负责 pnpm + 缓存。
 
 name: Release
 
@@ -31,18 +31,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # 只管 Node 版本
       - name: Setup Node.js 22
         uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: pnpm
 
-      # 用 Node 内置 corepack 激活 pnpm，避免与 pnpm/action-setup 冲突
-      - name: Enable pnpm via corepack
-        run: |
-          corepack enable
-          corepack prepare pnpm@12.4.2 --activate
-          pnpm --version
+      # pnpm/action-setup 全权负责 pnpm 安装 + 缓存
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 12.4.2
+          cache: 'pnpm'
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
