@@ -102,7 +102,9 @@ test('checkStale：文件变更后返回 changed，无变更返回 false', async
     });
     const res = await ds.checkStale();
     assert.equal(res?.changed, true);
-    assert.equal(res?.deleted, false);
+    if (res && res.changed === true) {
+      assert.equal(res.deleted, false);
+    }
     await ds.dispose();
   } finally {
     await rm(dir, { recursive: true, force: true });
