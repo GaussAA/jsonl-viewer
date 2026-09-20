@@ -2,7 +2,7 @@
   "name": "jsonl-viewer",
   "displayName": "JSONL Viewer",
   "description": "High-performance viewer for .jsonl / .ndjson / .jsonlines files: record list + collapsible JSON tree detail, lazy indexing & on-demand parsing for multi-GB files.",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "publisher": "jsonl-viewer",
   "license": "ISC",
   "icon": "media/icon.png",

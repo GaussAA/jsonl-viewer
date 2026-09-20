@@ -601,8 +601,8 @@ function main(): void {
       list.select(line);
       void showDetailForLine(line);
       updateNavEnabled();
-      // 窄容器 master–detail：点击记录滑入详情视图
-      if (narrow) showNarrowDetail(true);
+      // 窄容器抽屉：选中记录后收起目录抽屉，回到详情主视图
+      if (narrow) setDrawer(false);
     },
     onRangeChange: (displayFirst, displayLast) => {
       // 分页/翻页已改变当前可视页 → 立即刷新范围文本（不依赖后面是否有实际拉取）。
@@ -641,40 +641,53 @@ function main(): void {
   rootEl.appendChild(detail.root);
   rootEl.appendChild(banner.root);
 
-  /* ---------------- 窄屏响应式：master–detail 双视图切换 ---------------- */
-// 详情头部「返回列表」按钮（仅窄屏 CSS 显示；宽屏隐藏）
-const backBtn = document.createElement('button');
-backBtn.type = 'button';
-backBtn.className = 'jlv-back-btn';
-backBtn.title = '返回列表';
-backBtn.setAttribute('aria-label', '返回列表');
-backBtn.innerHTML = ICON_BACK;
-detail.root.querySelector<HTMLElement>('.jlv-detail-header')?.prepend(backBtn);
+  /* ---------------- 窄容器响应式：竖向堆叠 ---------------- */
+  /* 窄容器(<700px)：off-canvas 抽屉 —— 详情常驻主视图，目录左栏收进左侧抽屉。
+   * 水平拖拽分栏条与桌面折叠/展开按钮在窄态由 CSS 隐藏；这里只创建并驱动抽屉(汉堡菜单+遮罩)。 */
 
-/** 窄容器下切换视图：true=显示详情(列表左推出屏)，false=回到列表根视图。宽屏无副作用。 */
-function showNarrowDetail(show: boolean): void {
-  rootEl!.classList.toggle('narrow-detail', show);
-}
-backBtn.addEventListener('click', () => showNarrowDetail(false));
+  /* 详情头部左上角「汉堡菜单」：点开/收起目录抽屉（仅窄容器显示，CSS 控制显隐） */
+  const hamburger = document.createElement('button');
+  hamburger.type = 'button';
+  hamburger.className = 'jlv-hamburger';
+  hamburger.title = '记录目录';
+  hamburger.setAttribute('aria-label', '打开记录目录');
+  hamburger.innerHTML = ICON_MENU;
+  detail.root.querySelector<HTMLElement>('.jlv-detail-header')?.prepend(hamburger);
 
-/** 依据窄/宽容器收敛布局。 */
-function syncResponsive(): void {
-  if (narrow) {
-    // 窄容器：清掉桌面折叠态/内联样式，让两个视图占满全屏；默认落在「列表」根视图
-    resetColInline();
-    leftCol.classList.remove('collapsed');
-    listCollapsed = false;
-    collapseBtn.hidden = true;
-    expandBtn.hidden = true;
-    showNarrowDetail(false);
-  } else {
-    // 宽容器：恢复桌面两栏（持久化折叠则保持）
-    showNarrowDetail(false);
-    if (listCollapsedFromStore()) applyCollapsedUI(true);
-    else applyCollapsedUI(false);
-    list.refresh();
+  /* 抽屉遮罩：打开时盖住详情，点击关闭 */
+  const backdrop = document.createElement('div');
+  backdrop.className = 'jlv-drawer-backdrop';
+  backdrop.hidden = true;
+  rootEl.appendChild(backdrop);
+
+  /** 开/关窄容器目录抽屉（list-open 类驱动 CSS 滑入滑出）。 */
+  function setDrawer(open: boolean): void {
+    rootEl!.classList.toggle('list-open', open);
+    backdrop!.hidden = !open;
+    hamburger.setAttribute('aria-label', open ? '收起记录目录' : '打开记录目录');
+    hamburger.title = open ? '收起记录目录' : '记录目录';
   }
-}
+  hamburger.addEventListener('click', () => setDrawer(!rootEl!.classList.contains('list-open')));
+  backdrop.addEventListener('click', () => setDrawer(false));
+
+  /** 依据窄/宽容器收敛布局。 */
+  function syncResponsive(): void {
+    // 跨断点/重建布局时收拢抽屉，避免残留打开态。
+    setDrawer(false);
+    if (narrow) {
+      // 窄容器：清掉桌面折叠态/内联样式；目录抽屉默认收起，详情铺满为主视图。
+      resetColInline();
+      leftCol.classList.remove('collapsed');
+      listCollapsed = false;
+      collapseBtn.hidden = true;
+      expandBtn.hidden = true;
+    } else {
+      // 宽容器：恢复桌面两栏（持久化折叠则保持）
+      if (listCollapsedFromStore()) applyCollapsedUI(true);
+      else applyCollapsedUI(false);
+      list.refresh();
+    }
+  }
 
 /** 容器(面板)宽度跨窄/宽断点 → 更新 narrow 并重排；同侧变化（拖动调整面板）不重排。 */
 let roNarrow: ResizeObserver | null = null;
@@ -1092,8 +1105,8 @@ const ICON_COLLAPSE_LEFT =
 /** 展开左栏按钮图标（>>）。 */
 const ICON_EXPAND_RIGHT =
   '<svg width="10" height="10" viewBox="0 0 16 16"><path d="M6 3l5 5-5 5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
-/** 详情「返回列表」按钮图标（←）。 */
-const ICON_BACK =
-  '<svg width="14" height="14" viewBox="0 0 16 16"><path d="M10.5 3L5.5 8l5 5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+/** 汉堡菜单图标（三横线，窄容器目录抽屉开关）。 */
+const ICON_MENU =
+  '<svg width="15" height="15" viewBox="0 0 16 16"><path d="M2 4h12M2 8h12M2 12h12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>';
 
 main();

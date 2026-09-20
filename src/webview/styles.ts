@@ -106,52 +106,73 @@ body {
   *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }
 
-/* 窄容器（<700px）：master–detail 双视图 —— 一次只显示一个，用 transform 平移切换（iOS push 式）。
- * 容器查询：断点取 #app 容器宽度，而非视口；webview 面板实际可用宽度不足时自动降级。
- * 默认显示「列表」(master)，点击记录滑入「详情」(detail)，详情头部带返回按钮。 */
+/* 窄容器（<700px）：off-canvas 抽屉 —— 详情常驻为主视图；目录左栏收进左上角「汉堡菜单」，
+ * 点开从左侧滑入为抽屉；选中记录后抽屉收起回到详情。
+ * （窄屏 master–detail 的主流推荐模式，同 iOS 邮件 / Material 导航抽屉 / Bootstrap offcanvas。）
+ * 容器查询：断点取 #app 容器宽度，而非视口。 */
 @container (max-width: 699px) {
   .jlv-resizer,
   .jlv-resizer__toggle,
   .jlv-col-list__expand { display: none !important; }    /* 隐藏分栏条与桌面折叠/展开按钮 */
 
-  /* 注意：@container 只作用于容器的后代，#app 自身(容器)不做内联块切换——
-   * 两个视图均为绝对定位铺满，且基样式已给 #app 提供 position:relative + overflow:hidden + height:100%。 */
+  /* 汉堡菜单：仅窄容器显示（左上角，位于详情头部左侧） */
+  .jlv-hamburger { display: inline-flex !important; }
 
-  /* 列表/详情都占满全屏，绝对定位堆叠，transform 平移切换 */
-  .jlv-col-list,
+  /* 详情铺满作为主视图（inset:0 + width:100% 覆盖基础 .jlv-col-detail{width:0}） */
   .jlv-col-detail {
     position: absolute;
     top: 0; left: 0; right: 0; bottom: 0;
-    width: 100% !important;            /* 覆盖基础 .jlv-col-detail{width:0} 与内联 width */
+    width: 100% !important;
     max-width: none;
     margin: 0;
     flex: none;
-    z-index: 1;
+  }
+
+  /* 目录 = 左侧抽屉：默认移出屏外（translateX(-100%)），开合滑入/滑出。
+   * 必须给不透明背景（基样式是 transparent），否则会与下方被遮罩压暗的详情内容重叠、文字混杂。 */
+  .jlv-col-list {
+    position: absolute;
+    top: 0; left: 0; bottom: 0;
+    width: min(320px, 88vw) !important;
+    max-width: none;
+    margin: 0;
+    flex: none;
+    transform: translateX(-100%);
+    z-index: 40;
+    background: var(--jlv-panel-bg) !important;   /* 不透明面板底，覆盖下方详情（须 !important 压过基础 transparent） */
+    border-right: 1px solid var(--jlv-border);
     transition: transform var(--jlv-dur-slow) var(--jlv-ease);
+    box-shadow: var(--jlv-shadow-2);
   }
-  /* 根视图：列表(包含工具栏/搜索/分页)默认可见；详情在右侧屏外 */
-  .jlv-col-list { transform: translateX(0); z-index: 2; }
-  .jlv-col-detail { transform: translateX(100%); z-index: 1; }
-  /* 切到详情：列表向左推出屏，详情滑入 */
-  #app.narrow-detail .jlv-col-list { transform: translateX(-100%); z-index: 1; }
-  #app.narrow-detail .jlv-col-detail { transform: translateX(0); z-index: 2; }
-
-  /* 详情头部「返回列表」按钮 */
-  .jlv-col-detail .jlv-back-btn {
-    flex: none; width: 28px; height: 28px;
-    display: inline-flex; align-items: center; justify-content: center;
-    border-radius: 6px; border: 1px solid transparent; background: transparent;
-    color: var(--jlv-dim); cursor: pointer;
-    transition: background .12s, color .12s, border-color .12s;
-  }
-  .jlv-col-detail .jlv-back-btn:hover { background: rgba(255,255,255,0.1); color: var(--jlv-fg); border-color: rgba(255,255,255,0.08); }
-  .jlv-col-detail .jlv-back-btn svg { flex: none; }
+  #app.list-open .jlv-col-list { transform: translateX(0); }
 }
 
-/* 宽容器隐藏「返回列表」按钮 */
+/* 宽容器：隐藏汉堡菜单与抽屉遮罩（无论 JS 状态） */
 @container (min-width: 700px) {
-  .jlv-col-detail .jlv-back-btn { display: none; }
+  .jlv-hamburger,
+  .jlv-drawer-backdrop { display: none !important; }
 }
+
+/* 汉堡菜单按钮（默认隐藏，仅窄容器显示；图标为三横线） */
+.jlv-hamburger {
+  display: none;
+  flex: none; width: 28px; height: 28px;
+  align-items: center; justify-content: center;
+  border-radius: 6px; border: 1px solid transparent; background: transparent;
+  color: var(--jlv-dim); cursor: pointer;
+  transition: background .12s, color .12s, border-color .12s;
+}
+.jlv-hamburger:hover { background: rgba(255,255,255,0.1); color: var(--jlv-fg); border-color: rgba(255,255,255,0.08); }
+.jlv-hamburger svg { flex: none; }
+
+/* 抽屉遮罩：打开时铺在详情之上、抽屉之下，点击可关闭 */
+.jlv-drawer-backdrop {
+  display: none;
+  position: fixed; inset: 0;
+  z-index: 35;
+  background: rgba(0,0,0,0.45);
+}
+#app.list-open .jlv-drawer-backdrop { display: block; }
 
 /* 焦点可见环 */
 :focus-visible { outline: 2px solid var(--jlv-focus); outline-offset: -1px; }
