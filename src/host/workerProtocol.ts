@@ -42,6 +42,8 @@ export type WorkerResponse =
       eof: boolean;
       interval: number;
     }
+  /** 构建进度（大文件构建期间供宿主反馈，避免用户误判为卡死）。 */
+  | { type: 'progress'; requestId: number; bytesRead: number; lines: number }
   | { type: 'searchResult'; requestId: number; result: SearchLinesResult }
   | { type: 'filterResult'; requestId: number; result: FilterLinesResult }
   | { type: 'error'; requestId?: number; message: string };

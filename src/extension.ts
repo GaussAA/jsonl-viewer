@@ -30,7 +30,16 @@ const openPanels = new Map<string, vscode.WebviewPanel>();
 
 /** 日志输出面板：用户可在"输出 → JSONL Viewer"中查看宿主收发情况，便于排障。 */
 let output: vscode.OutputChannel | undefined;
-let debugLogging = false; // 生产默认关闭，用户可在 devtools console 设置 `__JLV_DEBUG__ = true` 临时开启
+/**
+ * 调试日志开关，绑定配置项 `jsonlViewer.debug`（在设置里可随时开启，立即生效）。
+ *
+ * 修正：此前写死 `false`，且注释称可在 webview devtools 设 `__JLV_DEBUG__` —— 该变量位于
+ * **宿主侧模块作用域**，webview 根本触及不到，等于用户永远拿不到宿主日志、无法排障。
+ */
+let debugLogging = false;
+function syncDebugFlag(): void {
+  debugLogging = vscode.workspace.getConfiguration('jsonlViewer').get<boolean>('debug', false);
+}
 function hostLog(message: string): void {
   if (output && debugLogging) output.appendLine(message);
 }
@@ -84,7 +93,24 @@ function mountViewer(target: ViewerTarget, uri: vscode.Uri, context: vscode.Exte
     .getConfiguration('jsonlViewer')
     .get<number>('sampleLines', 200);
   const workerScriptPath = path.join(context.extensionPath, 'dist', 'indexWorker.js');
-  const data = new DataService(uri.toString(), uri.fsPath, { sampleLines, workerScriptPath });
+  const data = new DataService(uri.toString(), uri.fsPath, {
+    sampleLines,
+    workerScriptPath,
+    // 构建进度写入输出面板（限速 1 次/秒，避免 GB 级文件刷屏）——仅 debug 开启时可见。
+    onProgress: (() => {
+      let lastLog = 0;
+      return (info: { bytesRead: number; lines: number; done: boolean }) => {
+        const now = Date.now();
+        if (!info.done && now - lastLog < 1000) return;
+        lastLog = now;
+        hostLog(
+          info.done
+            ? `索引构建完成：${info.lines} 行 / ${info.bytesRead} 字节`
+            : `索引构建中：${info.lines} 行 / ${info.bytesRead} 字节`
+        );
+      };
+    })(),
+  });
   /**
    * 向 webview 发送消息。
    *
@@ -336,6 +362,15 @@ class JsonlCustomEditorProvider implements vscode.CustomReadonlyEditorProvider {
 
 export function activate(context: vscode.ExtensionContext): void {
   output = vscode.window.createOutputChannel('JSONL Viewer');
+  syncDebugFlag();
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeConfiguration((e) => {
+      if (e.affectsConfiguration('jsonlViewer.debug')) {
+        syncDebugFlag();
+        hostLog(`调试日志已${debugLogging ? '开启' : '关闭'}`);
+      }
+    })
+  );
   hostLog('extension 已激活');
 
   // Command: open the chosen (or active / picked) file in the JSONL Viewer webview panel.

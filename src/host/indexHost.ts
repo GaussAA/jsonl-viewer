@@ -95,7 +95,13 @@ export class WorkerIndexHost implements IndexHost {
   private readonly worker: Worker;
   private readonly pending = new Map<
     number,
-    { resolve: (v: unknown) => void; reject: (e: Error) => void; stop?: () => void }
+    {
+      resolve: (v: unknown) => void;
+      reject: (e: Error) => void;
+      stop?: () => void;
+      /** 构建进度回调（仅 build 请求携带）。 */
+      progress?: (info: { bytesRead: number; lines: number; done: boolean }) => void;
+    }
   >();
   private nextId = 1;
   /** 是否已进入主动释放流程：用于区分「正常退出」与「意外崩溃」。 */
@@ -132,6 +138,11 @@ export class WorkerIndexHost implements IndexHost {
   }
 
   private onMessage(m: WorkerResponse): void {
+    if (m.type === 'progress') {
+      // 构建进度：转发给该请求的 onProgress（大文件构建期间供宿主反馈进展）。
+      this.pending.get(m.requestId)?.progress?.({ bytesRead: m.bytesRead, lines: m.lines, done: false });
+      return;
+    }
     if (m.type === 'built') {
       const p = this.pending.get(m.requestId);
       if (p) {
@@ -175,11 +186,15 @@ export class WorkerIndexHost implements IndexHost {
 
   async build(
     path: string,
-    _onProgress?: (info: { bytesRead: number; lines: number; done: boolean }) => void
+    onProgress?: (info: { bytesRead: number; lines: number; done: boolean }) => void
   ): Promise<BuildResult> {
     const requestId = this.nextId++;
     return new Promise<BuildResult>((resolve, reject) => {
-      this.pending.set(requestId, { resolve: (v) => resolve(v as BuildResult), reject });
+      this.pending.set(requestId, {
+        resolve: (v) => resolve(v as BuildResult),
+        reject,
+        progress: onProgress,
+      });
       this.post({ type: 'build', requestId, path });
     });
   }

@@ -81,6 +81,11 @@
           "default": 200,
           "minimum": 1,
           "description": "Number of leading lines sampled for field inference and summary cards. Larger files keep scanning to a minimum."
+        },
+        "jsonlViewer.debug": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable verbose host logging to the 'JSONL Viewer' output channel (index build progress, message flow). Useful for troubleshooting."
         }
       }
     }

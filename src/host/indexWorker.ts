@@ -43,6 +43,15 @@ async function handle(msg: WorkerRequest): Promise<void> {
           li = await LineIndex.build(stream, {
             chunkSize: INDEX_CHUNK_SIZE,
             reportInterval: INDEX_REPORT_INTERVAL,
+            // 进度回传：主线程据此反馈构建进展。
+            // 此前该链路缺失 → worker 路径的 onProgress 参数被静默忽略，大文件构建期无任何反馈。
+            onProgress: (info) =>
+              post({
+                type: 'progress',
+                requestId: msg.requestId,
+                bytesRead: info.bytesRead,
+                lines: info.lines,
+              }),
           });
         } finally {
           stream.destroy();

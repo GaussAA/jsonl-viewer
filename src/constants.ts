@@ -30,8 +30,18 @@ export const RECORD_INLINE_MAX_BYTES = 256 * 1024;
 
 /* ---------------------- 协议 & 搜索 ---------------------- */
 
-/** webview → host RPC 默认超时。 */
+/** webview → host RPC 默认超时（轻量请求：偏好读写、跳转源码等）。 */
 export const RPC_TIMEOUT_MS = 15_000;
+
+/**
+ * 重活请求超时：会**等待索引构建**或**全文件流式扫描**的请求
+ * （getOverview / readRecords / readRecord / getSampleFields / reload / search / filter）。
+ *
+ * 为何必须与轻量请求分开：实测索引构建约 1ms/MB，10GB 文件约 11s，慢盘可再慢数倍。
+ * 若沿用 15s，用户会在**一切正常**的情况下收到「请求超时」，把正常误报成故障。
+ * 这些请求均可被 supersede 取消，故放大上限不会造成不可中断的卡死。
+ */
+export const RPC_HEAVY_TIMEOUT_MS = 120_000;
 
 /** 文件 stale 检测触发后，自动 reload 的 debounce 窗口。 */
 export const FILE_STALE_DEBOUNCE_MS = 1_000;

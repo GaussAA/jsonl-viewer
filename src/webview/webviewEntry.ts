@@ -34,7 +34,7 @@ import type { FieldCondition, FieldLayout } from './queryLogic.ts';
 import { HostEndpoint } from '../protocol/rpc.ts';
 import type { InitPayload, OverviewPayload, RecordsPayload, SearchResultsPayload } from '../protocol/rpc.ts';
 import { CSS_TEXT } from './styles.ts';
-import { INIT_TIMEOUT_MS } from '../constants.ts';
+import { INIT_TIMEOUT_MS, RPC_HEAVY_TIMEOUT_MS } from '../constants.ts';
 
 /** 渲染用的记录形状（与 LRUCache 值一致）。 */
 export type CachedRecord = RecordEntry & { value?: unknown };
@@ -264,11 +264,15 @@ function main(): void {
       return;
     }
 
-    const { requestId, promise } = bus.request<SearchResultsPayload>(HostEndpoint.SEARCH, {
-      query: q,
-      field: undefined,
-      scope: 'all',
-    });
+    const { requestId, promise } = bus.request<SearchResultsPayload>(
+      HostEndpoint.SEARCH,
+      {
+        query: q,
+        field: undefined,
+        scope: 'all',
+      },
+      { timeoutMs: RPC_HEAVY_TIMEOUT_MS }
+    );
     state.searchInFlight = { rid: requestId, superseded: false };
 
     void promise
@@ -318,7 +322,8 @@ function main(): void {
         field: cond.field,
         op: cond.op,
         value: cond.value,
-      }
+      },
+      { timeoutMs: RPC_HEAVY_TIMEOUT_MS }
     );
     state.filterInFlight = { rid: requestId, superseded: false };
 
@@ -569,13 +574,16 @@ function main(): void {
     banner.show(`宿主错误：${e.message}`, undefined);
   });
 
-  // 若发送 READY 后迟迟收不到 init（宿主异常/握手失败），给出明确提示而非静默停在“连接中…”。
+  // 握手超时：**柔性提示**而非报错。
+  // 原先提示「未收到宿主数据响应（8s 超时）」在大文件上会误导——索引构建本身就需要时间
+  // （实测约 1ms/MB，10GB 约 11s，慢盘更久），此时一切正常却被判成故障。
+  // 现在改为「正在构建索引…」，并在 init 真正到达时自动收起。
+  let buildHintShown = false;
   setTimeout(() => {
     if (!state.overview) {
-      console.warn('[jsonl-viewer][webview] no init received in 8s');
-      banner.show('未收到宿主数据响应（8s 超时）。请查看“输出→JSONL Viewer”或开发者控制台。', '重试', () => {
-        bus.post(HostEndpoint.READY);
-      });
+      buildHintShown = true;
+      console.warn('[jsonl-viewer][webview] init 尚未到达，可能仍在构建索引');
+      banner.show('正在构建索引…（超大文件首次打开可能需要数十秒，请稍候）');
     }
   }, INIT_TIMEOUT_MS);
 
@@ -611,7 +619,12 @@ function main(): void {
     },
     onClearFilter: () => clearFilterForCond(),
     // 截断态「复制该行 JSON」：按需拉完整值（列表缓存不持有超大对象）。
-    onRequestRecord: (line) => bus.request<{ value?: unknown; error?: string; ok: boolean }>(HostEndpoint.READ_RECORD, { line }).promise,
+    onRequestRecord: (line) =>
+      bus.request<{ value?: unknown; error?: string; ok: boolean }>(
+        HostEndpoint.READ_RECORD,
+        { line },
+        { timeoutMs: RPC_HEAVY_TIMEOUT_MS }
+      ).promise,
   });
   // 组装两栏：左栏放入列头(toolbar) + 目录列表(分页)；右栏为详情面板；横幅浮层最后挂载。
   leftCol.appendChild(toolbar.root);
@@ -714,7 +727,8 @@ function main(): void {
 
     const { requestId, promise } = bus.request<{ value?: unknown; error?: string; ok: boolean }>(
       HostEndpoint.READ_RECORD,
-      { line }
+      { line },
+      { timeoutMs: RPC_HEAVY_TIMEOUT_MS }
     );
     state.detailInFlight = { rid: requestId };
 
@@ -762,10 +776,14 @@ function main(): void {
     state.inFlight = { rid: '', superseded: false };
     for (let i = 0; i < missing.count; i++) state.pending.add(missing.start + i);
 
-    const { requestId, promise } = bus.request<RecordsPayload>(HostEndpoint.READ_RECORDS, {
-      startLine: missing.start,
-      count: missing.count,
-    });
+    const { requestId, promise } = bus.request<RecordsPayload>(
+      HostEndpoint.READ_RECORDS,
+      {
+        startLine: missing.start,
+        count: missing.count,
+      },
+      { timeoutMs: RPC_HEAVY_TIMEOUT_MS }
+    );
     state.inFlight.rid = requestId;
 
     try {
@@ -843,6 +861,11 @@ function main(): void {
   }
 
   bus.onInit((payload: InitPayload) => {
+    // 索引已就绪：收起「正在构建索引…」柔性提示（若曾显示）。
+    if (buildHintShown) {
+      buildHintShown = false;
+      banner.hide();
+    }
     state.overview = payload;
     state.persistKey = stateKey(payload.uri);
     list.setTotalRows(payload.totalLines);
@@ -872,7 +895,7 @@ function main(): void {
 
     // 拉一遍最新概览（构建索引后统计更精确），同时由列表的 onRangeChange 触发初始 readRecords。
     void bus
-      .request<OverviewPayload>(HostEndpoint.GET_OVERVIEW, {})
+      .request<OverviewPayload>(HostEndpoint.GET_OVERVIEW, {}, { timeoutMs: RPC_HEAVY_TIMEOUT_MS })
       .promise.then((ov) => {
         if (!ov) return;
         state.overview = ov;
@@ -886,7 +909,11 @@ function main(): void {
 
     // Task 3 接入后用于摘要卡片；若宿主尚未实现（返回 error）则回退到顶层 key 摘要。
     void bus
-      .request<{ fields: FieldLike[] }>(HostEndpoint.GET_SAMPLE_FIELDS, {})
+      .request<{ fields: FieldLike[] }>(
+        HostEndpoint.GET_SAMPLE_FIELDS,
+        {},
+        { timeoutMs: RPC_HEAVY_TIMEOUT_MS }
+      )
       .promise.then((res) => {
         if (res && Array.isArray(res.fields)) {
           state.fields = res.fields;
@@ -915,7 +942,9 @@ function main(): void {
     detail.showLoading();
 
     try {
-      const ov = await bus.request<OverviewPayload>(HostEndpoint.RELOAD, {}).promise;
+      const ov = await bus.request<OverviewPayload>(HostEndpoint.RELOAD, {}, {
+        timeoutMs: RPC_HEAVY_TIMEOUT_MS,
+      }).promise;
       if (!ov) return;
       state.overview = ov;
       // 索引重建后，旧的缓存 / 搜索 / 过滤结果全部失效，整体复位。
@@ -942,7 +971,11 @@ function main(): void {
       updateNavEnabled();
       // 重新拉字段推断（供摘要卡片 / 过滤下拉）。
       void bus
-        .request<{ fields: FieldLike[] }>(HostEndpoint.GET_SAMPLE_FIELDS, {})
+        .request<{ fields: FieldLike[] }>(
+        HostEndpoint.GET_SAMPLE_FIELDS,
+        {},
+        { timeoutMs: RPC_HEAVY_TIMEOUT_MS }
+      )
         .promise.then((res) => {
           if (res && Array.isArray(res.fields)) {
             state.fields = res.fields;
