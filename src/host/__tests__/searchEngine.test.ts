@@ -54,6 +54,38 @@ test('searchLines: 全文匹配会命中坏行（原始文本也参与匹配）'
   assert.deepEqual(r.matches, [2]);
 });
 
+/* -------- 大小写折叠语义回归（P2-4 性能优化不得改变匹配结果） -------- */
+
+test('searchLines: 大小写不敏感 —— query 全大写也要命中小写文本', async () => {
+  const { reader, li } = await makeCtx();
+  const r = await searchLines(reader, li, { query: 'HELLO' });
+  assert.deepEqual(r.matches, [0, 3]);
+});
+
+test('searchLines: 中文（多字节 UTF-8）查询可命中', async () => {
+  const buf = Buffer.from('{"msg":"中文字符"}\n{"msg":"other"}', 'utf8');
+  const li = await LineIndex.build([buf], {});
+  const reader = new MemoryReader(buf);
+  const r = await searchLines(reader, li, { query: '中文' });
+  assert.deepEqual(r.matches, [0]);
+});
+
+test('searchLines: 折叠只作用于 ASCII，不误匹配多字节字节序列', async () => {
+  // 行内字节为 E3 A9。若实现用 latin1 + toLowerCase 折叠整行，'Ã'(C3) 会被折成 'ã'(E3)，
+  // 从而把查询 "é"(UTF-8 = C3 A9) 误判为命中；仅折叠 ASCII A-Z 的实现不会。
+  const buf = Buffer.concat([Buffer.from('{"a":"'), Buffer.from([0xe3, 0xa9]), Buffer.from('"}')]);
+  const li = await LineIndex.build([buf], {});
+  const reader = new MemoryReader(buf);
+  const r = await searchLines(reader, li, { query: 'é' });
+  assert.deepEqual(r.matches, []);
+});
+
+test('searchLines: 纯非字母 query 走快速否定路径仍正确', async () => {
+  const { reader, li } = await makeCtx();
+  assert.deepEqual((await searchLines(reader, li, { query: '"a":1' })).matches, [0]);
+  assert.deepEqual((await searchLines(reader, li, { query: '999' })).matches, []);
+});
+
 /* ------------------------- 字段级搜索 / 过滤（需 parse） ------------------------- */
 
 test('searchLines: 限定字段时只匹配该字段值，且跳过坏行', async () => {

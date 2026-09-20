@@ -47,6 +47,36 @@ function hostErr(message: string): void {
   if (output) output.appendLine(`[ERROR] ${message}`); // 错误始终输出
 }
 
+/**
+ * 该 URI 是否可由 Node fs 直接读取。
+ *
+ * - `file`：本地文件；
+ * - `vscode-remote`：远程工作区——此时扩展宿主运行在远端，`uri.fsPath` 是远端真实路径，同样可读。
+ *
+ * 其余 scheme（`untitled` / `vscode-vfs` / `git` 等）没有真实磁盘路径，
+ * 本查看器依赖「按需随机读磁盘」的核心机制，故不支持——必须给出明确提示，
+ * 而不是让底层 fs 抛出难以理解的错误。
+ */
+function isFsReadable(uri: vscode.Uri): boolean {
+  return uri.scheme === 'file' || uri.scheme === 'vscode-remote';
+}
+
+/** 非本地资源的占位页面（自定义编辑器无法挂载查看器时展示）。 */
+function notLocalHtml(rawScheme: string): string {
+  const scheme = rawScheme.replace(/[^\w+.-]/g, ''); // 防御性清洗，仅保留合法 scheme 字符
+  return `<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline';">
+</head>
+<body style="font-family:var(--vscode-font-family);padding:16px;line-height:1.6;color:var(--vscode-foreground)">
+  <p>JSONL Viewer 仅支持本地文件（或远程工作区中的文件）。</p>
+  <p style="opacity:.75">当前资源类型：<code>${scheme}</code>，没有可随机读取的磁盘路径。</p>
+</body>
+</html>`;
+}
+
 /** viewer 挂载目标：普通 WebviewPanel 与自定义编辑器面板的 webview 语义一致，统一抽象。 */
 interface ViewerTarget {
   webview: vscode.Webview;
@@ -285,6 +315,14 @@ async function openJsonlViewerUnsafe(
   }
   if (!uri) return;
 
+  // 仅有真实磁盘路径的资源可被「按需随机读」；否则给出明确提示而非底层报错。
+  if (!isFsReadable(uri)) {
+    void vscode.window.showWarningMessage(
+      `JSONL Viewer 仅支持本地文件（当前资源类型：${uri.scheme}）。`
+    );
+    return;
+  }
+
   const key = uri.toString();
   // 面板存活时必在 Map 中（onDidDispose 会同步删除），故以存在性判定即可，
   // 无需 isDisposed（WebviewPanel 无此属性）。
@@ -344,6 +382,11 @@ class JsonlCustomEditorProvider implements vscode.CustomReadonlyEditorProvider {
 
   resolveCustomEditor(document: vscode.CustomDocument, panel: vscode.WebviewPanel): void {
     try {
+      // 非本地资源（untitled / vscode-vfs / git…）无磁盘路径：展示占位说明，不挂载查看器。
+      if (!isFsReadable(document.uri)) {
+        panel.webview.html = notLocalHtml(document.uri.scheme);
+        return;
+      }
       panel.webview.options = {
         enableScripts: true,
         localResourceRoots: [vscode.Uri.joinPath(this.context.extensionUri, 'dist')],

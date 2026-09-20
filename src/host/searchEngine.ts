@@ -22,28 +22,44 @@ import { SEARCH_SCAN_EVERY } from '../constants.ts';
 
 /* ------------------------------ Buffer 级全文匹配 ------------------------------ */
 
+/** 仅把 ASCII A-Z(65-90) 折叠为小写，返回新 Buffer（与旧实现的逐字节折叠语义**完全一致**）。 */
+function foldAsciiLower(buf: Buffer): Buffer {
+  const out = Buffer.allocUnsafe(buf.length);
+  for (let i = 0; i < buf.length; i++) {
+    const b = buf[i];
+    out[i] = b >= 65 && b <= 90 ? b + 32 : b;
+  }
+  return out;
+}
+
+/** query 是否含 ASCII 字母（决定大小写折叠是否可能产生差异）。 */
+function hasAsciiLetter(buf: Buffer): boolean {
+  for (let i = 0; i < buf.length; i++) {
+    const b = buf[i];
+    if ((b >= 65 && b <= 90) || (b >= 97 && b <= 122)) return true;
+  }
+  return false;
+}
+
 /**
  * 在原始字节行上做大小写不敏感的子串匹配（只处理 ASCII 范围的 a-z/A-Z）。
- * 相比 readLineAt → UTF-8 解码 → text.toLowerCase().includes()，跳过了整行解码，
- * 在大文件全文搜索中可节省 30-50% 时间（单行越大收益越明显）。
+ *
+ * 性能（P2-4 修正）：旧实现是 JS 双层循环的朴素匹配 O(行字节 × query 长度)，
+ * 315MB 文件配长 query 可达数十秒。改为三级策略：
+ *   1) 原生 `Buffer.includes` 快速路径 —— 大小写完全一致时直接命中（最常见）；
+ *   2) query 不含 ASCII 字母 ⇒ 大小写折叠不可能改变结果，直接否定，省掉昂贵折叠；
+ *   3) 折叠后原生 `includes` —— 总体 O(行字节 + query)，比旧实现快一个量级。
+ *
+ * ⚠️ 这里**只折叠 ASCII A-Z**，绝不对整行做 `toString().toLowerCase()`：
+ * 后者会改写 0xC2~0xDE 等 UTF-8 前导字节（如 'Ã'(C3)→'ã'(E3)），破坏多字节序列的字节等价性，
+ * 产生误匹配。折叠法与旧实现逐字节语义严格一致。
  */
 function bufferIncludesCI(lineBuf: Buffer, queryBuf: Buffer): boolean {
   if (queryBuf.length === 0) return false;
   if (queryBuf.length > lineBuf.length) return false;
-  const n = lineBuf.length - queryBuf.length;
-  for (let i = 0; i <= n; i++) {
-    let matched = true;
-    for (let j = 0; j < queryBuf.length; j++) {
-      const a = lineBuf[i + j];
-      const b = queryBuf[j];
-      // ASCII 大小写折叠：A-Z (65-90) → a-z (97-122)
-      const aFold = a >= 65 && a <= 90 ? a + 32 : a;
-      const bFold = b >= 65 && b <= 90 ? b + 32 : b;
-      if (aFold !== bFold) { matched = false; break; }
-    }
-    if (matched) return true;
-  }
-  return false;
+  if (lineBuf.includes(queryBuf)) return true;
+  if (!hasAsciiLetter(queryBuf)) return false;
+  return foldAsciiLower(lineBuf).includes(foldAsciiLower(queryBuf));
 }
 
 /** 大小写敏感的 Buffer includes（直接用 Node 原生 Buffer.includes）。 */
