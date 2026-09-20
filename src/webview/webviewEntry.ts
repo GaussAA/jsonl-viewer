@@ -909,7 +909,7 @@ function main(): void {
 
     // Task 3 接入后用于摘要卡片；若宿主尚未实现（返回 error）则回退到顶层 key 摘要。
     void bus
-      .request<{ fields: FieldLike[] }>(
+      .request<{ fields: FieldLike[]; total?: number; scanned?: number }>(
         HostEndpoint.GET_SAMPLE_FIELDS,
         {},
         { timeoutMs: RPC_HEAVY_TIMEOUT_MS }
@@ -921,6 +921,14 @@ function main(): void {
           toolbar.setLayout(state.fieldLayout);
           list.refresh();
           tryApplyPersisted();
+          // 抽样行**全部**无法解析：多半根本不是「UTF-8 编码的 JSONL」。
+          // 与其让用户面对满屏坏行不知所措，不如给出可执行的解释。
+          // 门槛 20 行，避免小文件 / 空文件误报。
+          if (res.fields.length === 0 && (res.scanned ?? 0) >= 20 && (res.total ?? 0) === 0) {
+            banner.show(
+              `抽样 ${res.scanned} 行均无法解析为 JSON：文件可能不是 UTF-8 编码，或不是「每行一条 JSON」的 JSONL 格式。`
+            );
+          }
         }
       })
       .catch(() => {

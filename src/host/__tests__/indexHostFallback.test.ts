@@ -13,7 +13,13 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { buildIndexWithFallback } from '../indexHost.ts';
+import {
+  activeWorkerCount,
+  buildIndexWithFallback,
+  createIndexHost,
+  MAX_ACTIVE_WORKERS,
+  type IndexHost,
+} from '../indexHost.ts';
 import { DataService } from '../dataService.ts';
 
 /** 一个绝不可能存在的 worker 脚本路径。 */
@@ -62,6 +68,25 @@ test('DataService：配了坏 worker 路径仍能正常打开并读批（端到�
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test('createIndexHost：活跃 worker 达到上限后退化主线程（不耗尽线程）', async () => {
+  const base = activeWorkerCount();
+  const hosts: IndexHost[] = [];
+  try {
+    const room = Math.max(0, MAX_ACTIVE_WORKERS - base);
+    for (let i = 0; i < room; i++) {
+      hosts.push(createIndexHost(BOGUS_WORKER));
+    }
+    assert.equal(activeWorkerCount(), MAX_ACTIVE_WORKERS, '应正好达到上限');
+
+    const extra = createIndexHost(BOGUS_WORKER);
+    hosts.push(extra);
+    assert.equal(extra.kind, 'main', '超出上限应退化为主线程实现');
+  } finally {
+    for (const h of hosts) await h.dispose().catch(() => {});
+  }
+  assert.equal(activeWorkerCount(), base, '全部释放后并发计数应回到基线');
 });
 
 test('createIndexHost 不存在时不影响主线程路径（回归：无 workerScriptPath 场景不变）', async () => {

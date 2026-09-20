@@ -20,8 +20,7 @@ import type { FieldCondition } from '../webview/queryLogic.ts';
 import { INDEX_CHUNK_SIZE, INDEX_REPORT_INTERVAL } from '../constants.ts';
 import type { BuildResult, WorkerRequest, WorkerResponse } from './workerProtocol.ts';
 
-/** 索引宿主统一接口。 */
-export interface IndexHost {
+/** 索引宿主统一接口。 */export interface IndexHost {
   /** 'worker' | 'main'，便于诊断与日志。 */
   readonly kind: 'worker' | 'main';
   /** 流式构建行索引；返回主线程侧重建的 LineIndex + 概要统计。 */
@@ -38,6 +37,21 @@ export interface IndexHost {
   filter(cond: FieldCondition | null, maxResults: number, shouldCancel?: () => boolean): Promise<FilterLinesResult>;
   /** 释放资源（关闭 reader / 终止 worker）。 */
   dispose(): Promise<void>;
+}
+
+/**
+ * 同时活跃的索引 worker 上限。
+ *
+ * 每个打开的文件各持一个 worker（线程 + V8 isolate + 文件句柄）。常态下用户只开 1~3 个文件，
+ * 但「同时打开数十个大文件」会线性累积资源。超过此上限时新宿主**退化为主线程**——
+ * 宁可在极端场景下牺牲部分流畅度，也不耗尽线程/内存。
+ */
+export const MAX_ACTIVE_WORKERS = 8;
+let activeWorkers = 0;
+
+/** 当前活跃 worker 数（诊断用）。 */
+export function activeWorkerCount(): number {
+  return activeWorkers;
 }
 
 /** 主线程兜底实现（复用 2a 既有逻辑，无 worker 依赖）。 */
@@ -106,9 +120,12 @@ export class WorkerIndexHost implements IndexHost {
   private nextId = 1;
   /** 是否已进入主动释放流程：用于区分「正常退出」与「意外崩溃」。 */
   private disposing = false;
+  /** 是否已归还并发计数（dispose 可能被重复调用，避免计数被重复递减）。 */
+  private released = false;
 
   constructor(scriptPath: string) {
     this.worker = new Worker(scriptPath);
+    activeWorkers++;
     this.worker.on('message', (m: WorkerResponse) => this.onMessage(m));
     this.worker.on('error', (e: Error) => this.onError(e));
     // worker 也可能在**不触发 'error'** 的情况下直接退出（脚本内 process.exit、
@@ -244,6 +261,10 @@ export class WorkerIndexHost implements IndexHost {
 
   async dispose(): Promise<void> {
     this.disposing = true; // 先置位：随后的 'exit' 属正常退出，不当作崩溃
+    if (!this.released) {
+      this.released = true;
+      activeWorkers = Math.max(0, activeWorkers - 1); // 归还并发额度
+    }
     try {
       this.post({ type: 'dispose' });
     } catch {
@@ -269,13 +290,18 @@ export class WorkerIndexHost implements IndexHost {
  * `buildIndexWithFallback()`（首次构建失败时回退主线程重试）。
  */
 export function createIndexHost(workerScriptPath?: string): IndexHost {
-  if (workerScriptPath) {
+  if (workerScriptPath && activeWorkers < MAX_ACTIVE_WORKERS) {
     try {
       return new WorkerIndexHost(workerScriptPath);
     } catch (e) {
       // 仅能捕获同步失败（如参数非法）；异步加载失败见 buildIndexWithFallback。
       console.warn('[indexHost] worker 无法启动（同步错误），改用主线程索引：', e instanceof Error ? e.message : String(e));
     }
+  } else if (workerScriptPath) {
+    // 已达并发上限：退化主线程，避免极端多开耗尽线程/内存。
+    console.warn(
+      `[indexHost] 活跃 worker 已达上限 ${MAX_ACTIVE_WORKERS}，本次改用主线程索引（超出请关闭部分文件）`
+    );
   }
   return new MainThreadIndexHost();
 }

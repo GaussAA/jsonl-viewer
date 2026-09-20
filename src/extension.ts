@@ -28,6 +28,68 @@ const WEBVIEW_SCRIPT = 'webview.js';
 /** 多面板复用：同一 uri 只保留一个面板，重复打开则 reveal 而非新建。 */
 const openPanels = new Map<string, vscode.WebviewPanel>();
 
+/**
+ * 按 uri 复用的 DataService 注册表（带引用计数）。
+ *
+ * 为何需要：
+ *   1. 同一文件可能同时由「默认编辑器」与「命令/右键菜单」两条路径打开，
+ *      若各自新建 DataService，会**重复建索引、重复起 worker、重复占文件句柄**；
+ *   2. webview 内容在隐藏后重建时（`retainContextWhenHidden:false` 或编辑器重建）
+ *      会再次挂载，不复用则要**重新扫描整个文件**——大文件代价极高。
+ *
+ * 引用计数归零时才真正释放（关 worker / 关联 reader 句柄），保证不做无用功。
+ */
+interface SharedService {
+  svc: DataService;
+  refs: number;
+}
+const serviceRegistry = new Map<string, SharedService>();
+
+/** 取得（或新建）该 uri 的共享 DataService，并增加一次引用。 */
+function acquireService(uri: vscode.Uri, context: vscode.ExtensionContext): DataService {
+  const key = uri.toString();
+  const hit = serviceRegistry.get(key);
+  if (hit) {
+    hit.refs++;
+    return hit.svc;
+  }
+  const sampleLines = vscode.workspace
+    .getConfiguration('jsonlViewer')
+    .get<number>('sampleLines', 200);
+  const workerScriptPath = path.join(context.extensionPath, 'dist', 'indexWorker.js');
+  const svc = new DataService(key, uri.fsPath, {
+    sampleLines,
+    workerScriptPath,
+    // 构建进度写入输出面板（限速 1 次/秒，避免 GB 级文件刷屏）——仅 debug 开启时可见。
+    onProgress: (() => {
+      let lastLog = 0;
+      return (info: { bytesRead: number; lines: number; done: boolean }) => {
+        const now = Date.now();
+        if (!info.done && now - lastLog < 1000) return;
+        lastLog = now;
+        hostLog(
+          info.done
+            ? `索引构建完成：${info.lines} 行 / ${info.bytesRead} 字节`
+            : `索引构建中：${info.lines} 行 / ${info.bytesRead} 字节`
+        );
+      };
+    })(),
+  });
+  serviceRegistry.set(key, { svc, refs: 1 });
+  return svc;
+}
+
+/** 释放一次引用；归零时才真正 dispose（关 worker / 释放句柄）。 */
+function releaseService(uri: vscode.Uri): void {
+  const key = uri.toString();
+  const hit = serviceRegistry.get(key);
+  if (!hit) return;
+  hit.refs--;
+  if (hit.refs > 0) return;
+  serviceRegistry.delete(key);
+  void hit.svc.dispose();
+}
+
 /** 日志输出面板：用户可在"输出 → JSONL Viewer"中查看宿主收发情况，便于排障。 */
 let output: vscode.OutputChannel | undefined;
 /**
@@ -119,28 +181,8 @@ function mountViewer(target: ViewerTarget, uri: vscode.Uri, context: vscode.Exte
   // sampling, the bad-line (validation-error) set, and source-line jump.
   // 2b：把「索引构建 + 搜索 + 过滤」下沉到 worker（dist/indexWorker.js），
   // 大文件扫描时主线程（webview 消息循环 / 其它扩展）不被阻塞；spawn 失败自动回退主线程。
-  const sampleLines = vscode.workspace
-    .getConfiguration('jsonlViewer')
-    .get<number>('sampleLines', 200);
-  const workerScriptPath = path.join(context.extensionPath, 'dist', 'indexWorker.js');
-  const data = new DataService(uri.toString(), uri.fsPath, {
-    sampleLines,
-    workerScriptPath,
-    // 构建进度写入输出面板（限速 1 次/秒，避免 GB 级文件刷屏）——仅 debug 开启时可见。
-    onProgress: (() => {
-      let lastLog = 0;
-      return (info: { bytesRead: number; lines: number; done: boolean }) => {
-        const now = Date.now();
-        if (!info.done && now - lastLog < 1000) return;
-        lastLog = now;
-        hostLog(
-          info.done
-            ? `索引构建完成：${info.lines} 行 / ${info.bytesRead} 字节`
-            : `索引构建中：${info.lines} 行 / ${info.bytesRead} 字节`
-        );
-      };
-    })(),
-  });
+  // 按 uri 复用：同一文件的多个视图（默认编辑器 / 命令面板）共享同一份索引与 worker。
+  const data = acquireService(uri, context);
   /**
    * 向 webview 发送消息。
    *
@@ -263,11 +305,12 @@ function mountViewer(target: ViewerTarget, uri: vscode.Uri, context: vscode.Exte
     post({ type: HostReply.FILE_STALE, payload: { message: res.message, deleted: res.deleted } });
   }, 5000);
 
-  // Tear down：释放底层文件句柄（与 worker）、停止 stale 检测、注销消息订阅。
+  // Tear down：停止 stale 检测、注销消息订阅，并**释放一次引用**
+  // （引用计数归零时才真正关 worker / 释放文件句柄——见 releaseService）。
   target.onDispose(() => {
     clearInterval(staleTimer);
     messageSub.dispose();
-    void data.dispose();
+    releaseService(uri);
   });
 }
 
