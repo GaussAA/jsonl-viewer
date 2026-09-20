@@ -61,28 +61,53 @@ async function handle(msg: WorkerRequest): Promise<void> {
         return;
       }
       case 'search': {
-        if (!li || !reader) return;
-        const result = await searchLines(reader, li, {
-          query: msg.query,
-          field: msg.field,
-          scope: msg.scope as SearchScope | undefined,
-          maxResults: msg.maxResults,
-          shouldCancel: () => cancelled.has(msg.requestId),
-        });
-        post({ type: 'searchResult', requestId: msg.requestId, result });
+        // 索引未就绪（build 未完成或失败）时必须**回执错误**：
+        // 此前直接 return，主线程 pending 永不结算 → 调用方永久挂起（webview 要等 15s 超时）。
+        if (!li || !reader) {
+          post({ type: 'error', requestId: msg.requestId, message: '索引尚未就绪（构建未完成或失败）' });
+          return;
+        }
+        try {
+          const result = await searchLines(reader, li, {
+            query: msg.query,
+            field: msg.field,
+            scope: msg.scope as SearchScope | undefined,
+            maxResults: msg.maxResults,
+            shouldCancel: () => cancelled.has(msg.requestId),
+          });
+          post({ type: 'searchResult', requestId: msg.requestId, result });
+        } finally {
+          // 防取消集合无界增长：请求结算后立刻摘除自己的标记。
+          cancelled.delete(msg.requestId);
+        }
         return;
       }
       case 'filter': {
-        if (!li || !reader) return;
-        const result = await filterLines(reader, li, msg.cond as FieldCondition | null, {
-          maxResults: msg.maxResults,
-          shouldCancel: () => cancelled.has(msg.requestId),
-        });
-        post({ type: 'filterResult', requestId: msg.requestId, result });
+        if (!li || !reader) {
+          post({ type: 'error', requestId: msg.requestId, message: '索引尚未就绪（构建未完成或失败）' });
+          return;
+        }
+        try {
+          const result = await filterLines(reader, li, msg.cond as FieldCondition | null, {
+            maxResults: msg.maxResults,
+            shouldCancel: () => cancelled.has(msg.requestId),
+          });
+          post({ type: 'filterResult', requestId: msg.requestId, result });
+        } finally {
+          cancelled.delete(msg.requestId);
+        }
         return;
       }
       case 'cancel': {
         cancelled.add(msg.requestId);
+        // 兜底剪枝：取消请求可能在结果已发出之后才到达，仅靠各请求的 finally 无法清理这些残留。
+        // requestId 单调递增，故早于 (当前 - 1024) 的标记不可能仍在使用。
+        const watermark = msg.requestId - 1024;
+        if (cancelled.size > 1024) {
+          for (const id of cancelled) {
+            if (id < watermark) cancelled.delete(id);
+          }
+        }
         return;
       }
       case 'dispose': {

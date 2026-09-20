@@ -98,11 +98,37 @@ export class WorkerIndexHost implements IndexHost {
     { resolve: (v: unknown) => void; reject: (e: Error) => void; stop?: () => void }
   >();
   private nextId = 1;
+  /** 是否已进入主动释放流程：用于区分「正常退出」与「意外崩溃」。 */
+  private disposing = false;
 
   constructor(scriptPath: string) {
     this.worker = new Worker(scriptPath);
     this.worker.on('message', (m: WorkerResponse) => this.onMessage(m));
     this.worker.on('error', (e: Error) => this.onError(e));
+    // worker 也可能在**不触发 'error'** 的情况下直接退出（脚本内 process.exit、
+    // 模块加载失败后的静默退出等）。不兜底的话，等待中的请求会永久悬挂。
+    this.worker.on('exit', (code: number) => this.onExit(code));
+  }
+
+  /**
+   * 结算全部在途请求。
+   *
+   * 关键：**必须先调用 `stop()` 取消取消轮询定时器**。此前在 onError/dispose 路径遗漏，
+   * 导致每发生一次「搜索出错」或「带搜索关闭面板」就泄漏一个 30ms 的 setInterval；
+   * 该闭包持有 shouldCancel → 连带持有整个 DataService（索引 + reader），阻止 GC。
+   */
+  private settleAll(err: Error): void {
+    for (const p of this.pending.values()) {
+      p.stop?.();
+      p.reject(err);
+    }
+    this.pending.clear();
+  }
+
+  /** worker 进程退出且非我方主动释放 → 拒绝所有在途请求。 */
+  private onExit(code: number): void {
+    if (this.disposing) return;
+    this.settleAll(new Error(`index worker exited unexpectedly (code=${code})`));
   }
 
   private onMessage(m: WorkerResponse): void {
@@ -143,9 +169,8 @@ export class WorkerIndexHost implements IndexHost {
   }
 
   private onError(e: Error): void {
-    // worker 进程级崩溃：拒绝所有在途请求，避免调用方永久挂起。
-    for (const p of this.pending.values()) p.reject(e);
-    this.pending.clear();
+    // worker 进程级崩溃：拒绝所有在途请求（含取消定时器清理），避免调用方永久挂起与定时器泄漏。
+    this.settleAll(e);
   }
 
   async build(
@@ -203,6 +228,7 @@ export class WorkerIndexHost implements IndexHost {
   }
 
   async dispose(): Promise<void> {
+    this.disposing = true; // 先置位：随后的 'exit' 属正常退出，不当作崩溃
     try {
       this.post({ type: 'dispose' });
     } catch {
@@ -211,8 +237,8 @@ export class WorkerIndexHost implements IndexHost {
     // 给 worker 一点时间自行清理并 close，再 terminate 兜底，避免句柄泄漏。
     await new Promise<void>((res) => setTimeout(res, 50));
     await this.worker.terminate().catch(() => {});
-    for (const p of this.pending.values()) p.reject(new Error('worker disposed'));
-    this.pending.clear();
+    // 统一走 settleAll：确保取消轮询定时器一并停止（此前遗漏 → setInterval 泄漏）。
+    this.settleAll(new Error('worker disposed'));
   }
 
   private post(msg: WorkerRequest): void {

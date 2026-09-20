@@ -45,6 +45,11 @@ export const SEARCH_MAX_RESULTS = 50_000;
 /** 过滤结果硬上限——与搜索相同（统一 5 万阈值）。 */
 export const FILTER_MAX_RESULTS = 50_000;
 
+/** 单次 readRecords 的行数硬上限（协议层防护）。
+ *  webview 正常只请求一页（PAGE_SIZE=20）；此上限用于防御**异常输入或未来改动**
+ *  一次拉取整个文件——那会让宿主一次性解析并 postMessage 序列化数十万行，打满内存。 */
+export const RECORDS_MAX_COUNT = 2_000;
+
 /* ---------------------- webview 交互 ---------------------- */
 
 /** 宿主 INIT 消息超时未收到，提示用户"连接中…"超时降级。 */

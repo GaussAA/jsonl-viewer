@@ -20,7 +20,7 @@ import { openFileReader, parseJsonLine, readRecord as readRecordAt } from '../pa
 import { inferFields } from '../infer/inferFields.ts';
 import type { FieldCondition } from '../webview/queryLogic.ts';
 import type { FilterLinesResult, SearchLinesResult } from './searchEngine.ts';
-import { RECORD_INLINE_MAX_BYTES, SEARCH_MAX_RESULTS, FILTER_MAX_RESULTS } from '../constants.ts';
+import { RECORD_INLINE_MAX_BYTES, RECORDS_MAX_COUNT, SEARCH_MAX_RESULTS, FILTER_MAX_RESULTS } from '../constants.ts';
 import { buildIndexWithFallback, type IndexHost } from './indexHost.ts';
 import { buildRecordsPayload } from '../protocol/rpc.ts';
 import type { OverviewPayload, RecordsPayload, RecordsPayloadItem, SampleFieldsPayload } from '../protocol/rpc.ts';
@@ -176,7 +176,8 @@ export class DataService {
     if (!Number.isInteger(startLine) || startLine < 0 || !Number.isInteger(count) || count <= 0) {
       return buildRecordsPayload(0, [], li.totalLines);
     }
-    const n = Math.min(count, Math.max(0, li.totalLines - startLine));
+    // 协议层硬上限：防御异常输入 / 未来改动一次拉取整个文件（解析 + 序列化双重内存风险）。
+    const n = Math.min(count, RECORDS_MAX_COUNT, Math.max(0, li.totalLines - startLine));
     if (n <= 0) return buildRecordsPayload(startLine, [], li.totalLines);
 
     // 阶段三（UI 热路径）：列表态不整条解析、不缓存整条巨物。

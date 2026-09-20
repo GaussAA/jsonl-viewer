@@ -12,7 +12,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DataService } from '../dataService.ts';
-import { RECORD_INLINE_MAX_BYTES } from '../../constants.ts';
+import { RECORD_INLINE_MAX_BYTES, RECORDS_MAX_COUNT } from '../../constants.ts';
 
 async function makeFile(dir: string, lines: string[]): Promise<string> {
   const file = join(dir, 'data.jsonl');
@@ -92,6 +92,23 @@ test('readRecords：超大行截断（truncated=true, value=undefined），详�
     assert.equal(p.items[2].ok, true);
     assert.ok(p.items[2].value !== undefined);
 
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('readRecords：count 超过协议上限时被钳制（防御一次拉取整文件）', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-rs-cap-'));
+  try {
+    const total = RECORDS_MAX_COUNT + 500;
+    const lines: string[] = [];
+    for (let i = 0; i < total; i++) lines.push(`{"id":${i}}`);
+    const file = await makeFile(dir, lines);
+    const ds = makeService(file);
+    const p = await ds.readRecords(0, 1_000_000); // 恶意/异常超大 count
+    assert.equal(p.items.length, RECORDS_MAX_COUNT);
+    assert.equal(p.hasMore, true); // 仍有后续，前端继续分页拉取
     await ds.dispose();
   } finally {
     await rm(dir, { recursive: true, force: true });
