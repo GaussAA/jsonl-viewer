@@ -215,3 +215,33 @@ webview 侧 `LRU(600)` 逐出压力与序列化开销瞬间打满 → 卡死 / O
 
 **验收口径**：每批修复后，`scripts/audit-stability.ts` 对应条目转绿 + `tsc --noEmit` 零错误 + 全量测试不回归；
 探针脚本保留为长期回归网（其中的检查项逐步转成 `src/**/__tests__` 正式用例）。
+
+---
+
+## 七、修复状态（2026-09-20 全部落地）
+
+| 编号 | 问题 | 状态 | 验收证据 |
+|---|---|---|---|
+| P0-1 | 宿主未捕获异常 | ✅ 已修 | `post()` 吞失败 / 回执入 try / 命令回调 catch / `openJsonlViewer` 与 `resolveCustomEditor` 加边界 |
+| P0-2 | worker 失败不回退 | ✅ 已修 | 新增 `buildIndexWithFallback()`；探针 A 段实测 `fellBack=true`，配坏 worker 路径仍可打开读批；`indexHostFallback.test.ts` 3 用例 |
+| P1-1 | 取消定时器泄漏 | ✅ 已修 | 统一 `settleAll()`（先 stop 再 reject 再 clear），`onError`/`dispose`/`exit` 三路径共用 |
+| P1-2 | worker 静默吞请求 | ✅ 已修 | `search`/`filter` 索引未就绪时回执 error |
+| P1-3 | 超时误报 | ✅ 已修 | INIT 改柔性「正在构建索引…」提示 + `RPC_HEAVY_TIMEOUT_MS=120s` 专用于重活请求 |
+| P1-4 | 读批无上限 | ✅ 已修 | `RECORDS_MAX_COUNT=2000`；探针 F 段转绿；单测断言钳制与 `hasMore` |
+| P2-1 | worker 无 exit 兜底 | ✅ 已修 | 新增 `worker.on('exit')` + `disposing` 标志区分正常/异常退出 |
+| P2-2 | cancelled 集合泄漏 | ✅ 已修 | 请求结算后 delete + cancel 时按 requestId 水位线剪枝 |
+| P2-4 | 搜索 O(n×m) | ✅ 已修 | 三级策略（原生 includes / 非字母快速否定 / ASCII 折叠后原生 includes）；4 条语义回归锁定；300MB 搜索与暴力解**逐条一致** |
+| P2-5 | worker 进度被忽略 | ✅ 已修 | 协议补 `progress` 消息，主线程按 requestId 转发，宿主编入输出面板（限速 1 次/秒） |
+| P2-6 | 未校验 scheme | ✅ 已修 | 新增 `isFsReadable()`；命令路径明确警告，自定义编辑器渲染占位页 |
+| P2-7 | 日志无法开启 | ✅ 已修 | 绑定配置 `jsonlViewer.debug`，支持变更监听即时生效 |
+
+**最终验证**：`tsc --noEmit` 零错误 ｜ 全量 **149/149** 通过 ｜ 探针 **0 失败** ｜ 300MB 门禁全绿。
+
+### 尚未处理（需大帅决策，非崩溃类）
+
+- **P2-3 worker / 内存无多开约束**：每个打开的标签页各自持有 1 个 worker + 2 个文件句柄，且 `retainContextWhenHidden: true` 使其常驻。
+  闲置 worker 开销有限，但「同时打开数十个大文件」时内存会累积。
+  可选方案：① 扩展级活跃 worker 上限（超额退化主线程）；② 标签不可见时释放 worker（需接管 onDidChangeViewState）。
+  两者各有取舍（前者让第 N+1 个文件变慢，后者增加状态复杂度），建议后续单独评估。
+- **P2-8 非 UTF-8 编码提示**：GBK 文件表现「乱码但不崩溃」（已实测）。可靠判定编码的成本高于收益，暂缓。
+
