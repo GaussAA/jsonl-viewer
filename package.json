@@ -2,7 +2,7 @@
   "name": "jsonl-viewer",
   "displayName": "JSONL Viewer",
   "description": "High-performance viewer for .jsonl / .ndjson / .jsonlines files: record list + collapsible JSON tree detail, lazy indexing & on-demand parsing for multi-GB files.",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "publisher": "jsonl-viewer",
   "license": "ISC",
   "icon": "media/icon.png",
@@ -35,8 +35,7 @@
   },
   "main": "./dist/extension.js",
   "activationEvents": [
-    "onCommand:jsonlViewer.open",
-    "onCustomEditor:jsonlViewer.customEditor"
+    "onCommand:jsonlViewer.open"
   ],
   "contributes": {
     "commands": [
@@ -46,24 +45,15 @@
         "category": "JSONL Viewer"
       }
     ],
-    "customEditors": [
-      {
-        "viewType": "jsonlViewer.customEditor",
-        "displayName": "JSONL Viewer",
-        "priority": "default",
-        "selector": [
-          {
-            "filenamePattern": "*.jsonl"
-          },
-          {
-            "filenamePattern": "*.ndjson"
-          },
-          {
-            "filenamePattern": "*.jsonlines"
-          }
-        ]
-      }
-    ],
+    "menus": {
+      "explorer/context": [
+        {
+          "command": "jsonlViewer.open",
+          "when": "resourceExtname =~ /\\.(jsonl|ndjson|jsonlines)$/i",
+          "group": "navigation"
+        }
+      ]
+    },
     "configuration": {
       "title": "JSONL Viewer",
       "properties": {
@@ -72,11 +62,6 @@
           "default": 200,
           "minimum": 1,
           "description": "Number of leading lines sampled for field inference and summary cards. Larger files keep scanning to a minimum."
-        },
-        "jsonlViewer.autoOpenCustomEditor": {
-          "type": "boolean",
-          "default": false,
-          "description": "Automatically open JSONL files in the JSONL Viewer custom editor instead of the default text editor."
         }
       }
     }

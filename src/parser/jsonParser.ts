@@ -127,30 +127,27 @@ export async function readLineBuffer(
   return buf.subarray(0, trimmedLen);
 }
 
-/** 基于索引 + 读取器，按需读取并解析第 line 行。 */
+/** 基于稀疏索引 scan，按需读取并解析第 line 行（单次顺序 IO，从最近检查点扫到该行）。 */
 export async function readRecord(
   line: number,
   lineIndex: LineIndex,
   reader: ByteReader,
   opts: ReadRecordOpts = {}
 ): Promise<RecordResult> {
-  const { start, end } = lineIndex.lineRange(line);
-  let text: string;
-  try {
-    text = await readLineAt(reader, start, end, opts);
-  } catch (e) {
-    return {
-      line,
-      ok: false,
-      error: e instanceof Error ? e.message : String(e),
-    };
+  if (line < 0 || line >= lineIndex.totalLines) {
+    return { line, ok: false, error: '无效行号' };
   }
-  const parsed = parseJsonLine(text);
-  if (parsed.ok) return { line, ok: true, value: parsed.value };
-  return { line, ok: false, error: parsed.error };
+  const scanOpts = opts.maxLineBytes != null ? { maxLineBytes: opts.maxLineBytes } : undefined;
+  for await (const r of lineIndex.scan(reader, line, line + 1, scanOpts)) {
+    if (r.error) return { line, ok: false, error: r.error };
+    const parsed = parseJsonLine(r.bytes.toString('utf8'));
+    if (parsed.ok) return { line, ok: true, value: parsed.value };
+    return { line, ok: false, error: parsed.error };
+  }
+  return { line, ok: false, error: '行不存在' };
 }
 
-/** 读取并解析 [startLine, startLine+count) 的一批行（虚拟滚动请求可视区用）。 */
+/** 读取并解析 [startLine, startLine+count) 的一批行（虚拟滚动请求可视区用，连续顺序扫）。 */
 export async function readBatch(
   startLine: number,
   count: number,
@@ -158,13 +155,23 @@ export async function readBatch(
   reader: ByteReader,
   opts: ReadBatchOpts = {}
 ): Promise<RecordResult[]> {
-  if (count <= 0) return [];
-  const out: RecordResult[] = [];
+  if (count <= 0 || startLine < 0) return [];
   const n = Math.min(count, Math.max(0, lineIndex.totalLines - startLine));
-  for (let i = 0; i < n; i++) {
-    // 真正的可中断：宿主 CancelToken 置位 → 立即停（不再扫剩余行、立即让出事件循环）。
-    if (opts.shouldCancel?.()) return out;
-    out.push(await readRecord(startLine + i, lineIndex, reader, opts));
+  const scanOpts = opts.maxLineBytes != null ? { maxLineBytes: opts.maxLineBytes } : undefined;
+  const out: RecordResult[] = [];
+  for await (const r of lineIndex.scan(reader, startLine, startLine + n, scanOpts)) {
+    // 真正的可中断：宿主 CancelToken 置位 → 立即停（不再扫剩余行）。
+    if (opts.shouldCancel?.()) break;
+    if (r.error) {
+      out.push({ line: r.line, ok: false, error: r.error });
+      continue;
+    }
+    const parsed = parseJsonLine(r.bytes.toString('utf8'));
+    out.push(
+      parsed.ok
+        ? { line: r.line, ok: true, value: parsed.value }
+        : { line: r.line, ok: false, error: parsed.error }
+    );
   }
   return out;
 }

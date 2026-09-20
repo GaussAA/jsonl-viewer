@@ -1,0 +1,237 @@
+/**
+ * indexHost.ts — 索引宿主抽象：把「索引构建 + 搜索 + 过滤」这三类重活统一到一个接口，
+ * 提供两种实现：主线程兜底（MainThreadIndexHost）与 worker 下沉（WorkerIndexHost）。
+ *
+ * 为何两种实现：
+ *   - 单元测试与「不传 worker 脚本路径」的场景走主线程，行为等价于旧实现，零回归；
+ *   - 运行时（extension 传入 dist/indexWorker.js 路径）走 worker，扫几 GB 文件时
+ *     主线程（含 webview 消息循环、其它扩展）不被阻塞；
+ *   - WorkerIndexHost 构造若抛错（worker 不可用），createIndexHost 自动回退主线程，
+ *     保证扩展「打得开、用得了」这条底线不被 worker 异常击穿。
+ */
+
+import { createReadStream } from 'node:fs';
+import { Worker } from 'node:worker_threads';
+import { LineIndex } from '../indexer/lineIndex.ts';
+import { openFileReader, type ByteReader } from '../parser/jsonParser.ts';
+import { searchLines, filterLines, type SearchScope } from './searchEngine.ts';
+import type { SearchLinesResult, FilterLinesResult } from './searchEngine.ts';
+import type { FieldCondition } from '../webview/queryLogic.ts';
+import { INDEX_CHUNK_SIZE, INDEX_REPORT_INTERVAL } from '../constants.ts';
+import type { BuildResult, WorkerRequest, WorkerResponse } from './workerProtocol.ts';
+
+/** 索引宿主统一接口。 */
+export interface IndexHost {
+  /** 'worker' | 'main'，便于诊断与日志。 */
+  readonly kind: 'worker' | 'main';
+  /** 流式构建行索引；返回主线程侧重建的 LineIndex + 概要统计。 */
+  build(path: string, onProgress?: (info: { bytesRead: number; lines: number; done: boolean }) => void): Promise<BuildResult>;
+  /** 全文/字段搜索（worker 内部顺序扫全文件；主线程版同）。 */
+  search(
+    query: string,
+    field: string | undefined,
+    scope: SearchScope | undefined,
+    maxResults: number,
+    shouldCancel?: () => boolean
+  ): Promise<SearchLinesResult>;
+  /** 字段值过滤。 */
+  filter(cond: FieldCondition | null, maxResults: number, shouldCancel?: () => boolean): Promise<FilterLinesResult>;
+  /** 释放资源（关闭 reader / 终止 worker）。 */
+  dispose(): Promise<void>;
+}
+
+/** 主线程兜底实现（复用 2a 既有逻辑，无 worker 依赖）。 */
+export class MainThreadIndexHost implements IndexHost {
+  readonly kind = 'main' as const;
+  private index: LineIndex | undefined;
+  private reader: ByteReader | undefined;
+
+  async build(
+    path: string,
+    onProgress?: (info: { bytesRead: number; lines: number; done: boolean }) => void
+  ): Promise<BuildResult> {
+    const stream = createReadStream(path);
+    try {
+      this.index = await LineIndex.build(stream, {
+        chunkSize: INDEX_CHUNK_SIZE,
+        reportInterval: INDEX_REPORT_INTERVAL,
+        onProgress,
+      });
+    } finally {
+      stream.destroy();
+    }
+    this.reader = await openFileReader(path);
+    const li = this.index;
+    return {
+      index: li,
+      stats: { buildMs: li.buildMs, eof: li.eof, totalBytes: li.totalBytes, totalLines: li.totalLines },
+    };
+  }
+
+  async search(
+    query: string,
+    field: string | undefined,
+    scope: SearchScope | undefined,
+    maxResults: number,
+    shouldCancel?: () => boolean
+  ): Promise<SearchLinesResult> {
+    return searchLines(this.reader!, this.index!, { query, field, scope, maxResults, shouldCancel });
+  }
+
+  async filter(cond: FieldCondition | null, maxResults: number, shouldCancel?: () => boolean): Promise<FilterLinesResult> {
+    return filterLines(this.reader!, this.index!, cond, { maxResults, shouldCancel });
+  }
+
+  async dispose(): Promise<void> {
+    if (this.reader && this.reader.close) await this.reader.close().catch(() => {});
+    this.reader = undefined;
+    this.index = undefined;
+  }
+}
+
+/** worker 下沉实现：spawn dist/indexWorker.js，按 requestId 派发并回收 Promise。 */
+export class WorkerIndexHost implements IndexHost {
+  readonly kind = 'worker' as const;
+  private readonly worker: Worker;
+  private readonly pending = new Map<
+    number,
+    { resolve: (v: unknown) => void; reject: (e: Error) => void; stop?: () => void }
+  >();
+  private nextId = 1;
+
+  constructor(scriptPath: string) {
+    this.worker = new Worker(scriptPath);
+    this.worker.on('message', (m: WorkerResponse) => this.onMessage(m));
+    this.worker.on('error', (e: Error) => this.onError(e));
+  }
+
+  private onMessage(m: WorkerResponse): void {
+    if (m.type === 'built') {
+      const p = this.pending.get(m.requestId);
+      if (p) {
+        this.pending.delete(m.requestId);
+        const index = new LineIndex(m.checkpoints, m.totalBytes, m.totalLines, m.interval, {
+          buildMs: m.buildMs,
+          eof: m.eof,
+        });
+        p.resolve({
+          index,
+          stats: { buildMs: m.buildMs, eof: m.eof, totalBytes: m.totalBytes, totalLines: m.totalLines },
+        });
+      }
+      return;
+    }
+    if (m.type === 'searchResult' || m.type === 'filterResult') {
+      const p = this.pending.get(m.requestId);
+      if (p) {
+        p.stop?.();
+        this.pending.delete(m.requestId);
+        p.resolve(m.result);
+      }
+      return;
+    }
+    if (m.type === 'error') {
+      if (m.requestId != null) {
+        const p = this.pending.get(m.requestId);
+        if (p) {
+          p.stop?.();
+          this.pending.delete(m.requestId);
+          p.reject(new Error(m.message));
+        }
+      }
+    }
+  }
+
+  private onError(e: Error): void {
+    // worker 进程级崩溃：拒绝所有在途请求，避免调用方永久挂起。
+    for (const p of this.pending.values()) p.reject(e);
+    this.pending.clear();
+  }
+
+  async build(
+    path: string,
+    _onProgress?: (info: { bytesRead: number; lines: number; done: boolean }) => void
+  ): Promise<BuildResult> {
+    const requestId = this.nextId++;
+    return new Promise<BuildResult>((resolve, reject) => {
+      this.pending.set(requestId, { resolve: (v) => resolve(v as BuildResult), reject });
+      this.post({ type: 'build', requestId, path });
+    });
+  }
+
+  async search(
+    query: string,
+    field: string | undefined,
+    scope: SearchScope | undefined,
+    maxResults: number,
+    shouldCancel?: () => boolean
+  ): Promise<SearchLinesResult> {
+    const requestId = this.nextId++;
+    return new Promise<SearchLinesResult>((resolve, reject) => {
+      let stop: (() => void) | undefined;
+      if (shouldCancel) {
+        // 主线程轮询 shouldCancel（webview 取消置位），命中即转发 cancel 给 worker 提前终止扫描。
+        const timer = setInterval(() => {
+          if (shouldCancel()) {
+            this.post({ type: 'cancel', requestId });
+            if (timer) clearInterval(timer);
+          }
+        }, 30);
+        stop = () => clearInterval(timer);
+      }
+      this.pending.set(requestId, { resolve: (v) => resolve(v as SearchLinesResult), reject, stop });
+      this.post({ type: 'search', requestId, query, field, scope, maxResults });
+    });
+  }
+
+  async filter(cond: FieldCondition | null, maxResults: number, shouldCancel?: () => boolean): Promise<FilterLinesResult> {
+    const requestId = this.nextId++;
+    return new Promise<FilterLinesResult>((resolve, reject) => {
+      let stop: (() => void) | undefined;
+      if (shouldCancel) {
+        const timer = setInterval(() => {
+          if (shouldCancel()) {
+            this.post({ type: 'cancel', requestId });
+            if (timer) clearInterval(timer);
+          }
+        }, 30);
+        stop = () => clearInterval(timer);
+      }
+      this.pending.set(requestId, { resolve: (v) => resolve(v as FilterLinesResult), reject, stop });
+      this.post({ type: 'filter', requestId, cond, maxResults });
+    });
+  }
+
+  async dispose(): Promise<void> {
+    try {
+      this.post({ type: 'dispose' });
+    } catch {
+      /* worker 可能已退出 */
+    }
+    // 给 worker 一点时间自行清理并 close，再 terminate 兜底，避免句柄泄漏。
+    await new Promise<void>((res) => setTimeout(res, 50));
+    await this.worker.terminate().catch(() => {});
+    for (const p of this.pending.values()) p.reject(new Error('worker disposed'));
+    this.pending.clear();
+  }
+
+  private post(msg: WorkerRequest): void {
+    this.worker.postMessage(msg);
+  }
+}
+
+/**
+ * 选择索引宿主：传入 worker 脚本路径且能成功 spawn 则走 worker，否则回退主线程。
+ * 任何 spawn 异常都被吞掉并回退，保证「打得开」这一底线。
+ */
+export function createIndexHost(workerScriptPath?: string): IndexHost {
+  if (workerScriptPath) {
+    try {
+      return new WorkerIndexHost(workerScriptPath);
+    } catch (e) {
+      // worker 不可用（如受限运行时）：静默回退，不影响功能。
+      console.warn('[indexHost] worker 不可用，回退主线程索引：', e instanceof Error ? e.message : String(e));
+    }
+  }
+  return new MainThreadIndexHost();
+}

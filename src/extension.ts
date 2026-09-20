@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto';
+import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { DataService } from './host/dataService.ts';
 import {
@@ -10,16 +11,16 @@ import {
 } from './protocol/rpc.ts';
 import type { FieldCondition } from './webview/queryLogic.ts';
 
-/** The `viewType` used by the custom editor, must match `contributes.customEditors` in package.json. */
-export const VIEW_TYPE = 'jsonlViewer.customEditor';
+/** The `viewType` used by the standalone webview panel (no `customEditors` contribution needed). */
+export const VIEW_TYPE = 'jsonlViewer.webview';
 
 /** Command id, must match `contributes.commands` in package.json. */
 export const OPEN_COMMAND = 'jsonlViewer.open';
 
 const WEBVIEW_SCRIPT = 'webview.js';
 
-/** Supported extension globs, must mirror the custom editor selector. */
-const SUPPORTED_GLOB = /\.(jsonl|ndjson|jsonlines)$/i;
+/** 多面板复用：同一 uri 只保留一个面板，重复打开则 reveal 而非新建。 */
+const openPanels = new Map<string, vscode.WebviewPanel>();
 
 /** 日志输出面板：用户可在"输出 → JSONL Viewer"中查看宿主收发情况，便于排障。 */
 let output: vscode.OutputChannel | undefined;
@@ -32,43 +33,63 @@ function hostErr(message: string): void {
 }
 
 /**
- * Custom editor provider backed by `CustomTextEditorProvider`.
+ * 打开指定文件到独立的 Webview 面板（不绑定 TextDocument）。
  *
- * We chose a *custom editor* over a plain *view* because the user opens a
- * `.jsonl` **file**. A custom editor binds directly to a workspace file
- * (document) and renders inside the editor tab, which is the natural
- * "open the file and see records" interaction. An editor also gives us the
- * file's on-disk URI (`document.uri`) needed later for lazy line indexing
- * and "jump to source line" error location.
+ * 关键修复（阶段一 / P0）：原先走 `CustomTextEditorProvider`，VS Code 会在
+ * `resolveCustomTextEditor` 之前先把整个文件以 `TextDocument` 形式全量载入扩展宿主
+ * 内存；超过阈值（约 50MB 起）直接弹「too large to open」拒绝打开，未超阈值也整文件
+ * 驻留，几 GB 必 OOM。改为 `createWebviewPanel` 命令驱动后，宿主按 URI 从磁盘按需读，
+ * 文件不再预先进入 TextDocument，200MB~数 GB 文件即可打开。
  */
-export class JsonlCustomEditorProvider implements vscode.CustomTextEditorProvider {
-  private readonly context: vscode.ExtensionContext;
+export async function openJsonlViewer(
+  context: vscode.ExtensionContext,
+  fileUri?: vscode.Uri
+): Promise<void> {
+  let uri = fileUri;
 
-  // 注意：不用参数属性语法（Node 类型擦除运行 TS 单测时不支持）。
-  constructor(context: vscode.ExtensionContext) {
-    this.context = context;
+  if (!uri) {
+    uri = vscode.window.activeTextEditor?.document.uri;
+  }
+  if (!uri) {
+    const picked = await vscode.window.showOpenDialog({
+      canSelectFiles: true,
+      canSelectMany: false,
+      title: 'Open file with JSONL Viewer',
+    });
+    uri = picked?.[0];
+  }
+  if (!uri) return;
+
+  const key = uri.toString();
+  // 面板存活时必在 Map 中（onDidDispose 会同步删除），故以存在性判定即可，
+  // 无需 isDisposed（WebviewPanel 无此属性）。
+  const existing = openPanels.get(key);
+  if (existing) {
+    existing.reveal();
+    return;
   }
 
-  async resolveCustomTextEditor(
-    document: vscode.TextDocument,
-    webviewPanel: vscode.WebviewPanel,
-    _token: vscode.CancellationToken
-  ): Promise<void> {
-    hostLog(`resolveCustomTextEditor: ${document.uri.fsPath}`);
-    const webview = webviewPanel.webview;
-    webview.options = {
+  hostLog(`openJsonlViewer: ${uri.fsPath}`);
+  const panel = vscode.window.createWebviewPanel(
+    VIEW_TYPE,
+    `JSONL: ${uri.fsPath.split(/[\\/]/).pop() ?? uri.fsPath}`,
+    vscode.ViewColumn.Active,
+    {
       enableScripts: true,
-      // Restrict to our own generated bundle & static assets under dist/.
-      localResourceRoots: [vscode.Uri.joinPath(this.context.extensionUri, 'dist')],
-    };
+      retainContextWhenHidden: true,
+      localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, 'dist')],
+    }
+  );
+  openPanels.set(key, panel);
 
-    const scriptUri = webview.asWebviewUri(
-      vscode.Uri.joinPath(this.context.extensionUri, 'dist', WEBVIEW_SCRIPT)
-    );
-    const cspSource = webview.cspSource;
-    const nonce = getNonce();
+  const webview = panel.webview;
+  const scriptUri = webview.asWebviewUri(
+    vscode.Uri.joinPath(context.extensionUri, 'dist', WEBVIEW_SCRIPT)
+  );
+  const cspSource = webview.cspSource;
+  const nonce = getNonce();
 
-    webview.html = `
+  webview.html = `
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -83,183 +104,153 @@ export class JsonlCustomEditorProvider implements vscode.CustomTextEditorProvide
 </body>
 </html>`;
 
-    // Data host: builds a lazy line-offset index on demand and serves records
-    // requested by the webview's virtual scroll. Also hosts field-inference
-    // sampling, the bad-line (validation-error) set, and source-line jump.
-    const sampleLines = vscode.workspace
-      .getConfiguration('jsonlViewer')
-      .get<number>('sampleLines', 200);
-    const data = new DataService(document.uri.toString(), document.uri.fsPath, { sampleLines });
-    const post = (msg: RpcMessage): void => void webviewPanel.webview.postMessage(msg);
-    const cancel = new Set<string>();
+  // Data host: builds a lazy line-offset index on demand and serves records
+  // requested by the webview's virtual scroll. Also hosts field-inference
+  // sampling, the bad-line (validation-error) set, and source-line jump.
+  // 2b：把「索引构建 + 搜索 + 过滤」下沉到 worker（dist/indexWorker.js），
+  // 大文件扫描时主线程（webview 消息循环 / 其它扩展）不被阻塞；spawn 失败自动回退主线程。
+  const sampleLines = vscode.workspace
+    .getConfiguration('jsonlViewer')
+    .get<number>('sampleLines', 200);
+  const workerScriptPath = path.join(context.extensionPath, 'dist', 'indexWorker.js');
+  const data = new DataService(uri.toString(), uri.fsPath, { sampleLines, workerScriptPath });
+  const post = (msg: RpcMessage): void => void panel.webview.postMessage(msg);
+  const cancel = new Set<string>();
 
-    // Clicking a bad row opens the on-disk file and reveals that line.
-    const jumpToSource = async (line: number): Promise<void> => {
-      const doc = await vscode.workspace.openTextDocument(document.uri);
+  // Clicking a bad row opens the on-disk file and reveals that line.
+  // 超大文件 VS Code 无法以 TextDocument 打开→openTextDocument 会 reject；
+  // 捕获后降级为友好提示，不再抛错致面板崩溃（Task #3）。
+  const jumpToSource = async (line: number): Promise<void> => {
+    try {
+      const doc = await vscode.workspace.openTextDocument(uri);
       const editor = await vscode.window.showTextDocument(doc, { preserveFocus: true });
       const pos = new vscode.Position(line, 0);
       editor.selection = new vscode.Selection(pos, pos);
       editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
-    };
+    } catch (e) {
+      void vscode.window.showWarningMessage(
+        `无法在编辑器中定位第 ${line + 1} 行：文件过大，VS Code 不能以文本文档打开。` +
+          `可改用「复制该行 JSON」查看内容。`
+      );
+      hostErr('jumpToSource 失败: ' + (e instanceof Error ? (e.stack || e.message) : String(e)));
+    }
+  };
 
-    webviewPanel.webview.onDidReceiveMessage(
-      (message: unknown) => {
-        const incoming = (message as { type?: unknown }).type;
-        hostLog(`收到消息: ${String(incoming)}`);
-        void (async () => {
-          let response: RpcMessage | undefined;
-          try {
-            response = (
-              await dispatchMessage(
-                message,
-                async () => {
-                  // 诊断：确认宿主是否收到 webview 的握手消息。
-                  const st = Date.now();
-                  const init = initReply(await data.getOverview());
-                  hostLog(`init 回执构建完成 (${Date.now() - st}ms)`);
-                  return init;
-                },
-                async (_r) => data.getOverview(),
-                async (_r, startLine, count) => {
-                  // 真正的可中断：读批逐行检测 cancel 集合，被取消即提前返回。
-                  const p = await data.readRecords(startLine, count, () => cancel.has(_r));
-                  cancel.delete(_r);
-                  return p;
-                },
-                async (_r, line) => data.readRecord(line),
-                (requestId) => {
-                  cancel.add(requestId);
-                  // 可中断链路：readRecords/search/filter 逐行检查 cancel 集合，
-                  // 被取消即提前返回；其余轻量请求（抽样/详情/偏好）不响应中断。
-                },
-                async (_r, count) => data.getSampleFields(count),
-                async (line) => void (await jumpToSource(line)),
-                // Task 6：全文/字段搜索（宿主流式扫描；被 cancel 则中断）。
-                async (_r, query, field, scope) => {
-                  const p = await data.search(query, field, scope, () => cancel.has(_r));
-                  cancel.delete(_r);
-                  return p;
-                },
-                // Task 6：字段值过滤。
-                async (_r, field, op, value) => {
-                  const cond =
-                    field && (op === 'eq' || op === 'contains' || op === 'exists' || op === 'type')
-                      ? ({ field, op, value: value ?? '' } as FieldCondition)
-                      : null;
-                  const p = await data.filter(cond, () => cancel.has(_r));
-                  cancel.delete(_r);
-                  return p;
-                },
-                // Task 6/7：偏好持久化到 workspaceState（按 uri 命名空间键）。
-                async (_k, key, val) => {
-                  await this.context.workspaceState.update(key, val);
-                },
-                async (_k, key) => this.context.workspaceState.get(key),
-                // Task 7：文件变更后 webview 点「重新加载」→ 重建索引并返回新概览。
-                async (_r) => data.reload()
-              )
-            ).response;
-          } catch (e) {
-            hostErr('处理消息时异常: ' + (e instanceof Error ? (e.stack || e.message) : String(e)));
-            response = errReply(undefined, e instanceof Error ? e.message : String(e));
-          }
-          if (response) post(response);
-        })();
-      },
-      undefined,
-      this.context.subscriptions
-    );
+  panel.webview.onDidReceiveMessage(
+    (message: unknown) => {
+      const incoming = (message as { type?: unknown }).type;
+      hostLog(`收到消息: ${String(incoming)}`);
+      void (async () => {
+        let response: RpcMessage | undefined;
+        try {
+          response = (
+            await dispatchMessage(
+              message,
+              async () => {
+                // 诊断：确认宿主是否收到 webview 的握手消息。
+                const st = Date.now();
+                const init = initReply(await data.getOverview());
+                hostLog(`init 回执构建完成 (${Date.now() - st}ms)`);
+                return init;
+              },
+              async (_r) => data.getOverview(),
+              async (_r, startLine, count) => {
+                // 真正的可中断：读批逐行检测 cancel 集合，被取消即提前返回。
+                const p = await data.readRecords(startLine, count, () => cancel.has(_r));
+                cancel.delete(_r);
+                return p;
+              },
+              async (_r, line) => data.readRecord(line),
+              (requestId) => {
+                cancel.add(requestId);
+                // 可中断链路：readRecords/search/filter 逐行检查 cancel 集合，
+                // 被取消即提前返回；其余轻量请求（抽样/详情/偏好）不响应中断。
+              },
+              async (_r, count) => data.getSampleFields(count),
+              async (line) => void (await jumpToSource(line)),
+              // 全文/字段搜索（宿主流式扫描；被 cancel 则中断）。
+              async (_r, query, field, scope) => {
+                const p = await data.search(query, field, scope, () => cancel.has(_r));
+                cancel.delete(_r);
+                return p;
+              },
+              // 字段值过滤。
+              async (_r, field, op, value) => {
+                const cond =
+                  field && (op === 'eq' || op === 'contains' || op === 'exists' || op === 'type')
+                    ? ({ field, op, value: value ?? '' } as FieldCondition)
+                    : null;
+                const p = await data.filter(cond, () => cancel.has(_r));
+                cancel.delete(_r);
+                return p;
+              },
+              // 偏好持久化到 workspaceState（按 uri 命名空间键）。
+              async (_k, key, val) => {
+                await context.workspaceState.update(key, val);
+              },
+              async (_k, key) => context.workspaceState.get(key),
+              // 文件变更后 webview 点「重新加载」→ 重建索引并返回新概览。
+              async (_r) => data.reload()
+            )
+          ).response;
+        } catch (e) {
+          hostErr('处理消息时异常: ' + (e instanceof Error ? (e.stack || e.message) : String(e)));
+          response = errReply(undefined, e instanceof Error ? e.message : String(e));
+        }
+        if (response) post(response);
+      })();
+    },
+    undefined,
+    context.subscriptions
+  );
 
-    // Task 7：定期检测文件是否被更改 / 删除（只有索引构建后才有比对基线）。
-    // 仅在状态「从正常转为走样」时向 webview 推送一次 FILE_STALE（不刷屏）；
-    // webview 点「重新加载」→ RELOAD → data.reload() 重建索引后基线更新，状态复位。
-    let staleSignaled = false;
-    const staleTimer = setInterval(async () => {
-      let res;
-      try {
-        res = await data.checkStale();
-      } catch {
-        res = null;
-      }
-      if (!res || res.changed === false) {
-        staleSignaled = false;
-        return;
-      }
-      if (staleSignaled) return; // 已提示过，避免重复弹横幅
-      staleSignaled = true;
-      // 类型已收窄为 { changed: true; deleted: boolean; message: string }，
-      // 恰好匹配 StaleFilePayload → 直接赋值给 FILE_STALE payload，无需 as RpcMessage 强转。
-      post({ type: HostReply.FILE_STALE, payload: { message: res.message, deleted: res.deleted } });
-    }, 5000);
+  // 定期检测文件是否被更改 / 删除（只有索引构建后才有比对基线）。
+  // 仅在状态「从正常转为走样」时向 webview 推送一次 FILE_STALE（不刷屏）；
+  // webview 点「重新加载」→ RELOAD → data.reload() 重建索引后基线更新，状态复位。
+  let staleSignaled = false;
+  const staleTimer = setInterval(async () => {
+    let res;
+    try {
+      res = await data.checkStale();
+    } catch {
+      res = null;
+    }
+    if (!res || res.changed === false) {
+      staleSignaled = false;
+      return;
+    }
+    if (staleSignaled) return; // 已提示过，避免重复弹横幅
+    staleSignaled = true;
+    post({ type: HostReply.FILE_STALE, payload: { message: res.message, deleted: res.deleted } });
+  }, 5000);
 
-    // Tear down the underlying file handles (and the stale detector) on editor close.
-    webviewPanel.onDidDispose(
-      () => {
-        clearInterval(staleTimer);
-        void data.dispose();
-      },
-      undefined,
-      this.context.subscriptions
-    );
-  }
+  // Tear down the underlying file handles (and the stale detector) on panel close.
+  panel.onDidDispose(
+    () => {
+      clearInterval(staleTimer);
+      openPanels.delete(key);
+      void data.dispose();
+    },
+    undefined,
+    context.subscriptions
+  );
 }
 
 export function activate(context: vscode.ExtensionContext): void {
   output = vscode.window.createOutputChannel('JSONL Viewer');
   hostLog('extension 已激活');
-  const provider = new JsonlCustomEditorProvider(context);
 
+  // Command: open the chosen (or active / picked) file in the JSONL Viewer webview panel.
+  // 不再走 customEditor，故超大文件不会在打开前被 TextDocument 全量载入。
   context.subscriptions.push(
-    vscode.window.registerCustomEditorProvider(VIEW_TYPE, provider, {
-      webviewOptions: { retainContextWhenHidden: true },
-      supportsMultipleEditorsPerDocument: false,
-    })
-  );
-
-  // Command: open the active (or chosen) file in the JSONL Viewer editor.
-  context.subscriptions.push(
-    vscode.commands.registerCommand(OPEN_COMMAND, async (uri?: vscode.Uri) => {
-      let resource: vscode.Uri | undefined = uri;
-
-      if (!resource) {
-        resource = vscode.window.activeTextEditor?.document.uri;
-      }
-
-      if (!resource) {
-        const picked = await vscode.window.showOpenDialog({
-          canSelectFiles: true,
-          canSelectMany: false,
-          title: 'Open file with JSONL Viewer',
-        });
-        resource = picked?.[0];
-      }
-
-      if (resource) {
-        await vscode.commands.executeCommand('vscode.openWith', resource, VIEW_TYPE);
-      }
-    })
-  );
-
-  // Optional: auto-open supported files in the custom editor when toggled on.
-  context.subscriptions.push(
-    vscode.workspace.onDidOpenTextDocument((document) => {
-      const enabled = vscode.workspace
-        .getConfiguration('jsonlViewer')
-        .get<boolean>('autoOpenCustomEditor', false);
-      if (enabled && SUPPORTED_GLOB.test(document.fileName)) {
-        void vscode.commands.executeCommand(
-          'vscode.openWith',
-          document.uri,
-          VIEW_TYPE,
-          vscode.ViewColumn.Beside
-        );
-      }
+    vscode.commands.registerCommand(OPEN_COMMAND, (uri?: vscode.Uri) => {
+      void openJsonlViewer(context, uri);
     })
   );
 }
 
 export function deactivate(): void {
-  // context.subscriptions 会自动清理 provider / 命令 / 文件事件；
+  // context.subscriptions 会自动清理命令 / 文件事件；
   // 这里额外关闭 OutputChannel（它不在 subscriptions 里）。
   output?.dispose();
   output = undefined;
@@ -268,4 +259,3 @@ export function deactivate(): void {
 function getNonce(): string {
   return randomBytes(16).toString('base64');
 }
-

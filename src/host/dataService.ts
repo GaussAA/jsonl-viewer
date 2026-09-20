@@ -2,34 +2,34 @@
  * dataService.ts — 主进程侧最小、可跑通的数据宿主服务（无 vscode 依赖）。
  *
  * 职责：把 rpc 协议里的请求与「行偏移索引 + 按需惰性解析」接起来——
- *   - getOverview    ：首见时构建整文件行偏移索引（流式扫描），返回统计。
- *   - readRecords    ：按需读取并解析一批行（虚拟滚动请求可视区）。
+ *   - getOverview    ：首见时构建整文件行偏移索引（流式扫描），返回统计；
+ *   - readRecords    ：按需读取并解析一批行（虚拟滚动请求可视区）；
  *   - readRecord     ：读取并解析单行（JSON 树详情面板用）。
  *
- * 惰性性：索引只构建一次并在本次生命周期内缓存；任何时刻都不会把整行之外
- * 的数据驻留在内存。搜索/筛选/字段推断由后续任务叠加到同一服务。
+ * 2b 接管：索引构建 + 全文/字段搜索 + 字段过滤三类重活，统一委托给 `IndexHost`
+ * （worker 下沉实现 / 主线程兜底实现，见 indexHost.ts）。未传 `workerScriptPath`
+ * 时走主线程，行为与旧实现等价（单测零回归）；运行时走 worker，扫大文件主线程不阻塞。
+ * 随机读/单行读/字段推断仍在主线程，基于 worker 回传的稀疏检查点重建的 LineIndex，
+ * 轻量且频繁，不值得跨线程。惰性性与内存有界原则不变。
  */
 
-import { createReadStream } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import { LineIndex } from '../indexer/lineIndex.ts';
 import type { ByteReader, ReadRecordOpts } from '../parser/jsonParser.ts';
-import {
-  openFileReader,
-  readBatch,
-  readRecord as readRecordAt,
-} from '../parser/jsonParser.ts';
+import { openFileReader, parseJsonLine, readRecord as readRecordAt } from '../parser/jsonParser.ts';
 import { inferFields } from '../infer/inferFields.ts';
-import { filterLines, searchLines } from './searchEngine.ts';
 import type { FieldCondition } from '../webview/queryLogic.ts';
 import type { FilterLinesResult, SearchLinesResult } from './searchEngine.ts';
-import { INDEX_CHUNK_SIZE, INDEX_REPORT_INTERVAL, SEARCH_MAX_RESULTS, FILTER_MAX_RESULTS } from '../constants.ts';
+import { RECORD_INLINE_MAX_BYTES, SEARCH_MAX_RESULTS, FILTER_MAX_RESULTS } from '../constants.ts';
+import { createIndexHost, type IndexHost } from './indexHost.ts';
 import { buildRecordsPayload } from '../protocol/rpc.ts';
-import type {
-  OverviewPayload,
-  RecordsPayload,
-  SampleFieldsPayload,
-} from '../protocol/rpc.ts';
+import type { OverviewPayload, RecordsPayload, RecordsPayloadItem, SampleFieldsPayload } from '../protocol/rpc.ts';
+import {
+  jsonCountOf,
+  jsonKindOf,
+  makeSummary,
+  summarizeRawLine,
+} from './recordSummary.ts';
 
 /** 检测文件是否已变更（size/mtime）的最小快照。 */
 export interface FileSnapshot {
@@ -43,24 +43,26 @@ export type StaleCheckResult =
   | { changed: true; deleted: boolean; message: string }
   | null;
 
-/**
- * 宿主侧默认的搜索 / 过滤结果上限（防御内存失控）。
- * - 搜索：命中行号数组不会无限增长，超限后以 truncated 标记「未列尽」；
- * - 过滤：匹配行号同样封顶，避免「全行命中」的过滤把整文件行号载进 webview。
- * 可视区只展示前若干条，导航基于手头这批足够用；真正的全量行号需要时再按范围续取。
- */
-
 export interface DataServiceOptions {
   onProgress?: (info: { bytesRead: number; lines: number; done: boolean }) => void;
   readLine?: ReadRecordOpts;
   /** 抽样行数上限（字段推断 / 坏行集合查询用）。默认 200。 */
   sampleLines?: number;
+  /**
+   * 索引 Worker 脚本的绝对路径（运行时由 extension 传入 dist/indexWorker.js）。
+   * 传入则「索引构建 + 搜索 + 过滤」下沉 worker；省略或 spawn 失败则回退主线程。
+   */
+  workerScriptPath?: string;
 }
 
 export class DataService {
   private index: LineIndex | undefined;
   private reader: ByteReader | undefined;
   private building: Promise<LineIndex> | undefined;
+  /** 索引宿主（worker 或主线程兜底），承担 build/search/filter。 */
+  private host: IndexHost | undefined;
+  /** 构建统计（来自 host.build，供 getOverview/reload）。 */
+  private buildStats: { buildMs: number; eof: boolean } | undefined;
   /** 已检查范围中的坏行 lineId 集合（内存只与「已确认的坏行数」成正比）。 */
   private readonly knownBadLines = new Set<number>();
   /** 构建索引时的文件快照（用来检测文件是否已变更）。 */
@@ -88,31 +90,34 @@ export class DataService {
     if (!this.building) {
       const gen = this.generation;
       this.building = (async () => {
-        const stream = createReadStream(this.path);
+        // 选宿主：优先 worker（spawn 失败自动回退主线程，见 createIndexHost）。
+        const host = createIndexHost(this.opts.workerScriptPath);
         try {
-          const li = await LineIndex.build(stream, {
-            chunkSize: INDEX_CHUNK_SIZE,
-            reportInterval: INDEX_REPORT_INTERVAL,
-            onProgress: this.opts.onProgress,
-          });
-          if (gen !== this.generation) return li; // 已被 dispose/reload 废弃
+          const { index, stats } = await host.build(this.path, this.opts.onProgress);
+          if (gen !== this.generation) {
+            // 已被 dispose/reload 废弃：释放 worker/reader 后放弃。
+            await host.dispose().catch(() => {});
+            return index;
+          }
           const reader = await openFileReader(this.path);
           if (gen !== this.generation) {
             // 打开读取器期间再次被废弃：关闭自己打开的句柄后放弃。
             if (reader.close) await reader.close().catch(() => {});
-            return li;
+            await host.dispose().catch(() => {});
+            return index;
           }
+          this.host = host;
+          this.index = index;
           this.reader = reader;
-          this.index = li;
+          this.buildStats = stats;
           // 记下本次索引对应的磁盘快照，供后续「文件变更」检测作基线。
           this.snapshot = await this.currentSnapshot();
-          return li;
+          return index;
         } catch (e) {
           // 失败后允许重试：清空 building，否则后续所有请求会永久 reject。
+          await host.dispose().catch(() => {});
           this.building = undefined;
           throw e;
-        } finally {
-          stream.destroy();
         }
       })();
     }
@@ -152,8 +157,8 @@ export class DataService {
       uri: this.uri,
       totalLines: li.totalLines,
       totalBytes: li.totalBytes,
-      buildMs: li.buildMs,
-      eof: li.eof,
+      buildMs: this.buildStats?.buildMs ?? li.buildMs,
+      eof: this.buildStats?.eof ?? li.eof,
     };
   }
 
@@ -168,13 +173,51 @@ export class DataService {
     if (!Number.isInteger(startLine) || startLine < 0 || !Number.isInteger(count) || count <= 0) {
       return buildRecordsPayload(0, [], li.totalLines);
     }
-    // 真正的可中断：CancelToken 置位时逐行检测并提前停，宿主不再把剩余窗口扫完。
-    const items = await readBatch(startLine, count, li, reader, {
-      ...this.opts.readLine,
-      shouldCancel,
-    });
-    for (const it of items) {
-      if (!it.ok) this.knownBadLines.add(it.line);
+    const n = Math.min(count, Math.max(0, li.totalLines - startLine));
+    if (n <= 0) return buildRecordsPayload(startLine, [], li.totalLines);
+
+    // 阶段三（UI 热路径）：列表态不整条解析、不缓存整条巨物。
+    // - 普通行（≤ RECORD_INLINE_MAX_BYTES）：JSON.parse 后附带「有界摘要」；
+    // - 超大行（> 阈值）：跳过整条 parse，浅扫描得类型/顶层条目数/预览并标记 truncated，
+    //   完整值仍由 readRecord 按需拉取。如此 list 内存只与「可见窗口 + 有界摘要」成正比。
+    const items: RecordsPayloadItem[] = [];
+    for await (const r of li.scan(reader, startLine, startLine + n)) {
+      // 真正的可中断：CancelToken 置位时逐行检测并提前停（不扫剩余行）。
+      if (shouldCancel?.()) break;
+      if (r.error) {
+        items.push({ line: r.line, ok: false, error: r.error });
+        this.knownBadLines.add(r.line);
+        continue;
+      }
+      const byteLen = r.bytes.length;
+      if (byteLen > RECORD_INLINE_MAX_BYTES) {
+        const raw = summarizeRawLine(r.bytes);
+        items.push({
+          line: r.line,
+          ok: true,
+          value: undefined,
+          truncated: true,
+          kind: raw.kind,
+          count: raw.count,
+          summary: [{ key: '', display: raw.preview }],
+        });
+        continue;
+      }
+      const parsed = parseJsonLine(r.bytes.toString('utf8'));
+      if (!parsed.ok) {
+        items.push({ line: r.line, ok: false, error: parsed.error });
+        this.knownBadLines.add(r.line);
+        continue;
+      }
+      const value = parsed.value;
+      items.push({
+        line: r.line,
+        ok: true,
+        value,
+        summary: makeSummary(value),
+        kind: jsonKindOf(value),
+        count: jsonCountOf(value),
+      });
     }
     return buildRecordsPayload(startLine, items, li.totalLines);
   }
@@ -201,7 +244,7 @@ export class DataService {
   }
 
   /**
-   * Task 6 全文/字段搜索：宿主流式顺序扫描匹配行。
+   * Task 6 全文/字段搜索：委托 IndexHost（worker 或主线程）流式顺序扫描匹配行。
    * - 全文搜索不做 JSON.parse（纯文本匹配，大文件成本可控）；
    * - 字段限定搜索才对行做单行解析取值。
    * scope 为字符串（'all' 默认；未来可扩展为区间），未识别当作全范围。
@@ -212,33 +255,18 @@ export class DataService {
     scope?: string,
     shouldCancel?: () => boolean
   ): Promise<SearchLinesResult> {
-    const li = await this.ensureIndex();
-    const reader = this.reader!;
+    await this.ensureIndex();
     const range =
       scope && /^\d+:\d+$/.test(scope)
         ? { startLine: Number(scope.split(':')[0]), endLine: Number(scope.split(':')[1]) }
         : undefined;
-    return searchLines(reader, li, {
-      query,
-      field,
-      scope: range,
-      shouldCancel,
-      // 防御内存失控：命中行号数组封顶，超限由 searchLines 标记 truncated。
-      maxResults: SEARCH_MAX_RESULTS,
-    });
+    return this.host!.search(query, field, range, SEARCH_MAX_RESULTS, shouldCancel);
   }
 
-  /** Task 6 字段值过滤：宿主对流解析并评估，返回匹配行号（结果行号数组有上限）。 */
-  async filter(
-    cond: FieldCondition | null,
-    shouldCancel?: () => boolean
-  ): Promise<FilterLinesResult> {
-    const li = await this.ensureIndex();
-    const reader = this.reader!;
-    return filterLines(reader, li, cond, {
-      shouldCancel,
-      maxResults: FILTER_MAX_RESULTS,
-    });
+  /** Task 6 字段值过滤：委托 IndexHost 对流解析并评估，返回匹配行号（结果行号数组有上限）。 */
+  async filter(cond: FieldCondition | null, shouldCancel?: () => boolean): Promise<FilterLinesResult> {
+    await this.ensureIndex();
+    return this.host!.filter(cond, FILTER_MAX_RESULTS, shouldCancel);
   }
 
   /**
@@ -252,8 +280,8 @@ export class DataService {
       uri: this.uri,
       totalLines: li.totalLines,
       totalBytes: li.totalBytes,
-      buildMs: li.buildMs,
-      eof: li.eof,
+      buildMs: this.buildStats?.buildMs ?? li.buildMs,
+      eof: this.buildStats?.eof ?? li.eof,
     };
   }
 
@@ -278,8 +306,12 @@ export class DataService {
     if (this.reader && this.reader.close) {
       await this.reader.close().catch(() => {});
     }
+    // 释放索引宿主（worker 则终止 worker，主线程则关 reader）。
+    if (this.host) await this.host.dispose().catch(() => {});
     this.reader = undefined;
     this.index = undefined;
+    this.host = undefined;
+    this.buildStats = undefined;
     this.snapshot = undefined;
     this.knownBadLines.clear();
   }

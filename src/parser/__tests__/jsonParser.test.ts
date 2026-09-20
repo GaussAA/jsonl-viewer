@@ -58,11 +58,15 @@ test('parseJsonLine：空行拒绝', () => {
 
 test('readLineAt：剥离 \\n 与 \\r\\n，多行正确', async () => {
   const buf = Buffer.from('aa\r\nbbb\nc\n', 'utf8');
-  const { offsets } = await LineIndex.build([buf]);
+  const li = await LineIndex.build([buf]);
   const reader = new MemoryReader(buf);
-  assert.equal(await readLineAt(reader, offsets[0], offsets[1]), 'aa');
-  assert.equal(await readLineAt(reader, offsets[1], offsets[2]), 'bbb');
-  assert.equal(await readLineAt(reader, offsets[2], buf.length), 'c');
+  const r0 = await li.resolveRange(0, reader);
+  const r1 = await li.resolveRange(1, reader);
+  const r2 = await li.resolveRange(2, reader);
+  assert.ok(r0 && r1 && r2);
+  assert.equal(await readLineAt(reader, r0.start, r0.end), 'aa');
+  assert.equal(await readLineAt(reader, r1.start, r1.end), 'bbb');
+  assert.equal(await readLineAt(reader, r2.start, r2.end), 'c');
 });
 
 test('readLineAt：超长行被 maxLineBytes 拒绝', async () => {
@@ -107,10 +111,11 @@ test('FileByteReader：按偏移读取真实文件（含 \\r\\n）', async () =>
   const reader = await openFileReader(fp);
   try {
     const index = await LineIndex.build([Buffer.from('alpha\r\nbeta\ngamma', 'utf8')]);
-    const r0 = await readLineAt(reader, index.getOffsetAtLine(0), index.lineRange(0).end);
-    const r2 = await readLineAt(reader, index.getOffsetAtLine(2), index.lineRange(2).end);
-    assert.equal(r0, 'alpha');
-    assert.equal(r2, 'gamma'); // 最后一行无换行
+    const r0 = await index.resolveRange(0, reader);
+    const r2 = await index.resolveRange(2, reader);
+    assert.ok(r0 && r2);
+    assert.equal(await readLineAt(reader, r0.start, r0.end), 'alpha');
+    assert.equal(await readLineAt(reader, r2.start, r2.end), 'gamma'); // 最后一行无换行
   } finally {
     await reader.close?.();
     await rm(dir, { recursive: true, force: true });

@@ -80,14 +80,32 @@ export interface SampleFieldsPayload {
   scanned: number;
 }
 
+/**
+ * 列表中的单条记录载荷（阶段三：列表态只回有界摘要，完整值按需走 READ_RECORD）。
+ * - value    ：完整值。仅当未超阈值（或坏行）时提供；超大对象截断为 undefined。
+ * - summary  ：有界摘要（列表卡片渲染用），ok 记录始终提供，不持有整条 JSON。
+ * - truncated：超大对象被截断标记——value 为 undefined，完整值须经 READ_RECORD 按需获取。
+ * - kind/count：值类型与顶层条目数（徽章用），截断态下仍能渲染徽章，无需回退解析 value。
+ */
+export interface RecordsPayloadItem {
+  line: number;
+  ok: boolean;
+  /** 完整值。超大对象截断为 undefined（经 READ_RECORD 按需拉取）。 */
+  value?: unknown;
+  error?: string;
+  /** 有界摘要（列表卡片渲染用），ok 记录始终提供。 */
+  summary?: { key: string; display: string }[];
+  /** 超大对象被截断：value 为 undefined，完整值须经 READ_RECORD 按需获取。 */
+  truncated?: boolean;
+  /** 值类型（徽章用），截断态下仍能渲染徽章。 */
+  kind?: 'object' | 'array' | 'string' | 'number' | 'boolean' | 'null';
+  /** 顶层 key 数(object)/元素数(array)，徽章用。 */
+  count?: number;
+}
+
 export interface RecordsPayload {
   startLine: number;
-  items: {
-    line: number;
-    ok: boolean;
-    value?: unknown;
-    error?: string;
-  }[];
+  items: RecordsPayloadItem[];
   hasMore: boolean;
 }
 

@@ -79,13 +79,14 @@ test('超大文件索引与随机访问基准（30MB 规模，可用 JSONL_PERF_
 
     assert.equal(li.totalLines, n);
     assert.ok(li.buildMs >= 0);
-    // 行偏移数组（约 8B/行）随行数线性，与单行内容无关 → 大文件仅由行数决定索引内存。
-    const idxBytes = li.offsets.length * 8;
+    // 稀疏检查点（约 16B/检查点 = 8B offset + 8B line）随「行数/间隔」稀疏增长，
+    // 与单行内容无关 → 大文件索引内存由行数主导但被间隔摊薄（间隔 1024 时仅约全量的 1/1024）。
+    const idxBytes = li.checkpoints.length * 16;
     const heapGrowthMb = (after.heapUsed - before.heapUsed) / 1048576;
 
     console.log(
       `[perf/JSONL] lines=${n} bytes=${(bytes / 1048576).toFixed(1)}MB ` +
-        `buildMs=${buildMs.toFixed(1)} idxRows=${li.offsets.length} ` +
+        `buildMs=${buildMs.toFixed(1)} checkpointRows=${li.checkpoints.length} ` +
         `idxBytes≈${(idxBytes / 1024).toFixed(0)}KB heapΔ=${heapGrowthMb.toFixed(1)}MB`
     );
 

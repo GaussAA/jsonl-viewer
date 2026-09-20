@@ -15,7 +15,7 @@
 
 import type { LineIndex } from '../indexer/lineIndex.ts';
 import type { ByteReader } from '../parser/jsonParser.ts';
-import { readLineBuffer, readRecord } from '../parser/jsonParser.ts';
+import { parseJsonLine } from '../parser/jsonParser.ts';
 import { matchesFilter, recordFieldValue } from '../webview/queryLogic.ts';
 import type { FieldCondition } from '../webview/queryLogic.ts';
 import { SEARCH_SCAN_EVERY } from '../constants.ts';
@@ -104,12 +104,24 @@ export async function searchLines(
   let total = 0;
   let truncated = false;
 
-  for (let line = start; line < end; line++) {
+  // 单次顺序 IO：从 start 行顺扫到 end，完全不依赖逐行随机定位（稀疏索引友好）。
+  for await (const r of li.scan(reader, start, end)) {
     if (opts.shouldCancel?.()) break;
+    if (r.error) continue; // 超长/坏扫描行跳过
 
-    const hit = field
-      ? await fieldSearchHit(line, reader, li, field, q, ci)
-      : await fullTextHit(line, reader, li, queryBuf!, ci);
+    let hit: boolean;
+    if (field) {
+      const parsed = parseJsonLine(r.bytes.toString('utf8'));
+      if (!parsed.ok || parsed.value === undefined) continue;
+      hit = matchesFilter(recordFieldValue(parsed.value, field), {
+        field,
+        op: 'contains',
+        value: q,
+        caseInsensitive: ci !== false,
+      });
+    } else {
+      hit = ci !== false ? bufferIncludesCI(r.bytes, queryBuf!) : bufferIncludesCS(r.bytes, queryBuf!);
+    }
 
     if (hit) {
       if (matches.length >= maxResults) {
@@ -117,48 +129,15 @@ export async function searchLines(
         truncated = true;
         break;
       }
-      matches.push(line);
+      matches.push(r.line);
       total++;
     }
 
-    if ((line - start) % scanEvery === scanEvery - 1) await yieldToLoop();
+    if ((r.line - start) % scanEvery === scanEvery - 1) await yieldToLoop();
   }
 
   if (truncated) total = Number.MAX_SAFE_INTEGER; // 不精确总数，仅表示「未列尽」。
   return { matches, total, truncated };
-}
-
-async function fullTextHit(
-  line: number,
-  reader: ByteReader,
-  li: LineIndex,
-  queryBuf: Buffer,
-  ci: boolean | undefined
-): Promise<boolean> {
-  const { start, end } = li.lineRange(line);
-  let lineBuf: Buffer;
-  try {
-    lineBuf = await readLineBuffer(reader, start, end);
-  } catch {
-    return false;
-  }
-  return ci !== false
-    ? bufferIncludesCI(lineBuf, queryBuf)
-    : bufferIncludesCS(lineBuf, queryBuf);
-}
-
-async function fieldSearchHit(
-  line: number,
-  reader: ByteReader,
-  li: LineIndex,
-  field: string,
-  q: string,
-  ci: boolean | undefined
-): Promise<boolean> {
-  const r = await readRecord(line, li, reader);
-  if (!r.ok || r.value === undefined) return false;
-  const value = recordFieldValue(r.value, field);
-  return matchesFilter(value, { field, op: 'contains', value: q, caseInsensitive: ci !== false });
 }
 
 /* ------------------------------ 过滤 ------------------------------ */
@@ -199,22 +178,24 @@ export async function filterLines(
   const scanEvery = opts.scanEvery ?? SEARCH_SCAN_EVERY;
   const maxResults = opts.maxResults ?? FILTER_MAX_RESULTS;
 
+  // 单次顺序 IO：从 start 顺扫到 end，逐行解析求值（稀疏索引友好）。
   const matches: number[] = [];
   let truncated = false;
-  for (let line = start; line < end; line++) {
+  for await (const r of li.scan(reader, start, end)) {
     if (opts.shouldCancel?.()) break;
-    const r = await readRecord(line, li, reader);
-    if (!r.ok || r.value === undefined) continue;
-    const value = recordFieldValue(r.value, cond.field);
+    if (r.error) continue; // 超长/坏扫描行跳过
+    const parsed = parseJsonLine(r.bytes.toString('utf8'));
+    if (!parsed.ok || parsed.value === undefined) continue;
+    const value = recordFieldValue(parsed.value, cond.field);
     if (matchesFilter(value, cond)) {
       if (matches.length >= maxResults) {
         // 达上限立即终止扫描（M1：此前仅停 push 仍扫完全文件）。
         truncated = true;
         break;
       }
-      matches.push(line);
+      matches.push(r.line);
     }
-    if ((line - start) % scanEvery === scanEvery - 1) await yieldToLoop();
+    if ((r.line - start) % scanEvery === scanEvery - 1) await yieldToLoop();
   }
   return { matches, total: truncated ? maxResults + 1 : matches.length, truncated };
 }

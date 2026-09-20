@@ -381,6 +381,9 @@ body {
 .jlv-type-badge.string { background: color-mix(in srgb, var(--jlv-info) 15%, transparent); color: var(--jlv-info); }
 .jlv-type-badge.error { background: color-mix(in srgb, var(--jlv-bad) 15%, transparent); color: var(--jlv-bad); }
 .jlv-type-badge.number { background: color-mix(in srgb, var(--jlv-number) 15%, transparent); color: var(--jlv-number); }
+.jlv-type-badge.boolean { background: color-mix(in srgb, var(--jlv-info) 15%, transparent); color: var(--jlv-info); }
+.jlv-type-badge.null { background: color-mix(in srgb, var(--jlv-muted) 15%, transparent); color: var(--jlv-muted); }
+.jlv-type-badge.truncated { background: color-mix(in srgb, var(--jlv-warn) 22%, transparent); color: var(--jlv-warn); border: 1px dashed color-mix(in srgb, var(--jlv-warn) 55%, transparent); }
 
 .jlv-card-preview {
   font-size: 10px; font-family: var(--jlv-mono); color: var(--jlv-dim);

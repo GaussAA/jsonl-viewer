@@ -15,6 +15,11 @@ package-lock.json
 dist/**
 !dist/extension.js
 !dist/webview.js
+# worker 入口必须随包分发：运行时 extension.ts 以 <ext>/dist/indexWorker.js 绝对路径 spawn，
+# 缺失则 worker 下沉在生产环境静默失效（回退主线程）。
+!dist/indexWorker.js
+# 工作区会话记忆 / 助手元数据不进发布物
+.workbuddy/**
 # 开发工具 / 发布产物 / 示例样本不进最终 vsix（示例可从仓库获取，缩减安装体积）
 scripts/**
 releases/**

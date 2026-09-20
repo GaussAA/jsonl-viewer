@@ -19,13 +19,21 @@ export interface RecordEntry {
   value?: unknown;
   ok: boolean;
   error?: string;
+  /** 有界摘要（列表卡片渲染用）；阶段三起宿主对 ok 记录始终提供。 */
+  summary?: { key: string; display: string }[];
+  /** 超大对象被截断（完整值须经 READ_RECORD 按需拉取）。 */
+  truncated?: boolean;
+  /** 值类型（徽章用），截断态下仍能渲染徽章。 */
+  kind?: 'object' | 'array' | 'string' | 'number' | 'boolean' | 'null';
+  /** 顶层 key 数(object)/元素数(array)，徽章用。 */
+  count?: number;
 }
 
 export interface ListCallbacks {
   /** 按行号取已加载的记录；未加载返回 undefined（渲染「加载中…」占位）。 */
   getRecord(line: number): RecordEntry | undefined;
   getFields(): readonly FieldLike[] | null;
-  /** 可选：字段摘要（本目录不再使用，保留以兼容调用方）。 */
+  /** 可选：字段摘要（无 summary 时回退用）。 */
   summarize?(value: unknown): { key: string; display: string }[];
   onSelect(line: number): void;
   /** 当前页展示位区间变化（[first, lastExclusive)），通知控制器按需拉取。 */
@@ -34,6 +42,8 @@ export interface ListCallbacks {
   onJumpToSource?(line: number): void;
   /** 可选：清空过滤条件（空态「清除过滤」按钮）。 */
   onClearFilter?(): void;
+  /** 可选：按需拉取某行完整值（截断态「复制该行 JSON」用）。 */
+  onRequestRecord?(line: number): Promise<{ value?: unknown; ok: boolean; error?: string }>;
 }
 
 /** 页面信息（供外部展示/统计）。 */
@@ -396,7 +406,7 @@ export class VirtualRecordList {
       t.textContent = 'error';
       head.appendChild(t);
     } else {
-      const kind = jsonKindOfValue(entry.value);
+      const kind = entry.kind ?? jsonKindOfValue(entry.value);
       const t = document.createElement('span');
       t.className = `jlv-type-badge ${kind}`;
       t.textContent = kind;
@@ -404,9 +414,16 @@ export class VirtualRecordList {
       if (kind === 'object' || kind === 'array') {
         const cnt = document.createElement('span');
         cnt.className = 'jlv-type-badge string';
-        const n = kind === 'object' ? countKeys(entry.value) : countItems(entry.value);
+        const n = entry.count ?? (kind === 'object' ? countKeys(entry.value) : countItems(entry.value));
         cnt.textContent = `${n} ${kind === 'object' ? 'keys' : 'items'}`;
         head.appendChild(cnt);
+      }
+      if (entry.truncated) {
+        const trunc = document.createElement('span');
+        trunc.className = 'jlv-type-badge truncated';
+        trunc.textContent = '已截断';
+        trunc.title = '该行过大，列表仅显示摘要；点击该行在右侧详情按需加载完整值';
+        head.appendChild(trunc);
       }
     }
 
@@ -433,7 +450,13 @@ export class VirtualRecordList {
       preview.classList.add('error-text');
       preview.textContent = entry.error ?? 'JSON 解析失败';
     } else {
-      const items = this.cb.summarize ? this.cb.summarize(entry.value) : [];
+      // 优先用宿主回传的有界 summary（阶段三）；缺失时回退到从 value 现算。
+      const items =
+        entry.summary && entry.summary.length > 0
+          ? entry.summary
+          : this.cb.summarize && entry.value !== undefined
+            ? this.cb.summarize(entry.value)
+            : [];
       preview.innerHTML = items
         .slice(0, 3)
         .map((it) => {
@@ -465,6 +488,11 @@ export class VirtualRecordList {
           label: '复制该行 JSON',
           run: () => void writeClipboard(formatJsonValue(entry.value)),
         });
+      } else if (entry && entry.truncated && this.cb.onRequestRecord) {
+        items.push({
+          label: '复制该行 JSON',
+          run: () => void this.copyFullOnDemand(real),
+        });
       }
       openContextMenu(e.clientX, e.clientY, items);
     });
@@ -483,6 +511,27 @@ export class VirtualRecordList {
     // 同步 listbox 的 activedescendant，读屏可感知选中行（仅当选中的行在当前页）。
     if (activeId) this.scrollEl.setAttribute('aria-activedescendant', activeId);
     else this.scrollEl.removeAttribute('aria-activedescendant');
+  }
+
+  /**
+   * 截断态：按需拉取完整值后复制到剪贴板（失败/拒绝则退而复制预览文本）。
+   * 避免列表缓存持有超大对象——仅在用户主动「复制该行 JSON」时才走 READ_RECORD。
+   */
+  private async copyFullOnDemand(line: number): Promise<void> {
+    const cb = this.cb.onRequestRecord;
+    if (!cb) return;
+    try {
+      const res = await cb(line);
+      if (res && res.ok !== false && res.value !== undefined) {
+        await writeClipboard(formatJsonValue(res.value));
+        return;
+      }
+    } catch {
+      /* 落到预览复制 */
+    }
+    const entry = this.cb.getRecord(line);
+    const preview = entry?.summary?.[0]?.display ?? '（无法复制完整值）';
+    await writeClipboard(preview);
   }
 
   /** 重建分页条（两行：导航+窗口页码 / 跳页+统计）。 */

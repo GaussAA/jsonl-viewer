@@ -64,8 +64,16 @@ async function main() {
       platform: 'browser',
       globalName: 'JlvWebview',
     });
-    await Promise.all([extCtx.watch(), webCtx.watch()]);
-    console.log('[build] watching (extension ESM + webview IIFE)...');
+    const workerCtx = await context({
+      ...common,
+      entryPoints: { indexWorker: 'src/host/indexWorker.ts' },
+      outdir: 'dist',
+      format: 'esm',
+      platform: 'node',
+      ...extensionExternals,
+    });
+    await Promise.all([extCtx.watch(), webCtx.watch(), workerCtx.watch()]);
+    console.log('[build] watching (extension ESM + webview IIFE + indexWorker ESM)...');
     return;
   }
 
@@ -87,6 +95,17 @@ async function main() {
     format: 'iife',
     platform: 'browser',
     globalName: 'JlvWebview',
+  });
+
+  // 3) Index worker -> ESM（runs inside worker_threads, Node 平台；vscode 外置）。
+  //    把「索引构建 + 搜索 + 过滤」下沉到 worker，主线程不被大文件扫描阻塞（2b）。
+  await build({
+    ...common,
+    entryPoints: { indexWorker: 'src/host/indexWorker.ts' },
+    outdir: 'dist',
+    format: 'esm',
+    platform: 'node',
+    ...extensionExternals,
   });
 
   console.log('[build] done.');

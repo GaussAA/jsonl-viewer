@@ -610,6 +610,8 @@ function main(): void {
       void bus.request(HostEndpoint.JUMP_TO_SOURCE, { line }).promise.catch(() => {});
     },
     onClearFilter: () => clearFilterForCond(),
+    // 截断态「复制该行 JSON」：按需拉完整值（列表缓存不持有超大对象）。
+    onRequestRecord: (line) => bus.request<{ value?: unknown; error?: string; ok: boolean }>(HostEndpoint.READ_RECORD, { line }).promise,
   });
   // 组装两栏：左栏放入列头(toolbar) + 目录列表(分页)；右栏为详情面板；横幅浮层最后挂载。
   leftCol.appendChild(toolbar.root);
@@ -771,7 +773,15 @@ function main(): void {
       if (state.inFlight?.rid !== requestId || state.inFlight.superseded) return false;
       if (payload.items.length === 0) return false;
       for (const it of payload.items) {
-        state.cache.set(it.line, { value: it.value, ok: it.ok, error: it.error });
+        state.cache.set(it.line, {
+          value: it.value,
+          ok: it.ok,
+          error: it.error,
+          summary: it.summary,
+          truncated: it.truncated,
+          kind: it.kind,
+          count: it.count,
+        });
         if (it.line + 1 > state.maxLoaded) state.maxLoaded = it.line + 1;
       }
       // 可视区已有真实数据，重绘展示。
