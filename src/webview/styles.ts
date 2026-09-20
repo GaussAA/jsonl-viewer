@@ -96,18 +96,61 @@ body {
   background: var(--jlv-bg);
 }
 #app { display: flex; flex-direction: row; align-items: stretch; min-width: 0; position: relative; }
+/* 以容器宽度为响应式基准（而非视口）：#app 作为 size container，
+ * 下方所有窄/宽屏规则用 @container 查询，布局随 webview 面板实际可用宽度自适应
+ * （并排双栏时左右面板各自独立缩放、不同尺寸的嵌入口也有相同的降级行为）。 */
+#app { container-type: inline-size; }
 
 /* 系统减弱动效：全部关闭 */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }
 
-/* 窄屏（<700px）：左右栏纵向堆叠 */
-@media (max-width: 699px) {
-  body { flex-direction: column; overflow: auto; }
-  #app { flex-direction: column; }
-  .jlv-col-list { width: 100% !important; flex: none; }
-  .jlv-col-detail { min-height: 400px; }
+/* 窄容器（<700px）：master–detail 双视图 —— 一次只显示一个，用 transform 平移切换（iOS push 式）。
+ * 容器查询：断点取 #app 容器宽度，而非视口；webview 面板实际可用宽度不足时自动降级。
+ * 默认显示「列表」(master)，点击记录滑入「详情」(detail)，详情头部带返回按钮。 */
+@container (max-width: 699px) {
+  .jlv-resizer,
+  .jlv-resizer__toggle,
+  .jlv-col-list__expand { display: none !important; }    /* 隐藏分栏条与桌面折叠/展开按钮 */
+
+  /* 注意：@container 只作用于容器的后代，#app 自身(容器)不做内联块切换——
+   * 两个视图均为绝对定位铺满，且基样式已给 #app 提供 position:relative + overflow:hidden + height:100%。 */
+
+  /* 列表/详情都占满全屏，绝对定位堆叠，transform 平移切换 */
+  .jlv-col-list,
+  .jlv-col-detail {
+    position: absolute;
+    top: 0; left: 0; right: 0; bottom: 0;
+    width: 100% !important;            /* 覆盖基础 .jlv-col-detail{width:0} 与内联 width */
+    max-width: none;
+    margin: 0;
+    flex: none;
+    z-index: 1;
+    transition: transform var(--jlv-dur-slow) var(--jlv-ease);
+  }
+  /* 根视图：列表(包含工具栏/搜索/分页)默认可见；详情在右侧屏外 */
+  .jlv-col-list { transform: translateX(0); z-index: 2; }
+  .jlv-col-detail { transform: translateX(100%); z-index: 1; }
+  /* 切到详情：列表向左推出屏，详情滑入 */
+  #app.narrow-detail .jlv-col-list { transform: translateX(-100%); z-index: 1; }
+  #app.narrow-detail .jlv-col-detail { transform: translateX(0); z-index: 2; }
+
+  /* 详情头部「返回列表」按钮 */
+  .jlv-col-detail .jlv-back-btn {
+    flex: none; width: 28px; height: 28px;
+    display: inline-flex; align-items: center; justify-content: center;
+    border-radius: 6px; border: 1px solid transparent; background: transparent;
+    color: var(--jlv-dim); cursor: pointer;
+    transition: background .12s, color .12s, border-color .12s;
+  }
+  .jlv-col-detail .jlv-back-btn:hover { background: rgba(255,255,255,0.1); color: var(--jlv-fg); border-color: rgba(255,255,255,0.08); }
+  .jlv-col-detail .jlv-back-btn svg { flex: none; }
+}
+
+/* 宽容器隐藏「返回列表」按钮 */
+@container (min-width: 700px) {
+  .jlv-col-detail .jlv-back-btn { display: none; }
 }
 
 /* 焦点可见环 */

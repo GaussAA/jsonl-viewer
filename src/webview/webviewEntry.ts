@@ -423,6 +423,9 @@ function main(): void {
 
   let listCollapsed = false;
   let listAnimTimer: ReturnType<typeof setTimeout> | undefined;
+  /** 窄容器态：布局以 #app 容器宽度为基准（与 CSS @container max-width:699px 对齐），而非视口。
+   *  首次取初始容器宽度；后续由 onContainerResize() 跨断点时更新并触发重排。 */
+  let narrow = rootEl.clientWidth < 700;
   /** 收起/展开动画时长与缓动（与设计体系 --jlv-dur-slow / --jlv-ease 对齐）。 */
   const COL_ANIM_MS = 300;
   const COL_EASE = 'cubic-bezier(0.16, 1, 0.3, 1)';
@@ -532,8 +535,9 @@ function main(): void {
   const savedW = listWidthFromStore();
   expandedWidthPx = savedW ?? DEFAULT_LIST_WIDTH;
   if (savedW !== null) applyListWidth(savedW);
-  // 恢复折叠状态
-  if (listCollapsedFromStore()) setListCollapsed(true);
+  // 恢复折叠状态（仅宽屏；窄屏由 syncResponsive 的抽屉模式接管，不在此恢复）
+  // 用 applyCollapsedUI（无动画），避免挂载即播收起动画导致首帧闪烁抖动。
+  if (!narrow && listCollapsedFromStore()) applyCollapsedUI(true);
 
   let dragStartX = 0;
   let dragStartW = 0;
@@ -597,6 +601,8 @@ function main(): void {
       list.select(line);
       void showDetailForLine(line);
       updateNavEnabled();
+      // 窄容器 master–detail：点击记录滑入详情视图
+      if (narrow) showNarrowDetail(true);
     },
     onRangeChange: (displayFirst, displayLast) => {
       // 分页/翻页已改变当前可视页 → 立即刷新范围文本（不依赖后面是否有实际拉取）。
@@ -635,7 +641,59 @@ function main(): void {
   rootEl.appendChild(detail.root);
   rootEl.appendChild(banner.root);
 
-  /* ---------------- prev / next 导航 ---------------- */
+  /* ---------------- 窄屏响应式：master–detail 双视图切换 ---------------- */
+// 详情头部「返回列表」按钮（仅窄屏 CSS 显示；宽屏隐藏）
+const backBtn = document.createElement('button');
+backBtn.type = 'button';
+backBtn.className = 'jlv-back-btn';
+backBtn.title = '返回列表';
+backBtn.setAttribute('aria-label', '返回列表');
+backBtn.innerHTML = ICON_BACK;
+detail.root.querySelector<HTMLElement>('.jlv-detail-header')?.prepend(backBtn);
+
+/** 窄容器下切换视图：true=显示详情(列表左推出屏)，false=回到列表根视图。宽屏无副作用。 */
+function showNarrowDetail(show: boolean): void {
+  rootEl!.classList.toggle('narrow-detail', show);
+}
+backBtn.addEventListener('click', () => showNarrowDetail(false));
+
+/** 依据窄/宽容器收敛布局。 */
+function syncResponsive(): void {
+  if (narrow) {
+    // 窄容器：清掉桌面折叠态/内联样式，让两个视图占满全屏；默认落在「列表」根视图
+    resetColInline();
+    leftCol.classList.remove('collapsed');
+    listCollapsed = false;
+    collapseBtn.hidden = true;
+    expandBtn.hidden = true;
+    showNarrowDetail(false);
+  } else {
+    // 宽容器：恢复桌面两栏（持久化折叠则保持）
+    showNarrowDetail(false);
+    if (listCollapsedFromStore()) applyCollapsedUI(true);
+    else applyCollapsedUI(false);
+    list.refresh();
+  }
+}
+
+/** 容器(面板)宽度跨窄/宽断点 → 更新 narrow 并重排；同侧变化（拖动调整面板）不重排。 */
+let roNarrow: ResizeObserver | null = null;
+function onContainerResize(): void {
+  const n = rootEl!.clientWidth < 700;
+  if (n === narrow) return;
+  narrow = n;
+  syncResponsive();
+}
+if (typeof window.ResizeObserver === 'function') {
+  roNarrow = new ResizeObserver(onContainerResize);
+  roNarrow.observe(rootEl);
+} else {
+  // 回退：不支持容器查询时跟随视口尺寸
+  window.addEventListener('resize', onContainerResize);
+}
+syncResponsive();
+
+/* ---------------- prev / next 导航 ---------------- */
 
   /** 获取当前可见记录总数（考虑过滤态）。 */
   function getTotalVisible(): number {
@@ -685,8 +743,6 @@ function main(): void {
     state.selectedLine = real;
     void showDetailForLine(real);
     updateNavEnabled();
-    // 导航后自动展开左栏（如果已折叠）
-    if (listCollapsed) setListCollapsed(false);
   };
   navHandlers.onNextRecord = () => {
     const total = getTotalVisible();
@@ -699,7 +755,6 @@ function main(): void {
     state.selectedLine = real;
     void showDetailForLine(real);
     updateNavEnabled();
-    if (listCollapsed) setListCollapsed(false);
   };
 
   /* ---------------- 详情面板：按需请求完整 JSON ---------------- */
@@ -875,8 +930,7 @@ function main(): void {
     // 打开文件默认选中第一条并展示其 JSON；右侧细节树已内置「仅展开顶层、嵌套折叠」的默认态。
     if (state.selectedLine === undefined && payload.totalLines > 0) {
       state.selectedLine = 0;
-      list.select(0);
-      list.scrollToLine(0);
+      list.select(0); // 首帧不加 scrollToLine（避免入场动画/重建导致打开时闪一次）
       void showDetailForLine(0);
       updateNavEnabled();
     }
@@ -1005,8 +1059,8 @@ function main(): void {
   // 初始：向宿主报告就绪，等待 init 回执。
   bus.post(HostEndpoint.READY);
 
-  // 软刷新 / 尺寸变化：重新渲染当前可视区。
-  window.addEventListener('resize', () => list.refresh());
+  // 尺寸变化：由 ResizeObserver 仅在跨窄/宽断点（容器 <700px）时触发 syncResponsive 重排，
+  // 不在此对每次 resize 重建目录/分页，避免拖拽调窗时左栏卡片反复重建（闪烁/刷新）。
 
   updateToolbar();
 
@@ -1022,12 +1076,12 @@ function main(): void {
     if (cleanupCalled) return;
     cleanupCalled = true;
     if (listAnimTimer) clearTimeout(listAnimTimer);
+    if (roNarrow) roNarrow.disconnect();
     bus.dispose();
     scheduleFetch.dispose();
     list.dispose();
     detail.dispose();
     toolbar.destroy();
-    window.removeEventListener('resize', list.refresh);
   };
   window.addEventListener('beforeunload', cleanup);
 }
@@ -1038,5 +1092,8 @@ const ICON_COLLAPSE_LEFT =
 /** 展开左栏按钮图标（>>）。 */
 const ICON_EXPAND_RIGHT =
   '<svg width="10" height="10" viewBox="0 0 16 16"><path d="M6 3l5 5-5 5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+/** 详情「返回列表」按钮图标（←）。 */
+const ICON_BACK =
+  '<svg width="14" height="14" viewBox="0 0 16 16"><path d="M10.5 3L5.5 8l5 5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 
 main();

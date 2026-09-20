@@ -78,7 +78,7 @@ export class VirtualRecordList {
   private readonly inner: HTMLElement;
   private readonly navEl: HTMLElement; // 分页第一行：导航 + 页码窗口
   private readonly sideEl: HTMLElement; // 分页第二行：跳页 + 统计
-  private rawTotal = 0; // 底层总行数（未过滤）
+  private rawTotal = -1; // 底层总行数（未过滤）；-1 = 尚未收到概览，渲染前不可用
   private totalRows = 0; // 展示行数（过滤后即 translation 长度）
   /** 展示位 -> 真实行号；null 表示不过滤（展示位 == 真实行号）。 */
   private translation: number[] | null = null;
@@ -122,9 +122,15 @@ export class VirtualRecordList {
   /* ---------------------- 公开 API（与旧虚拟滚动对齐） ---------------------- */
 
   setTotalRows(n: number): void {
+    const prevRaw = this.rawTotal;
+    const prevTotal = this.totalRows;
     this.rawTotal = n;
     this.totalRows = this.translation ? this.translation.length : n;
     this.clampPage();
+    // 仅在「此前已渲染过 且 总行数未变化」时跳过重建：避免首开时 init 概览与 GET_OVERVIEW
+    // 反复刷新同一数值，导致目录重复重建并重播入场动画 = 闪烁。
+    // 首次设置（prevRaw<0）必须渲染，否则空文件(0 行)永远不会画出空态。
+    if (prevRaw >= 0 && this.totalRows === prevTotal) return;
     this.render(false);
   }
 
@@ -285,6 +291,8 @@ export class VirtualRecordList {
    */
   private render(animate: boolean): void {
     if (this.disposed) return;
+    // 尚未收到概览（rawTotal<0）前不渲染：避免首帧先画「0 行」空态、再刷成卡片，造成闪烁。
+    if (this.rawTotal < 0) return;
     this.clampPage();
     this.scrollEl.scrollTop = 0;
     this.updatePager();
@@ -293,7 +301,7 @@ export class VirtualRecordList {
     if (animate && cards.length > 0) {
       // reduced-motion：动画被样式禁用，出口直接完成（不等固定时长）。
       if (matchMediaReduced()) {
-        this.rebuild();
+        this.rebuild(true);
         return;
       }
       // 出口：旧卡片逐个向左滑出
@@ -305,15 +313,16 @@ export class VirtualRecordList {
       const exitMs = 160 + Math.min(cards.length, 10) * 15;
       setTimeout(() => {
         if (this.disposed || mySeq !== this.pageSeq) return;
-        this.rebuild();
+        this.rebuild(true);
       }, exitMs);
       return;
     }
-    this.rebuild();
+    // 仅「翻页/跳转」触发入场动画；纯数据刷新（数据到达、字段变化、概览刷新）直接重建，不重播淡入。
+    this.rebuild(animate);
   }
 
-  /** 重建当前页 DOM（新卡片从右滑入 + 错峰）。 */
-  private rebuild(): void {
+  /** 重建当前页 DOM（enter=true 才加「从右滑入 + 错峰」入场动画，用于翻页/跳转）。 */
+  private rebuild(enter: boolean): void {
     this.inner.textContent = '';
 
     // 空态：文件中无记录 / 过滤后无结果。
@@ -356,9 +365,11 @@ export class VirtualRecordList {
     const count = this.pageCount();
     for (let i = 0; i < count; i++) {
       const card = this.createLine(start + i);
-      // 换页入场：从右滑入（错峰 15ms × 最多 10 张）
-      card.classList.add('jlv-card-enter');
-      card.style.animationDelay = `${Math.min(i, 10) * 15}ms`;
+      // 仅翻页/跳转播入场：从右滑入（错峰 15ms × 最多 10 张）；数据刷新不加，避免每次刷新重放淡入闪烁
+      if (enter) {
+        card.classList.add('jlv-card-enter');
+        card.style.animationDelay = `${Math.min(i, 10) * 15}ms`;
+      }
       this.inner.appendChild(card);
     }
 
