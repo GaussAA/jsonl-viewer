@@ -21,7 +21,7 @@ import { inferFields } from '../infer/inferFields.ts';
 import type { FieldCondition } from '../webview/queryLogic.ts';
 import type { FilterLinesResult, SearchLinesResult } from './searchEngine.ts';
 import { RECORD_INLINE_MAX_BYTES, SEARCH_MAX_RESULTS, FILTER_MAX_RESULTS } from '../constants.ts';
-import { createIndexHost, type IndexHost } from './indexHost.ts';
+import { buildIndexWithFallback, type IndexHost } from './indexHost.ts';
 import { buildRecordsPayload } from '../protocol/rpc.ts';
 import type { OverviewPayload, RecordsPayload, RecordsPayloadItem, SampleFieldsPayload } from '../protocol/rpc.ts';
 import {
@@ -90,10 +90,13 @@ export class DataService {
     if (!this.building) {
       const gen = this.generation;
       this.building = (async () => {
-        // 选宿主：优先 worker（spawn 失败自动回退主线程，见 createIndexHost）。
-        const host = createIndexHost(this.opts.workerScriptPath);
+        // 选宿主：优先 worker；**worker 失败时内部自动回退主线程重试**（见 buildIndexWithFallback），
+        // 保证「打得开」这条底线不被 worker 加载异常击穿。
+        let host: IndexHost | undefined;
         try {
-          const { index, stats } = await host.build(this.path, this.opts.onProgress);
+          const built = await buildIndexWithFallback(this.opts.workerScriptPath, this.path, this.opts.onProgress);
+          host = built.host;
+          const { index, stats } = built.result;
           if (gen !== this.generation) {
             // 已被 dispose/reload 废弃：释放 worker/reader 后放弃。
             await host.dispose().catch(() => {});
@@ -115,7 +118,7 @@ export class DataService {
           return index;
         } catch (e) {
           // 失败后允许重试：清空 building，否则后续所有请求会永久 reject。
-          await host.dispose().catch(() => {});
+          if (host) await host.dispose().catch(() => {});
           this.building = undefined;
           throw e;
         }

@@ -85,7 +85,16 @@ function mountViewer(target: ViewerTarget, uri: vscode.Uri, context: vscode.Exte
     .get<number>('sampleLines', 200);
   const workerScriptPath = path.join(context.extensionPath, 'dist', 'indexWorker.js');
   const data = new DataService(uri.toString(), uri.fsPath, { sampleLines, workerScriptPath });
-  const post = (msg: RpcMessage): void => void webview.postMessage(msg);
+  /**
+   * 向 webview 发送消息。
+   *
+   * 防御：面板/编辑器可能已被销毁（用户关闭标签时仍有在途请求完成），此时 postMessage 会失败。
+   * 必须吞掉失败——Node ≥15 的 `unhandledRejection` 默认行为是**抛出未捕获异常**，
+   * 而扩展宿主是所有扩展共享的进程，绝不能被一次「向已关闭面板发消息」击穿。
+   */
+  const post = (msg: RpcMessage): void => {
+    void Promise.resolve(webview.postMessage(msg)).then(undefined, () => {});
+  };
   const cancel = new Set<string>();
 
   // Clicking a bad row opens the on-disk file and reveals that line.
@@ -167,7 +176,14 @@ function mountViewer(target: ViewerTarget, uri: vscode.Uri, context: vscode.Exte
         hostErr('处理消息时异常: ' + (e instanceof Error ? (e.stack || e.message) : String(e)));
         response = errReply(undefined, e instanceof Error ? e.message : String(e));
       }
-      if (response) post(response);
+      // 回执发送同样纳入 try：避免「面板已销毁」等异常逃逸成未处理 rejection。
+      if (response) {
+        try {
+          post(response);
+        } catch (e) {
+          hostErr('回执发送失败: ' + (e instanceof Error ? e.message : String(e)));
+        }
+      }
     })();
   });
 
@@ -202,10 +218,29 @@ function mountViewer(target: ViewerTarget, uri: vscode.Uri, context: vscode.Exte
 /**
  * 打开指定文件到独立的 Webview 面板（命令 / 资源管理器右键菜单路径）。
  *
+ * 对外是**永不冒泡异常**的边界：命令回调与右键菜单都直接调用它，任何内部失败
+ * （对话框被取消以外的情况、面板创建失败、webview 配额超限…）都必须在此收口，
+ * 否则会变成未处理的 Promise rejection，可能击穿扩展宿主进程。
+ */
+export async function openJsonlViewer(
+  context: vscode.ExtensionContext,
+  fileUri?: vscode.Uri
+): Promise<void> {
+  try {
+    await openJsonlViewerUnsafe(context, fileUri);
+  } catch (e) {
+    hostErr('openJsonlViewer 异常: ' + (e instanceof Error ? (e.stack || e.message) : String(e)));
+    void vscode.window.showErrorMessage(
+      `无法用 JSONL Viewer 打开该文件：${e instanceof Error ? e.message : String(e)}`
+    );
+  }
+}
+
+/**
  * 与 `JsonlCustomEditorProvider` 共用 `mountViewer`：二者都从磁盘按需读，不绑定 TextDocument，
  * 故超大文件（数 GB）走此路径同样可用。
  */
-export async function openJsonlViewer(
+async function openJsonlViewerUnsafe(
   context: vscode.ExtensionContext,
   fileUri?: vscode.Uri
 ): Promise<void> {
@@ -282,15 +317,20 @@ class JsonlCustomEditorProvider implements vscode.CustomReadonlyEditorProvider {
   }
 
   resolveCustomEditor(document: vscode.CustomDocument, panel: vscode.WebviewPanel): void {
-    panel.webview.options = {
-      enableScripts: true,
-      localResourceRoots: [vscode.Uri.joinPath(this.context.extensionUri, 'dist')],
-    };
-    mountViewer(
-      { webview: panel.webview, onDispose: (cb) => panel.onDidDispose(cb) },
-      document.uri,
-      this.context
-    );
+    try {
+      panel.webview.options = {
+        enableScripts: true,
+        localResourceRoots: [vscode.Uri.joinPath(this.context.extensionUri, 'dist')],
+      };
+      mountViewer(
+        { webview: panel.webview, onDispose: (cb) => panel.onDidDispose(cb) },
+        document.uri,
+        this.context
+      );
+    } catch (e) {
+      // 挂载失败（webview 配额 / 已销毁竞态）同样不得冒泡到扩展宿主。
+      hostErr('resolveCustomEditor 异常: ' + (e instanceof Error ? (e.stack || e.message) : String(e)));
+    }
   }
 }
 
@@ -299,10 +339,12 @@ export function activate(context: vscode.ExtensionContext): void {
   hostLog('extension 已激活');
 
   // Command: open the chosen (or active / picked) file in the JSONL Viewer webview panel.
-  // 不再走 customEditor 打开路径，故超大文件不会在打开前被 TextDocument 全量载入。
   context.subscriptions.push(
     vscode.commands.registerCommand(OPEN_COMMAND, (uri?: vscode.Uri) => {
-      void openJsonlViewer(context, uri);
+      // 双层防护：openJsonlViewer 自身已收口异常，此处再兜一道，杜绝未处理 rejection。
+      void openJsonlViewer(context, uri).catch((e) => {
+        hostErr('命令执行失败: ' + (e instanceof Error ? (e.stack || e.message) : String(e)));
+      });
     })
   );
 

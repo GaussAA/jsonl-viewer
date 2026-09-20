@@ -221,17 +221,56 @@ export class WorkerIndexHost implements IndexHost {
 }
 
 /**
- * 选择索引宿主：传入 worker 脚本路径且能成功 spawn 则走 worker，否则回退主线程。
- * 任何 spawn 异常都被吞掉并回退，保证「打得开」这一底线。
+ * 选择索引宿主：传入 worker 脚本路径则尝试 worker，否则主线程。
+ *
+ * ⚠️ 注意：`new Worker(path)` 对**不存在的脚本不会同步抛错**，而是异步 emit `'error'`；
+ * 因此本函数的 try/catch **抓不到「worker 加载失败」**。真正的兜底在
+ * `buildIndexWithFallback()`（首次构建失败时回退主线程重试）。
  */
 export function createIndexHost(workerScriptPath?: string): IndexHost {
   if (workerScriptPath) {
     try {
       return new WorkerIndexHost(workerScriptPath);
     } catch (e) {
-      // worker 不可用（如受限运行时）：静默回退，不影响功能。
-      console.warn('[indexHost] worker 不可用，回退主线程索引：', e instanceof Error ? e.message : String(e));
+      // 仅能捕获同步失败（如参数非法）；异步加载失败见 buildIndexWithFallback。
+      console.warn('[indexHost] worker 无法启动（同步错误），改用主线程索引：', e instanceof Error ? e.message : String(e));
     }
   }
   return new MainThreadIndexHost();
+}
+
+/**
+ * 构建索引，并在 worker 不可用时**自动回退主线程重试一次**。
+ *
+ * 为何必须存在：worker 加载失败（脚本缺失 / 打包遗漏 / 文件损坏 / 受限运行时 / Node 不支持 ESM worker）
+ * 只会在首次 `build()` 时以异步 error 暴露。若不做兜底，`build` 会直接 reject，
+ * `DataService.ensureIndex` 随之抛出 → **插件彻底打不开任何文件**，与「保底可打开」的设计初衷相悖。
+ *
+ * 语义：仅当主宿主是 worker 且失败时才重试；主线程实现失败属真实失败（文件不存在 / 权限等），原样上抛。
+ */
+export async function buildIndexWithFallback(
+  workerScriptPath: string | undefined,
+  path: string,
+  onProgress?: (info: { bytesRead: number; lines: number; done: boolean }) => void
+): Promise<{ host: IndexHost; result: BuildResult; fellBack: boolean }> {
+  const primary = createIndexHost(workerScriptPath);
+  try {
+    const result = await primary.build(path, onProgress);
+    return { host: primary, result, fellBack: false };
+  } catch (e) {
+    if (primary.kind !== 'worker') throw e; // 主线程也失败：真实错误，交给上层提示
+    console.warn(
+      '[indexHost] worker 索引失败，回退主线程重试：',
+      e instanceof Error ? e.message : String(e)
+    );
+    await primary.dispose().catch(() => {});
+    const fallback = new MainThreadIndexHost();
+    try {
+      const result = await fallback.build(path, onProgress);
+      return { host: fallback, result, fellBack: true };
+    } catch (e2) {
+      await fallback.dispose().catch(() => {});
+      throw e2;
+    }
+  }
 }
