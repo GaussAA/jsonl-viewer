@@ -97,7 +97,7 @@
     "typecheck": "tsc --noEmit",
     "test": "node --experimental-transform-types --test \"src/**/*.test.ts\"",
     "test:coverage": "node --experimental-transform-types --experimental-test-coverage --test \"src/**/*.test.ts\"",
-    "test:coverage:gate": "node --experimental-transform-types --experimental-test-coverage --test-coverage-lines=88 --test-coverage-branches=85 --test-coverage-functions=82 --test \"src/**/*.test.ts\"",
+    "test:coverage:gate": "node --experimental-transform-types --experimental-test-coverage --test-coverage-lines=91 --test-coverage-branches=85 --test-coverage-functions=84 --test \"src/**/*.test.ts\"",
     "test:integration": "node scripts/test-integration.mjs",
     "integration": "node scripts/test-integration.mjs",
     "release": "node scripts/release.mjs",
