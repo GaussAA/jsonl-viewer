@@ -160,3 +160,111 @@ test('ensureIndex 失败后自愈（P0-3）：文件缺失 reject，恢复后重
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+/* ------- 守卫 / 边界 / 解析（覆盖率补强） ------- */
+
+test('readRecords：非整数 / 负数 / 非正 count 一律返回空批（脏行号不透传）', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const file = await makeFile(dir, ['{"id":1}', '{"id":2}']);
+    const ds = makeService(file);
+    const cases: Array<[number, number]> = [
+      [NaN, 2],
+      [-1, 2],
+      [1.5, 2],
+      [0, 0],
+      [0, -5],
+      [0, NaN],
+      [0, 1.5],
+    ];
+    for (const [start, count] of cases) {
+      const p = await ds.readRecords(start, count);
+      assert.equal(p.items.length, 0, `start=${start} count=${count} 应为空批`);
+    }
+    // 合法请求仍正常
+    assert.equal((await ds.readRecords(0, 2)).items.length, 2);
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('readRecord：非法行号返回 ok=false；越界行同样安全不抛', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const file = await makeFile(dir, ['{"id":1}', '{"id":2}']);
+    const ds = makeService(file);
+    for (const line of [-1, NaN, 1.5]) {
+      const r = await ds.readRecord(line);
+      assert.equal(r.ok, false, `line=${line} 应失败`);
+      assert.equal(r.value, undefined);
+    }
+    const beyond = await ds.readRecord(9999);
+    assert.equal(beyond.ok, false, '越界行安全失败');
+    assert.equal((await ds.readRecord(1)).ok, true, '边界内正常');
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('search：scope "a:b" 限定行区间；非法 scope 视为全范围', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const file = await makeFile(dir, ['{"tag":"a"}', '{"tag":"b"}', '{"tag":"a"}']);
+    const ds = makeService(file);
+
+    const ranged = await ds.search('"tag":"a"', undefined, '0:1');
+    assert.deepEqual(ranged.matches, [0], '仅扫第 0 行');
+
+    const rangedAll = await ds.search('"tag":"a"', undefined, '0:3');
+    assert.deepEqual(rangedAll.matches, [0, 2], '覆盖全部 3 行');
+
+    const unparsable = await ds.search('"tag":"a"', undefined, 'all');
+    assert.deepEqual(unparsable.matches, [0, 2], '非法 scope → 全范围');
+
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('totalLines / peekIndex：未构建时为 0 / undefined，构建后可见', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const file = await makeFile(dir, ['{"id":1}', '{"id":2}', '{"id":3}']);
+    const ds = makeService(file);
+
+    assert.equal(ds.totalLines, 0, '未构建为 0');
+    assert.equal(ds.peekIndex(), undefined, '未构建无索引');
+
+    await ds.getOverview();
+    assert.equal(ds.totalLines, 3, '构建后行数可见');
+    assert.ok(ds.peekIndex(), '构建后索引可见');
+
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('checkStale：文件被删除 → changed=true 且 deleted=true（索引失效提示）', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const file = await makeFile(dir, ['{"id":1}']);
+    const ds = makeService(file);
+    await ds.getOverview(); // 建立快照基线
+
+    await rm(file, { force: true });
+    const res = await ds.checkStale();
+    assert.equal(res?.changed, true, '检出变更');
+    if (res && res.changed === true) {
+      assert.equal(res.deleted, true, '标记为已删除');
+      assert.match(res.message, /删除/);
+    }
+
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

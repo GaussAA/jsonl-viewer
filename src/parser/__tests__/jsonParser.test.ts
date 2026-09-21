@@ -7,6 +7,8 @@ import { LineIndex } from '../../indexer/lineIndex.ts';
 import {
   parseJsonLine,
   readLineAt,
+  readRecord,
+  readBatch,
   MemoryReader,
   openFileReader,
   createLazyIndex,
@@ -120,4 +122,62 @@ test('FileByteReader：按偏移读取真实文件（含 \\r\\n）', async () =>
     await reader.close?.();
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+/* ------- 守卫与边界（覆盖率补强） ------- */
+
+test('readRecord：无效行号（负数 / 越界）返回 ok=false 而非抛错', async () => {
+  const buf = Buffer.from('{"a":1}\n{"a":2}\n', 'utf8');
+  const index = await LineIndex.build([buf]);
+  const reader = new MemoryReader(buf);
+
+  const neg = await readRecord(-1, index, reader);
+  assert.equal(neg.ok, false);
+  assert.equal(neg.line, -1);
+  assert.match(String(neg.error), /无效|invalid/i);
+
+  const beyond = await readRecord(99, index, reader);
+  assert.equal(beyond.ok, false);
+  assert.equal(beyond.line, 99);
+  assert.match(String(beyond.error), /无效|invalid/i);
+
+  // 边界：最后一行可读
+  const last = await readRecord(1, index, reader);
+  assert.equal(last.ok, true);
+  assert.deepEqual(last.value, { a: 2 });
+});
+
+test('readBatch：count<=0 或 startLine<0 直接返回空数组', async () => {
+  const buf = Buffer.from('{"a":1}\n{"a":2}\n', 'utf8');
+  const index = await LineIndex.build([buf]);
+  const reader = new MemoryReader(buf);
+
+  assert.deepEqual(await readBatch(0, 0, index, reader), [], 'count=0');
+  assert.deepEqual(await readBatch(0, -3, index, reader), [], 'count<0');
+  assert.deepEqual(await readBatch(-1, 2, index, reader), [], 'startLine<0');
+});
+
+test('readBatch：shouldCancel 置位即提前停止（含「扫一段后取消」的局部结果）', async () => {
+  const buf = Buffer.from('{"a":1}\n{"a":2}\n{"a":3}\n', 'utf8');
+  const index = await LineIndex.build([buf]);
+  const reader = new MemoryReader(buf);
+
+  // 立即取消 → 一行都不产出
+  assert.deepEqual(await readBatch(0, 3, index, reader, { shouldCancel: () => true }), []);
+
+  // 放过第一行后取消 → 只产出首行（真正的可中断，且已产出结果保留）
+  let seen = 0;
+  const partial = await readBatch(0, 3, index, reader, { shouldCancel: () => seen++ >= 1 });
+  assert.equal(partial.length, 1, `expected 1 item, got ${partial.length}`);
+  assert.deepEqual(partial[0].value, { a: 1 });
+});
+
+test('MemoryReader：越界 / 负参数抛 RangeError（防御性边界）', async () => {
+  const r = new MemoryReader(Buffer.from('abc'));
+  assert.equal((await r.readBytes(0, 3)).toString(), 'abc', '边界内可读');
+
+  await assert.rejects(() => r.readBytes(0, 4), RangeError, '超长');
+  await assert.rejects(() => r.readBytes(-1, 1), RangeError, '负偏移');
+  await assert.rejects(() => r.readBytes(2, -1), RangeError, '负长度');
+  await assert.rejects(() => r.readBytes(10, 1), RangeError, '偏移越界');
 });

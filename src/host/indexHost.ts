@@ -20,6 +20,21 @@ import type { FieldCondition } from '../core/query.ts';
 import { INDEX_CHUNK_SIZE, INDEX_REPORT_INTERVAL } from '../constants.ts';
 import type { BuildResult, WorkerRequest, WorkerResponse } from './workerProtocol.ts';
 
+/**
+ * 索引 worker 的最小接口面（`node:worker_threads` 的 `Worker` 天然满足）。
+ *
+ * 存在的意义是**可测性**：`WorkerIndexHost` 的消息分发 / 退出 / 释放分支
+ * （onMessage 四类响应、onExit、onError、dispose）原先只能靠真实线程覆盖，
+ * 现可注入伪 Worker 精确驱动每个分支，无需 spawn 真线程。
+ */
+export interface WorkerLike {
+  postMessage(msg: WorkerRequest): void;
+  on(event: 'message', cb: (m: WorkerResponse) => void): unknown;
+  on(event: 'error', cb: (e: Error) => void): unknown;
+  on(event: 'exit', cb: (code: number) => void): unknown;
+  terminate(): Promise<number>;
+}
+
 /** 索引宿主统一接口。 */export interface IndexHost {
   /** 'worker' | 'main'，便于诊断与日志。 */
   readonly kind: 'worker' | 'main';
@@ -106,7 +121,7 @@ export class MainThreadIndexHost implements IndexHost {
 /** worker 下沉实现：spawn dist/indexWorker.js，按 requestId 派发并回收 Promise。 */
 export class WorkerIndexHost implements IndexHost {
   readonly kind = 'worker' as const;
-  private readonly worker: Worker;
+  private readonly worker: WorkerLike;
   private readonly pending = new Map<
     number,
     {
@@ -123,8 +138,16 @@ export class WorkerIndexHost implements IndexHost {
   /** 是否已归还并发计数（dispose 可能被重复调用，避免计数被重复递减）。 */
   private released = false;
 
-  constructor(scriptPath: string) {
-    this.worker = new Worker(scriptPath);
+  /**
+   * @param scriptPath      worker 脚本路径（dist/indexWorker.js）
+   * @param workerFactory   Worker 构造接缝——默认 `new Worker(scriptPath)`；
+   *                        单测注入伪 Worker 以覆盖消息分发/退出/释放全分支。
+   */
+  constructor(
+    scriptPath: string,
+    workerFactory: (path: string) => WorkerLike = (path) => new Worker(path)
+  ) {
+    this.worker = workerFactory(scriptPath);
     activeWorkers++;
     this.worker.on('message', (m: WorkerResponse) => this.onMessage(m));
     this.worker.on('error', (e: Error) => this.onError(e));
