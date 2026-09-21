@@ -9,3 +9,14 @@ out
 releases/
 # 大型生成样本（可由 samples/generate_samples.py 重新生成，避免仓库膨胀）
 samples/
+# 本地诊断 / 覆盖率临时输出（由调试命令重定向产生，不入库；避免污染 git status）
+.audit_*.txt
+.build_out.txt
+.cov_flag_probe.txt
+.coverage_*.txt
+.coverage_out.txt
+.pnpm_diag.txt
+.test_*.txt
+.tsc_out.txt
+.validate_*.txt
+test_out.txt
