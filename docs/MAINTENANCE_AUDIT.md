@@ -156,6 +156,18 @@
 
 **排查手段留档**（可复用）：`gh run list --json` 定位失败运行 → `gh run view <id> --log-failed` 取失败步骤的首条错误 → `gh api .../commits/<sha>/check-runs` 看 job 粒度与注解 → 最后**回官方文档核对**（本次即靠「上下文可用性表」定性 `secrets` 不可用于 `steps.if`），而非凭记忆猜。
 
+**预防措施（本次一并落地，三类互补）**
+
+| 措施 | 作用面 | 说明 |
+|---|---|---|
+| `lint` job 增 **actionlint 1.7.12** 步骤 | **静态拦截（对症）** | 专治本类「只在运行时暴露、且会静默令整份工作流失效」的错误。用官方镜像**钉死版本**，不采官方示例里「从 `main` 分支下载脚本」的写法（避供应链风险与版本漂移） |
+| 新增 **`.husky/pre-push`** 本地门禁 | **对「本人直推」唯一真正生效的强制** | 分支保护默认对管理员**豁免**（见下），故必需状态检查约束不了本人直推；本地钩子跑 actionlint + `tsc` + 全量单测（约十秒），缺工具则跳过并提示 |
+| `main` 分支保护（必需检查 `verify (22)` / `verify (24)` / `lint` / `coverage`） | **对协作者与未来贡献者生效** | 已设置；并禁强制推送、禁删除分支；**不强制 PR**（保留直推） |
+
+**⚠️ 必须记牢的实测事实 —— 分支保护对管理员是「空门」**：GitHub 文档原文 *"By default, the restrictions of a branch protection rule **don't apply to people with admin permissions**"*。本仓库唯一协作者即管理员，故上述保护**拦不住大帅自己的直推**。要真约束本人，须把 `enforce_admins` 置 `true`，**但代价是直推 `main` 会被拦**（工作流须改为「推分支 → 开 PR → 合并」）。故本次采**非破坏形态**，该权衡留待大帅定夺。
+
+**排查中臣自设的一处陷阱（值得记牢）**：用 PowerShell `Set-Content -Encoding utf8` 写出的样本带 **UTF-8 BOM**，actionlint 读之**静默返回零问题**，一度令臣误判「该工具不查此规则」。改用 Node 写**无 BOM** 样本后即正确报错并**精确定位到原第 74 行第 44 列**。→ 给静态检查工具喂样本，务必确认编码与 BOM。
+
 ---
 
 ## 三、提交记录（本次）
@@ -176,12 +188,18 @@
 | `5f8178d` | `refactor` | 6 处改用非变异数组 API（toSorted / toReversed）+ tsconfig lib 提至 ES2023 |
 | `597b430` | `fix(ci)` | 修复 `ci.yml` 的 `cache` 布尔语义与 `release.yml` 的 `secrets` 误用；两处 pnpm 版本改由 `packageManager` 唯一决定；新增 §2.6 |
 | `8afa191` | `chore` | `.gitignore` 增补临时产物命名，固化 `.scratch/` 统一入口 |
+| `a6602a8` | `docs` | 维护审计补记工作流修复的 SHA 与后续建议 |
+| `4a135c7` | `docs` | 补记 CI 修复验证（13/13 全绿），并修正「集成测试须本机补跑」的旧判断 |
+| `daa24b1` | `fix(release)` | 手动触发默认不发布：新增 `workflow_dispatch.inputs.publish`，须显式勾选 |
+| `cc0b33d` | `ci` | `lint` job 引入 actionlint 1.7.12 静态校验（钉版官方镜像） |
+| `fbd85e7` | `chore(tooling)` | 新增 `.husky/pre-push` 本地门禁（actionlint + typecheck + 单测） |
+| `29dd9f1` | `chore(tooling)` | `pre-push` 增探测仓库内本地 actionlint 二进制（PATH 缺失时亦可启用） |
 
 > 说明：`package.json` / `pnpm-lock.yaml` 的改动**非人工编辑**，系安装 `jsdom` 与 `@types/jsdom` 时 pnpm 自动重写。清单与锁文件必须一致，否则 CI 以 `--frozen-lockfile` 安装会失败，故予接纳入库。
 
 ---
 
-## 四、后续建议（未执行，待定夺）
+## 四、后续事项（含已完成与待定夺）
 
 1. ~~**补工程化基线**：ESLint + Prettier + EditorConfig + CI lint job + pre-commit~~ **✅ 已完成**（lint 改用 oxlint，原因见 2.3；pre-commit 见同节）。
 2. ~~**清 8 个零引用导出**~~ **✅ 已完成（`0c3eec1`）** —— 核查后确认 8 项全为真问题（非预留 API），处置见表。
@@ -189,7 +207,8 @@
 4. ~~**本机补跑集成测试**：`pnpm test:integration`（沙箱受限，见 2.5）~~ **✅ 已闭环** —— 集成测试本就有 CI 矩阵覆盖，2026-09-21 工作流修复后 9 个组合全部真实跑通并通过（见 2.5）。仅在需本地调试时执行。
 5. **按需回收磁盘**：`.vscode-test`（1.4 GB，可联网重下）与 `samples` 中可再生大样本（340 MB）——按需执行。
 6. **待确认后再动**：`samples/现网多轮已规整数据.jsonl`（232 MB）与 `query处置全景_...jsonl`（2.6 MB）疑为真实业务数据，删除前请确认是否另有留存。
-7. **启用分支保护 / 必需状态检查**（仓库设置，非代码）：把 `verify`、`lint`、`coverage` 设为必需检查。本次工作流失效潜伏两天而无人察觉，根因正是「红色 CI 不阻断任何操作」。
-8. **可选：把工作流静态校验纳入 lint job**：引入 `actionlint`（Go 单文件）或 `@action-validator/core`（npm），以静态拦截「上下文用错位置」这类**只在运行时暴露、且会静默让整份工作流失效**的错误（本次 `secrets` 误用即属此类，见 2.6）。
-9. **待大帅定夺的行为决策**：`release.yml` 的发布步骤现以 `github.event_name == 'push'` 为闸，故**手动触发不会发布**（仅构建并上传 VSIX）。若希望手动触发也能发布，需改动该行 `if`；因涉及 Marketplace 不可逆发布，本次未擅自更改。
-7. **可选后续**：~~`docs/CODE_WIKI.md` 含机器绝对路径~~ **✅ 已修（`9a7dc8c`）**；余留 2 处 `prefer-set-has` 警告经复核属过度建议，保留不改（判定见 §2.4）。
+7. ~~**启用分支保护 / 必需状态检查**~~ **✅ 已完成（2026-09-21）** —— `main` 已设必需检查（`verify (22)` / `verify (24)` / `lint` / `coverage`）+ 禁强制推送 + 禁删除分支，且**不强制 PR**（保留直推）。**但须知**：GitHub 默认**对管理员豁免**，故对本人直推无效（详解见 §2.6）；要真约束本人须 `enforce_admins=true`，代价是直推被拦 —— 见第 11 条。
+8. ~~**把工作流静态校验纳入 lint job**~~ **✅ 已完成（`cc0b33d`）** —— actionlint 1.7.12 钉版官方镜像；并补 `pre-push` 本地门禁（`fbd85e7`）作为「对本人直推」的实际强制。
+9. ~~**待定夺：release 手动触发是否发布**~~ **✅ 已决策（`daa24b1`）** —— 采「默认安全 + 显式授权」：新增 `workflow_dispatch.inputs.publish`（boolean，默认 `false`），勾选才发布；tag push 行为不变。
+10. ~~**可选后续**：`docs/CODE_WIKI.md` 含机器绝对路径~~ **✅ 已修（`9a7dc8c`）**；余留 2 处 `prefer-set-has` 警告经复核属过度建议，保留不改（判定见 §2.4）。
+11. **待定夺（范式级）**：若要让分支保护真正约束**本人**的直推，把 `main` 的 `enforce_admins` 置 `true`（一条 `gh api -X PUT` 即可）。**代价**：直推 `main` 会被拦，工作流须改为「推分支 → 开 PR → 合并」。此属工作流范式的改变，须大帅明确认可后再行。
