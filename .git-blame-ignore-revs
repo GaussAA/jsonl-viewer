@@ -1,0 +1,9 @@
+# git blame 可忽略提交清单
+#
+# 本文件列出「纯格式化」类提交（不改变行为），供 git blame 跳过，保留逐行归属的可读性。
+# 启用方式（每克隆一次）：
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+# （GitHub 网页端 blame 亦会读取本文件。）
+
+# style: prettier 全量格式化（52 文件；含 lint 首次暴露的 4 处小修正）
+bca004ecc9139a3cd1def6cb6f7214287a098c6a

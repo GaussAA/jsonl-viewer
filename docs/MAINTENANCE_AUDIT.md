@@ -60,7 +60,7 @@
 | 测试文件 | **26 个 / 5299 行**（测试/源 ≈ 0.61） |
 | 测试用例 | **290**（Node 22 与 24 双验） |
 | 覆盖率 | 行 **97.04%** · 分支 **86.55%** · 函数 **89.17%** |
-| 运行时依赖 | **0**（devDependencies 8 个） |
+| 运行时依赖 | **0**（devDependencies 10 个：类型声明 / 打包 / 测试 / 质检） |
 
 源文件规模 TOP：`virtualScroll.ts` 878 · `webviewEntry.ts` 821 · `styles.ts` 814 · `detailTree.ts` 797 · `toolbar.ts` 722 · `extension.ts` 588 · `indexHost.ts` 366 · `dataService.ts` 322。
 
@@ -76,9 +76,19 @@
 ### 2.3 缺口（按优先级）
 
 **P1 — 工程化基线缺失（与「工具强制优于人工遵守」的既定律不符）**
-- 无 **ESLint / Prettier / EditorConfig / pre-commit**（旧评审 P2 已提，仍未做）。
-- 现状：风格与潜在错误仅靠 `tsc` + 人工 review 把关；格式化靠约定。
-- 建议：至少引入 ESLint（`@typescript-eslint`）+ Prettier + `.editorconfig`，并在 CI 增 lint job；如要防本地漏检再加 husky + lint-staged。
+- ~~无 **ESLint / Prettier / EditorConfig / pre-commit**（旧评审 P2 已提，仍未做）。~~
+  **✅ 已落地（2026-09-21，提交 `37e6a2a` + `bca004e`）**：新增 `.editorconfig`、`.prettierrc.json`、`.prettierignore`、`.oxlintrc.json`；`package.json` 增 `lint` / `lint:ci` / `format` / `format:check`；CI 增 `lint` job（oxlint + `prettier --check`）。
+- **为何用 oxlint 而非 ESLint（重要，勿重复踩坑）**：
+  `typescript-eslint@8.70` 在加载时**硬性拒绝 TS 7.0** —— 报
+  `typescript-eslint does not support TS 7.0.`，而本项目 `devDependencies` 用 `typescript@7` 原生编译器，上游尚未跟进（issue #10940 追踪 TS ≥ 7.1）。
+  故本次先落地 **oxlint**（Rust 实现，**不依赖 `typescript` 包**，规则集与 ESLint 兼容，实测全仓 58 文件约 **20ms**）；**待上游支持后可平滑回归 ESLint**（两者规则名兼容，`eslint-config-prettier` 语义等价于关闭格式规则）。
+- **门禁强度**：`correctness` 类为 error（**阻断合并**），`suspicious` / `perf` 为 warn（提示不阻断）。
+  首次运行得 4 error + 65 warning；4 error 已修（见下），并按项目设计关闭 4 条噪音规则 ——
+  `no-underscore-dangle`（`_` 前缀是既有约定）、`no-await-in-loop`（逐段串行拉取系刻意语义）、
+  `unicorn/consistent-function-scoping`（闭包捕获状态即设计）、`unicorn/require-post-message-target-origin`（VS Code webview 的 `postMessage` 非 `window.postMessage`，属误报）。
+  当前余 11 warning（`toSorted`/`toReversed`/`prefer-Set` 等风格建议），不阻断。
+- **格式化范围与代价**：一次性 `prettier --write` 覆盖 59 文件（+888/−357 行）——**因参数按现有风格实测选定**（58 文件全 LF、单引号为主、行长多在 100 内），改动面远小于预期。排除 `docs/`、`.trae/`（编辑器工作流文档）与两个 HTML 设计资产；纯格式化提交已记入 `.git-blame-ignore-revs`（`git config blame.ignoreRevsFile .git-blame-ignore-revs` 后 blame 可跳过）。
+- **仍未做**：pre-commit / husky 本地钩子（当前靠 CI 兜底，属可选增强）。
 
 **P2 — 死代码：8 个零引用导出**（已计入 src + scripts + 测试的全部引用后复核）
 
@@ -104,6 +114,8 @@
 
 - `scripts/test-integration.mjs` 头注释原写缓存位置 `~/.vscode-test/vscode-<version>-<platform>/`，**与实测不符**：`@vscode/test-electron` 默认以**当前工作目录**为 cachePath，实际落在项目根 `.vscode-test/vscode-<platform>-archive-<version>/`（实测 `...\vscode-win32-x64-archive-1.100.0`）。
   该错误曾直接导致「本地无缓存 → 集成测试不可跑」的误判，故更正。
+- **`lint` 首次运行暴露的真问题（4 处，已修）**：`scripts/validate-300mb.ts` 死变量 `bruteBuf`（仅声明、零引用）；`src/host/__tests__/indexHostWorker.test.ts` 三处 `emit*` 多余的 `[...handlers]` 复制；`src/webview/toolbar.ts` 解构变量 `label` 遮蔽；`src/webview/__tests__/{toolbar,virtualScroll}.test.ts` 局部变量 `before` 遮蔽 `node:test` 的 `before` 钩子。
+- **CI pnpm 版本不一致（已修）**：`.github/workflows/ci.yml` 三处写死 `12.4.2`，而 `package.json` 的 `packageManager` 在依赖规范化后已是 `12.5.1` —— 不改会导致 CI 版本不符而失败。两处必须同步修改。
 
 ### 2.5 集成测试现状（须本机补跑）
 
@@ -120,6 +132,9 @@
 |---|---|---|
 | `2c4145c` | `chore(deps)` | 接纳 pnpm 自动规范化（`packageManager` 12.4.2 → 12.5.1、devDeps 字典序、锁文件 453 行同步） |
 | `b56ac23` | `docs(scripts)` | 修正集成测试缓存路径注释；`.gitignore` 收编 `.integration_*.txt` |
+| `4f27273` | `docs` | 新增本维护审计文档 |
+| `37e6a2a` | `chore(tooling)` | 引入 oxlint + prettier + editorconfig，新增 CI `lint` job；修正 CI pnpm 版本 |
+| `bca004e` | `style` | prettier 全量格式化 59 文件 + 修正 lint 暴露的 4 处问题 |
 
 > 说明：`package.json` / `pnpm-lock.yaml` 的改动**非人工编辑**，系安装 `jsdom` 与 `@types/jsdom` 时 pnpm 自动重写。清单与锁文件必须一致，否则 CI 以 `--frozen-lockfile` 安装会失败，故予接纳入库。
 
@@ -127,7 +142,7 @@
 
 ## 四、后续建议（未执行，待定夺）
 
-1. **补工程化基线**：ESLint + Prettier + EditorConfig + CI lint job（P1，性价比最高）。
+1. ~~**补工程化基线**：ESLint + Prettier + EditorConfig + CI lint job~~ **✅ 已完成（改用 oxlint，原因见 2.3）**；可选增强为 pre-commit / husky 本地钩子。
 2. **清 8 个零引用导出**：逐个确认后删除（`isOversized`、`formatCount` 等可能为「预留 API」，须先判定意图）。
 3. **统一断点常量**：JS 侧改用 `NARROW_BREAKPOINT_PX`，消除三处硬编码。
 4. **本机补跑集成测试**：`pnpm test:integration`（沙箱受限，见 2.5）。
