@@ -13,14 +13,15 @@
 
 import {
   computeFetchWindow,
-  FieldLike,
   LRUCache,
   segmentSortedLines,
   ThrottleQueue,
 } from './logic.ts';
+import type { FieldLike } from './logic.ts';
 import type { RecordEntry } from './virtualScroll.ts';
 import { VirtualRecordList } from './virtualScroll.ts';
-import { createToolbar, ToolbarInfo } from './toolbar.ts';
+import { createToolbar } from './toolbar.ts';
+import type { ToolbarInfo } from './toolbar.ts';
 import { createDetailTree, type DetailTreeNavHandlers } from './detailTree.ts';
 import { createVSCodeApi, RpcBus } from './rpc.ts';
 import {
@@ -197,7 +198,7 @@ function stateKey(uri: string): string {
   return `jsonlViewer.state.${uri}`;
 }
 
-function main(): void {
+export function main(): void {
   injectStyle();
 
   const api = createVSCodeApi();
@@ -1109,4 +1110,11 @@ const ICON_EXPAND_RIGHT =
 const ICON_MENU =
   '<svg width="15" height="15" viewBox="0 0 16 16"><path d="M2 4h12M2 8h12M2 12h12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>';
 
-main();
+// 测试环境（无 document / 无 acquireVsCodeApi）下不自动挂载，便于 node --test 经 jsdom 装配后
+// 动态 import 本模块做冒烟测试；浏览器/webview 由 VS Code 注入 document 与 acquireVsCodeApi，正常挂载。
+if (
+  typeof document !== 'undefined' &&
+  typeof (globalThis as { acquireVsCodeApi?: unknown }).acquireVsCodeApi === 'function'
+) {
+  main();
+}
