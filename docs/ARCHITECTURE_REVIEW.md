@@ -1,0 +1,143 @@
+# JSONL Viewer — 技术债务与架构评审
+
+> 评审日期：2026-09-20 ｜ 基准版本：v1.7.0 ｜ 范围：全部 `src/**`
+> 方法：静态阅读 + 关键事实实测（含 `npm test` glob 递归性核验、依赖方向核查），非凭印象。
+
+---
+
+## 一、结论摘要（TL;DR）
+
+当前架构**整体健康**：分层清晰（host / webview / protocol / indexer / parser / infer）、宿主层无 `vscode` 依赖（可独立单测）、算法层 DRY 良好（搜索/过滤/缓存/调度均单份）、协议类型单一来源。
+
+但存在**四类值得治理的债务**，按 ROI 排序：
+
+1. **host 层反向依赖 webview 层**（DIP 违反）—— `searchEngine.ts` 直接 import `webview/queryLogic.ts` 的**运行时函数** `matchesFilter`/`recordFieldValue`。这是最该修的一项：核心层依赖了 UI 层，且为"保持前后端过滤一致"的 DRY 动机所驱动，应抽到共享 `core/` 层。
+2. **`extension.ts:mountViewer` 上帝函数 + `dispatchMessage` 12 参数巨型 switch**——端点概念在"常量 / switch / 内联 handler"三处表达，新增功能成本高、易漏改。
+3. **`webviewEntry.ts` 1100 行协调层膨胀 + 30+ 字段手写状态机**——可靠性靠纪律，功能继续增长会抬升认知负担。
+4. **模块级隐式全局状态**（`serviceRegistry` / `openPanels`）+ 个别防御性 `.catch` 缺失。
+
+**原则立场**：本扩展是「单功能、单作者主导、性能/稳定性优先」的小型工具，**SOLID 宜作方向性指引而非达标强制**。最该采纳的是 A1（抽 core 层消反向依赖）与 A2/A3（端点映射集中、拆上帝函数）；**不应**引入 DI 容器、拆DataService、引前端框架、抽象存储后端——那属过度工程。
+
+---
+
+## 二、项目结构与依赖方向
+
+```
+protocol/rpc.ts        ← 叶子：纯类型 + 常量 + dispatchMessage（无业务依赖）
+       ↑（单向）
+host/                  ← DataService / indexHost / indexWorker / searchEngine / recordSummary
+webview/               ← webviewEntry / logic / rpc / toolbar / detailTree / queryLogic / virtualScroll
+       ↑（单向）
+extension.ts           ← 穿透层：激活、命令、自定义编辑器、服务注册表、消息路由
+
+indexer/ parser/ infer/ perf/ constants.ts  ← 共享叶子（被 host/webview 引用）
+```
+
+**实测发现的依赖异常**（打破单向）：
+
+| 文件 | 反向 import | 性质 |
+|---|---|---|
+| `src/host/dataService.ts:21` | `../webview/queryLogic.ts` 的 `FieldCondition` | 类型（轻） |
+| `src/host/indexHost.ts:19` | `../webview/queryLogic.ts` 的 `FieldCondition` | 类型（轻） |
+| `src/host/searchEngine.ts:19-20` | `../webview/queryLogic.ts` 的 `matchesFilter` / `recordFieldValue` | **运行时函数（重）** |
+
+即：宿主核心层（本应位于 webview 之上）反向依赖了 UI 层的**具体实现**。动机正当（前后端过滤规则单一事实来源），但归属错了位置。
+
+---
+
+## 三、主要技术债务清单
+
+| # | 位置 | 问题 | 后果 | 等级 | 修复建议 |
+|---|---|---|---|---|---|
+| **T1** | `extension.ts:156-315` `mountViewer` | 上帝函数：webview HTML 注入 + CSP/nonce + 12 个内联 RPC handler + stale 定时器 + 跳源 + 偏好持久化 + 服务注册表调用，单函数 ~160 行 | 改动任何宿主行为必动中心函数；命令/编辑器两路径虽共享（好 DRY）但代价是中心化 | 中（SRP） | A3：拆 `buildWebviewHtml()` / `registerHostHandlers()` / `startStaleWatch()` |
+| **T2** | `protocol/rpc.ts:241-334` `dispatchMessage` | 12 参数位置化签名 + 巨型 switch；注释自承"实际处理器另行实现" → 路由与处理分离却散两处 | 加一个端点须改 3 处（常量 / union 类型 / switch / 调用点内联 handler），易漏改 | 中（OCP/ISP + 抽象泄漏） | A2：handler 注册表 `Map<endpoint, fn>`，dispatch 查表分发 |
+| **T3** | `host/* → webview/queryLogic.ts` | host 反向依赖 webview（见 §二） | 核心层依赖 UI 层；若 webview 引入浏览器专属依赖会污染宿主；层边界失真 | 中（DIP） | A1：抽 `core/` 共享 `FieldCondition` + `matchesFilter` + `recordFieldValue` |
+| **T4** | `extension.ts:46,83-91` | 模块级全局单例 `serviceRegistry` / `openPanels` 未注入；`releaseService` 中 `void hit.svc.dispose()` 无 `.catch` | 隐式全局状态难测；dispose 当前不 reject（所有 await 已 `.catch`）但脆弱 | 低~中 | A4：dispose 补 `.catch`；registry 显式持有/可注入 |
+| **T5** | `webviewEntry.ts:200-1100` + `AppState:122-153` | 前端协调层膨胀（样式/横幅/分栏动画/响应式/搜索/过滤/导航/持久化/生命周期）+ 30+ 字段手写状态机 | 认知负担高；一处 state 字段改动波及众多闭包 | 中（前端 God Object） | 暂不拆（logic.ts 已隔离纯逻辑）；若加功能再抽协调器 |
+| **T6** | `extension.ts:164-177,127-140` | 两处 webview HTML 模板内联（mountViewer + notLocalHtml），CSP/nonce 内联 | 轻微重复；模板改动要改两处 | 低 | 抽 `renderWebviewHtml(nonce, csp)` 工厂 |
+| **T7** | `extension.ts:275` | 异常回执 `errReply(undefined, …)`，requestId 丢失 | webview 走全局 error handler 弹横幅，可能把单请求异常升级为全局提示 | 低 | 异常路径带 requestId 或明确走 banner 而非 error 广播 |
+| **T8** | `package.json:98` `test` 脚本 | `node --test "src/**/*.test.ts"` 依赖 Node ≥22 的 glob 递归行为 | 实测 OK（收集 150/150）；但 CI 若用老 Node 会静默跑 0 测试 | 低（已核实有效） | CI 锁定 `node>=22.18`；或在脚本加 `engines` 校验 |
+
+> 实测已排除的疑似债务：`npm test` glob **确实递归**（150 全绿，非 0）；`DataService.dispose` 实际不 reject（`reader.close`/`host.dispose`/`building` 三处 await 均 `.catch`）；worker 与主线程双实现算法**未重复**（搜索/过滤单份 `searchEngine.ts`，build 单份 `LineIndex.build`）。
+
+---
+
+## 四、架构问题简述
+
+### 4.1 端点概念的"三处表达"
+同一个 RPC 端点在三处各自声明一次：
+1. `HostEndpoint` / `HostReply` 常量（`protocol/rpc.ts`）
+2. `HostRequest` / `HostResponse` 联合类型（`protocol/rpc.ts`）
+3. `dispatchMessage` 的 switch case（`protocol/rpc.ts`）
+4. `mountViewer` 内联的 12 个 handler（`extension.ts`）
+
+新增端点 = 改 4 处且需同步。这是扩展性的主要瓶颈，也是 T2 的根源。
+
+### 4.2 隐式全局状态
+`extension.ts` 模块顶层持有 `serviceRegistry`（uri→DataService 引用计数）、`openPanels`（uri→面板）。它们未被注入、不可在测试中隔离。当前单进程单扩展可接受，但与"显式优于隐式"相悖（T4）。
+
+### 4.3 前端状态集中
+`AppState` 是 30+ 字段的可变对象，被 `main()` 内所有闭包捕获。无框架、无 reducer，可靠性完全靠编码纪律。功能稳定时可控；继续膨胀则需抽"协调器/store"（T5）。
+
+### 4.4 反向依赖（最关键）
+§二已详述。host 依赖 webview 的具体函数，是架构卫生层面最该修的一项——它让"宿主核心"与"UI"在概念上倒置。
+
+---
+
+## 五、设计原则遵循现状
+
+### SOLID
+
+| 原则 | 现状 | 判定 |
+|---|---|---|
+| **S** 单一职责 | 宿主层（`DataService`/`IndexHost`/`LineIndex`）内聚良好；`extension.mountViewer` 多职责；`dispatchMessage` 既路由又依赖外部 handler | **部分违反** |
+| **O** 开闭 | 加端点改多处 | **违反**（但端点已稳定，当前代价低） |
+| **L** 里氏替换 | `WorkerIndexHost` / `MainThreadIndexHost` 可互换，`DataService` 依赖 `IndexHost` 接口而非具体类（fallback 依赖此） | **遵守** |
+| **I** 接口隔离 | `dispatchMessage` 12 参数迫使调用者提供全部 handler（有默认兜底，实际不痛） | **轻微违反** |
+| **D** 依赖倒置 | host 依赖 webview 具体层（`queryLogic`） | **违反** |
+
+### DRY
+- **良好**：`searchEngine`（搜索/过滤算法单份）、`logic.ts`（LRUCache/ThrottleQueue/窗口计算单份）、`protocol/rpc.ts`（协议类型单份）、`LineIndex.build`（构建单份）。
+- **局部重复**：端点映射三处表达（T2）、HTML 模板两处（T6）。
+- 总体：**DRY 达标**，T3 的动机恰是 DRY（前后端过滤一致），只是归属错了层；**A1 已将其归位到 `src/core/query.ts`**，两端仍共用单一事实来源，且层边界恢复单向。
+
+### KISS
+- **遵守（依赖层面）**：零运行时依赖、纯 TS + esbuild、手写轻量状态机而非引框架——故障面最小、bundle 最小、启动最快。
+- **必要复杂（代码形态）**：虚拟滚动 + 双栏 + 响应式 + 搜索/过滤 + 持久化 + 大文件流式，复杂度有其功能来源；手写而非框架是 KISS 的另一种体现。
+- 总体：**KISS 在"少依赖"层面遵守**；形态复杂是功能使然，非过度设计。
+
+---
+
+## 六、是否采用 / 严格遵守相关原则——具体建议与权衡
+
+### A 组：建议采纳（高 ROI、低风险）
+
+| 项 | 动作 | 解决 | 风险 | 权衡 |
+|---|---|---|---|---|
+| **A1** | 抽 `src/core/`（或并入 `protocol/`）放置 `FieldCondition` + `matchesFilter` + `recordFieldValue`；host 与 webview 均从 core 引用 | T3 反向依赖、DIP | 低（纯移动 + 改 import） | 消除层倒置，且保留"前后端过滤单一事实来源"的 DRY 收益 |
+| **A2** | RPC handler 改为注册表：`type Handler = (payload, rid) => Promise<Response|void>`；`Map<endpoint, Handler>`；`dispatchMessage` 查表分发；新增端点只改 1 处 | T2、OCP、三处表达 | 中（需重构 dispatchMessage + mountViewer 调用点） | 若规划加功能（导出/聚合统计）应先做；端点稳定则可缓 |
+| **A3** | `mountViewer` 拆 `buildWebviewHtml()` / `registerHostHandlers()` / `startStaleWatch()` | T1、SRP | 低 | 降中心函数体积，命令/编辑器共享点保留 |
+| **A4** | `releaseService` 的 `dispose` 补 `.catch`；`serviceRegistry` 改为显式持有（如挂到 context 或闭包注入） | T4 | 低 | 消除隐式全局 + 防御性兜底 |
+
+> **建议优先级**：A1 > A3 ≈ A4 > A2。A1 是架构卫生且最低风险；A2 仅在"要加端点"时紧迫。
+
+### B 组：不建议严格遵守（低 ROI / 过度工程）
+
+| 项 | 为什么不采 | 权衡 |
+|---|---|---|
+| **B1** 引入 DI 容器 / 抽象工厂 | 单扩展单作者，手动构造已清晰；DI 增加样板与学习成本 | 过度设计 |
+| **B2** 拆 `DataService` → `IndexService`/`ReadService`/`SearchService` | 当前 `DataService` 内聚为"数据宿主"单一概念，拆了反而接口爆炸、调用方混乱 | 违反 KISS |
+| **B3** 引 React/Svelte 替代手写 webview | bundle/启动/依赖成本上升；`logic.ts` 已隔离纯逻辑，组件化边际收益低 | 性能/体积优先场景下得不偿失 |
+| **B4** 抽象"存储后端"多态（本地/远程/对象存储） | 当前仅 `file` + `vscode-remote` 且都走 `fsPath`；抽象过早 | YAGNI |
+
+### C 组：当前不必做
+- `dispatchMessage` 重构（A2）可暂缓——端点已稳定、测试全绿；但**一旦规划新功能应先做 A2**，避免在三处同步出错。
+- `webviewEntry` 拆分（T5）暂缓——`logic.ts` 已抽纯逻辑，协调层虽长但稳定；功能增长后再抽"协调器/store"。
+
+---
+
+## 七、验收与下一步
+
+- 当前门禁有效：`tsc --noEmit` 零错误；`node --test "src/**/*.test.ts"` **150/150**（实测递归正常）；探针 `scripts/audit-stability.ts` 0 失败；300MB 回归全绿。
+- 若大帅准奏 A 组，建议顺序：**A1（抽 core）→ A3+A4（拆上帝函数+全局兜底）→ A2（handler 注册表，按需）**，每步独立提交 + 全量测试不回归。
+- 报告与既有 `docs/STABILITY_AUDIT.md` 互补：稳定性审计关注"不崩溃"，本评审关注"结构可维护"。

@@ -18,7 +18,7 @@ import { LineIndex } from '../indexer/lineIndex.ts';
 import type { ByteReader, ReadRecordOpts } from '../parser/jsonParser.ts';
 import { openFileReader, parseJsonLine, readRecord as readRecordAt } from '../parser/jsonParser.ts';
 import { inferFields } from '../infer/inferFields.ts';
-import type { FieldCondition } from '../webview/queryLogic.ts';
+import type { FieldCondition } from '../core/query.ts';
 import type { FilterLinesResult, SearchLinesResult } from './searchEngine.ts';
 import { RECORD_INLINE_MAX_BYTES, RECORDS_MAX_COUNT, SEARCH_MAX_RESULTS, FILTER_MAX_RESULTS } from '../constants.ts';
 import { buildIndexWithFallback, type IndexHost } from './indexHost.ts';

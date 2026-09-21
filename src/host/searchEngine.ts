@@ -8,7 +8,7 @@
  *   - 字段限定搜索 / 字段过滤：必须真正取值，才用 readRecord 对命中行做单行解析（成本
  *     可控，因为限定字段/过滤天然受众收窄；过滤在超大纵深时由前端「Dispatch 暂停」配合，
  *     见 webviewEntry 说明）。评估规则（matchesFilter / rawLineMatches / recordFieldValue）
- *     全部复用自 `webview/queryLogic.ts`，保证前端本地缓存补充过滤与宿主结果一致。
+ *     全部复用自 `core/query.ts`（评估规则单一来源，原在 webview/queryLogic.ts，已抽离消 DIP 违反），保证前端本地缓存补充过滤与宿主结果一致。
  *   - 范围：默认当前文件全范围（[0, totalLines)），可按 scope 限定，宿主分批/顺序扫描，
  *     支持 maxResults 提前终止（truncated）与可选取消回调。
  */
@@ -16,8 +16,8 @@
 import type { LineIndex } from '../indexer/lineIndex.ts';
 import type { ByteReader } from '../parser/jsonParser.ts';
 import { parseJsonLine } from '../parser/jsonParser.ts';
-import { matchesFilter, recordFieldValue } from '../webview/queryLogic.ts';
-import type { FieldCondition } from '../webview/queryLogic.ts';
+import { matchesFilter, recordFieldValue } from '../core/query.ts';
+import type { FieldCondition } from '../core/query.ts';
 import { SEARCH_SCAN_EVERY } from '../constants.ts';
 
 /* ------------------------------ Buffer 级全文匹配 ------------------------------ */

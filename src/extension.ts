@@ -9,7 +9,7 @@ import {
   HostReply,
   RpcMessage,
 } from './protocol/rpc.ts';
-import type { FieldCondition } from './webview/queryLogic.ts';
+import type { FieldCondition } from './core/query.ts';
 
 /** The `viewType` used by the standalone webview panel (命令 / 资源管理器右键菜单路径). */
 export const VIEW_TYPE = 'jsonlViewer.webview';

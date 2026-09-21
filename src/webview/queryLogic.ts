@@ -1,40 +1,48 @@
 /**
- * queryLogic.ts — Task 6 的前端纯逻辑层（无 DOM / 无 node 依赖）。
+ * queryLogic.ts — 前端纯逻辑层（无 DOM / 无 node 依赖）。
  *
- * 它把「搜索匹配规则、字段值过滤评估、字段显示定制对摘要卡片的映射、偏好持久化的
- * 状态合并/校验」全部收敛成可被 node:test 直接测试的纯函数。webview 与宿主共用：
+ * 它把「字段显示定制对摘要卡片的映射、偏好持久化的状态合并/校验、搜索导航」收敛成
+ * 可被 node:test 直接测试的纯函数。webview 与宿主共用过滤评估规则：
  *   - webview 直接用本模块做「本地缓存补充过滤」与「字段定制渲染」；
- *   - 宿主 `host/searchEngine.ts` 仅复用这里的纯评估函数（matchesFilter / rawLineMatches
- *     / recordFieldValue）做全文件流式扫描，不重复实现评估逻辑。
+ *   - 宿主 `host/searchEngine.ts` 复用 core/query.ts 的纯评估函数
+ *     （matchesFilter / recordFieldValue）做全文件流式扫描，不重复实现评估逻辑。
  *
- * 刻意不 import 任何 host / node 模块：保证 webview 打包不引入 node:fs 等内置模块。
+ * ⚠️ 评估规则单一来源已迁至 src/core/query.ts（消 DIP 违反，见
+ * docs/ARCHITECTURE_REVIEW.md 债务 T3）。本文件 re-export 之，保证既有 webview
+ * 调用方与历史 import 路径不变。新增/修改过滤规则请改 core/query.ts，勿在此重复实现。
+ *
+ * 本文件除 re-export core 外不 import 任何 host / node 模块：保证 webview 打包
+ * 不引入 node:fs 等内置模块。
  */
 
 import { formatValue, MAX_TOP_LEVEL_KEYS } from './logic.ts';
+import {
+  ARRAY_RECORD_KEY,
+  SCALAR_RECORD_KEY,
+  fieldTypeOf,
+  stringifyValue,
+  recordFieldValue,
+  matchesFilter,
+  isEmptyCondition,
+} from '../core/query.ts';
+import type { FilterOp, FieldCondition, LocalFieldType } from '../core/query.ts';
 
-/* ------------------------------ 常量 ------------------------------ */
+/* 评估规则单一来源在 core/query.ts，此处 re-export 兼容既有调用方。 */
+export {
+  ARRAY_RECORD_KEY,
+  SCALAR_RECORD_KEY,
+  fieldTypeOf,
+  stringifyValue,
+  recordFieldValue,
+  matchesFilter,
+  isEmptyCondition,
+};
+export type { FilterOp, FieldCondition, LocalFieldType };
 
-/** 数组型记录的伪字段键（与 inferFields 对齐，但避免宿主依赖）。 */
-export const ARRAY_RECORD_KEY = '$array';
-/** 标量型记录的伪字段键。 */
-export const SCALAR_RECORD_KEY = '$value';
+/* ------------------------------ 常量（webview 专属） ------------------------------ */
 
 /** 字段定制摘要卡片的默认字段数上限。 */
 export const DEFAULT_MAX_KEYS = MAX_TOP_LEVEL_KEYS;
-
-/* --------------------- 类型：字段过滤条件 --------------------- */
-
-export type FilterOp = 'eq' | 'contains' | 'exists' | 'type';
-
-/** 字段值过滤条件（序列化友好，可直接存 workspaceState）。 */
-export interface FieldCondition {
-  field: string;
-  op: FilterOp;
-  value: string;
-  negate?: boolean;
-  /** 字符串比较是否忽略大小写；默认 true。数字/布尔比较也做大小写归一（无副作用）。 */
-  caseInsensitive?: boolean;
-}
 
 /* ------------------- 类型：字段显示定制布局 ------------------- */
 
@@ -60,36 +68,7 @@ export interface PersistedState {
   searchQuery?: string;
 }
 
-/* ------------------- 值 → 类型（本地轻量实现） ------------------- */
-
-export type LocalFieldType =
-  | 'string'
-  | 'number'
-  | 'boolean'
-  | 'null'
-  | 'object'
-  | 'array'
-  | 'undefined';
-
-export function fieldTypeOf(value: unknown): LocalFieldType {
-  if (value === null) return 'null';
-  if (value === undefined) return 'undefined';
-  if (Array.isArray(value)) return 'array';
-  switch (typeof value) {
-    case 'object':
-      return 'object';
-    case 'string':
-      return 'string';
-    case 'number':
-      return 'number';
-    case 'boolean':
-      return 'boolean';
-    default:
-      return 'undefined';
-  }
-}
-
-/* --------------------- 搜索 / 过滤的纯评估函数 --------------------- */
+/* --------------------- 搜索的纯评估函数（webview 侧） --------------------- */
 
 /** 原始行文本的字符串匹配（明文，不做 JSON.parse）。大小写不敏感默认开。 */
 export function rawLineMatches(text: string, query: string, caseInsensitive = true): boolean {
@@ -97,69 +76,6 @@ export function rawLineMatches(text: string, query: string, caseInsensitive = tr
   return caseInsensitive
     ? text.toLowerCase().includes(query.toLowerCase())
     : text.includes(query);
-}
-
-/** 任意值 → 参与字符串比较的文本；对象/数组 JSON 化，其余 String。 */
-export function stringifyValue(value: unknown): string {
-  if (value === undefined) return '';
-  if (value === null) return 'null';
-  if (typeof value === 'object') {
-    try {
-      return JSON.stringify(value) ?? String(value);
-    } catch {
-      return String(value);
-    }
-  }
-  return String(value);
-}
-
-/**
- * 从一条记录中取出指定字段的值用于评估。
- * 顶层伪字段 $array / $value 指向「整条记录」（当记录本身是数组 / 标量时）。
- */
-export function recordFieldValue(record: unknown, field: string): unknown {
-  if (!field) return undefined;
-  if (record === null || record === undefined) return undefined;
-  if (Array.isArray(record)) return field === ARRAY_RECORD_KEY ? record : undefined;
-  if (typeof record === 'object') {
-    if (field === ARRAY_RECORD_KEY || field === SCALAR_RECORD_KEY) return record;
-    return (record as Record<string, unknown>)[field];
-  }
-  return field === SCALAR_RECORD_KEY ? record : undefined;
-}
-
-/** 对「单个字段值」求值过滤条件（条件作用于值本身；recordFieldValue 负责取字段）。 */
-export function matchesFilter(value: unknown, cond: FieldCondition): boolean {
-  const ci = cond.caseInsensitive !== false;
-  let ok: boolean;
-  switch (cond.op) {
-    case 'exists':
-      ok = value !== undefined && value !== null;
-      break;
-    case 'type': {
-      const t = fieldTypeOf(value);
-      ok = t === cond.value;
-      break;
-    }
-    case 'eq': {
-      const s = stringifyValue(value);
-      ok = ci ? s.toLowerCase() === cond.value.toLowerCase() : s === cond.value;
-      break;
-    }
-    case 'contains': {
-      const s = stringifyValue(value);
-      ok = cond.value === '' || (ci ? s.toLowerCase().includes(cond.value.toLowerCase()) : s.includes(cond.value));
-      break;
-    }
-    default:
-      ok = false;
-  }
-  return cond.negate ? !ok : ok;
-}
-
-/** 空条件（无字段 / 无 op）视为「不过滤」。 */
-export function isEmptyCondition(cond: FieldCondition | null | undefined): boolean {
-  return !cond || !cond.field || !cond.op;
 }
 
 /* ---------------- 字段定制：布局构造 / 校验 / 对摘要映射 ---------------- */

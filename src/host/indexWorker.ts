@@ -11,7 +11,7 @@ import { createReadStream } from 'node:fs';
 import { LineIndex } from '../indexer/lineIndex.ts';
 import { openFileReader, type ByteReader } from '../parser/jsonParser.ts';
 import { searchLines, filterLines, type SearchScope } from './searchEngine.ts';
-import type { FieldCondition } from '../webview/queryLogic.ts';
+import type { FieldCondition } from '../core/query.ts';
 import { INDEX_CHUNK_SIZE, INDEX_REPORT_INTERVAL } from '../constants.ts';
 import type { WorkerRequest, WorkerResponse } from './workerProtocol.ts';
 

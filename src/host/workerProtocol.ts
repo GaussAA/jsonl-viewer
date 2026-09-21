@@ -13,7 +13,7 @@
  */
 
 import type { SearchScope, SearchLinesResult, FilterLinesResult } from './searchEngine.ts';
-import type { FieldCondition } from '../webview/queryLogic.ts';
+import type { FieldCondition } from '../core/query.ts';
 
 /** 主线程 → worker 的请求。 */
 export type WorkerRequest =
