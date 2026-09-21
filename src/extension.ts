@@ -87,7 +87,11 @@ function releaseService(uri: vscode.Uri): void {
   hit.refs--;
   if (hit.refs > 0) return;
   serviceRegistry.delete(key);
-  void hit.svc.dispose();
+  // 防御：dispose 内部已吞错，但补 .catch 防未来回归——引用计数归零的释放若抛未捕获
+  // rejection，会击穿扩展宿主（所有扩展共享进程）。
+  void hit.svc.dispose().catch((e: unknown) =>
+    hostErr('DataService dispose 失败: ' + (e instanceof Error ? (e.stack || e.message) : String(e)))
+  );
 }
 
 /** 日志输出面板：用户可在"输出 → JSONL Viewer"中查看宿主收发情况，便于排障。 */
@@ -161,20 +165,7 @@ function mountViewer(target: ViewerTarget, uri: vscode.Uri, context: vscode.Exte
   const cspSource = webview.cspSource;
   const nonce = getNonce();
 
-  webview.html = `
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';">
-  <title>JSONL Viewer</title>
-</head>
-<body>
-  <main id="app"></main>
-  <script nonce="${nonce}" src="${scriptUri}"></script>
-</body>
-</html>`;
+  webview.html = renderViewerHtml(scriptUri, cspSource, nonce);
 
   // Data host: builds a lazy line-offset index on demand and serves records
   // requested by the webview's virtual scroll. Also hosts field-inference
@@ -195,9 +186,56 @@ function mountViewer(target: ViewerTarget, uri: vscode.Uri, context: vscode.Exte
   };
   const cancel = new Set<string>();
 
-  // Clicking a bad row opens the on-disk file and reveals that line.
-  // 超大文件 VS Code 无法以 TextDocument 打开→openTextDocument 会 reject；
-  // 捕获后降级为友好提示，不再抛错致面板崩溃（Task #3）。
+  const messageSub = registerHostHandlers({ webview, data, uri, context, cancel, post });
+
+  const staleTimer = startStaleWatch({ data, post });
+
+  // Tear down：停止 stale 检测、注销消息订阅，并**释放一次引用**
+  // （引用计数归零时才真正关 worker / 释放文件句柄——见 releaseService）。
+  target.onDispose(() => {
+    clearInterval(staleTimer);
+    messageSub.dispose();
+    releaseService(uri);
+  });
+}
+
+/**
+ * 渲染 webview 的 HTML 外壳（CSP + nonce + 外部脚本入口）。纯函数，便于复用与单测。
+ */
+function renderViewerHtml(scriptUri: vscode.Uri, cspSource: string, nonce: string): string {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';">
+  <title>JSONL Viewer</title>
+</head>
+<body>
+  <main id="app"></main>
+  <script nonce="${nonce}" src="${scriptUri}"></script>
+</body>
+</html>`;
+}
+
+interface HostHandlerDeps {
+  webview: vscode.Webview;
+  data: DataService;
+  uri: vscode.Uri;
+  context: vscode.ExtensionContext;
+  cancel: Set<string>;
+  post: (msg: RpcMessage) => void;
+}
+
+/**
+ * 注册 webview→宿主的消息处理（RPC 分发）。返回订阅 Disposable，销毁时由调用方 dispose。
+ *
+ * 职责单一：仅做「消息分发 + 调用 dataService」，不负责 HTML / stale 检测 / teardown。
+ */
+function registerHostHandlers(deps: HostHandlerDeps): vscode.Disposable {
+  const { webview, data, uri, context, cancel, post } = deps;
+
+  // 点击坏行→在磁盘文件中定位该行（超大文件降级为提示，不抛错致面板崩溃）。
   const jumpToSource = async (line: number): Promise<void> => {
     try {
       const doc = await vscode.workspace.openTextDocument(uri);
@@ -214,7 +252,7 @@ function mountViewer(target: ViewerTarget, uri: vscode.Uri, context: vscode.Exte
     }
   };
 
-  const messageSub = webview.onDidReceiveMessage((message: unknown) => {
+  return webview.onDidReceiveMessage((message: unknown) => {
     const incoming = (message as { type?: unknown }).type;
     hostLog(`收到消息: ${String(incoming)}`);
     void (async () => {
@@ -284,12 +322,21 @@ function mountViewer(target: ViewerTarget, uri: vscode.Uri, context: vscode.Exte
       }
     })();
   });
+}
 
-  // 定期检测文件是否被更改 / 删除（只有索引构建后才有比对基线）。
-  // 仅在状态「从正常转为走样」时向 webview 推送一次 FILE_STALE（不刷屏）；
-  // webview 点「重新加载」→ RELOAD → data.reload() 重建索引后基线更新，状态复位。
+interface StaleWatchDeps {
+  data: DataService;
+  post: (msg: RpcMessage) => void;
+}
+
+/**
+ * 定期检测文件是否被改 / 删（仅索引构建后有基线）。状态从正常转走样时推送一次 FILE_STALE。
+ * 返回 stale 定时器句柄，调用方在 teardown 时 clearInterval。
+ */
+function startStaleWatch(deps: StaleWatchDeps): ReturnType<typeof setInterval> {
+  const { data, post } = deps;
   let staleSignaled = false;
-  const staleTimer = setInterval(async () => {
+  return setInterval(async () => {
     let res;
     try {
       res = await data.checkStale();
@@ -304,14 +351,6 @@ function mountViewer(target: ViewerTarget, uri: vscode.Uri, context: vscode.Exte
     staleSignaled = true;
     post({ type: HostReply.FILE_STALE, payload: { message: res.message, deleted: res.deleted } });
   }, 5000);
-
-  // Tear down：停止 stale 检测、注销消息订阅，并**释放一次引用**
-  // （引用计数归零时才真正关 worker / 释放文件句柄——见 releaseService）。
-  target.onDispose(() => {
-    clearInterval(staleTimer);
-    messageSub.dispose();
-    releaseService(uri);
-  });
 }
 
 /**
