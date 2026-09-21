@@ -55,6 +55,35 @@ jobs:
       - name: Build
         run: pnpm build
 
+  # ── 层 1.5：覆盖率门槛（锁定 Node 22） ────────────────────────────────────
+  # 为何单独成 job 且锁 Node 22：Node 24 默认**不把测试文件计入**覆盖率，
+  # 两版 "all files" 分母不同（同一文件逐行数值完全一致，如 dataService 95.96/80.30/69.57），
+  # 跨版本共用阈值会被误杀。故门槛只在 Node 22 上执行。
+  # 阈值随覆盖提升而抬升；低于阈值即失败 —— 工具强制优于人工遵守。
+  coverage:
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 12.4.2
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Coverage gate (lines / branches / functions)
+        run: pnpm test:coverage:gate
+
   # ── 层 2：真实 VS Code Extension Host 集成测试 ────────────────────────────
   # 验证扩展能被 VS Code 宿主发现 + activate 完整执行。
   # 两维矩阵：OS（Ubuntu/Windows/macOS）× VS Code 版本（最低支持/稳定线/insiders）
