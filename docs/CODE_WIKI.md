@@ -166,7 +166,7 @@ flowchart TD
 | 节点 | 触发点 | 具体逻辑 |
 |---|---|---|
 | **打开文件** | VS Code 编辑器 | 用户打开 `.jsonl` / `.ndjson` / `.jsonlines` 文件，命中 `package.json` 中 `contributes.customEditors.selector` 的 `filenamePattern`，以 `jsonlViewer.customEditor` 视图类型唤起编辑器 |
-| **activate()** | 扩展激活 | [extension.ts](file:///c:/WorkSpace/TraeSpace/jsonl-viewer/src/extension.ts#L209-L261) 创建输出通道（排障日志）、实例化 `JsonlCustomEditorProvider` 并注册（`supportsMultipleEditorsPerDocument: false`、`retainContextWhenHidden: true`），同时注册 `jsonlViewer.open` 命令与可选的自动打开监听（`jsonlViewer.autoOpenCustomEditor` 配置开启时，打开匹配文件自动切到 JSONL Viewer） |
+| **activate()** | 扩展激活 | [extension.ts](../src/extension.ts#L209-L261) 创建输出通道（排障日志）、实例化 `JsonlCustomEditorProvider` 并注册（`supportsMultipleEditorsPerDocument: false`、`retainContextWhenHidden: true`），同时注册 `jsonlViewer.open` 命令与可选的自动打开监听（`jsonlViewer.autoOpenCustomEditor` 配置开启时，打开匹配文件自动切到 JSONL Viewer） |
 | **resolveCustomTextEditor()** | 编辑器被唤起 | 设置 `webview.options`：`enableScripts: true`，`localResourceRoots` 限定为 `dist/`（安全边界）；生成 32 位随机 nonce，注入带 CSP 的 HTML —— `default-src 'none'`、`style-src cspSource 'unsafe-inline'`、`script-src 'nonce-…'`，仅加载一个 `dist/webview.js` |
 | **创建 DataService** | 同上 | 读取配置 `jsonlViewer.sampleLines`（默认 200，字段推断/坏行统计的抽样行数），以 `document.uri` 为标识创建数据宿主服务；同时准备 `post`（回执发送）与 `cancel` 集合（请求中断登记），并定义坏行点击的 `jumpToSource`（打开源文件 + 定位行） |
 | **消息桥接** | `onDidReceiveMessage` | 所有 webview 消息统一交给 `dispatchMessage` 分发，异常兜底回 `errReply`；`webviewPanel.onDidDispose` 时清理轮询定时器并 `data.dispose()` 释放文件句柄 |
@@ -176,11 +176,11 @@ flowchart TD
 | 节点 | 触发点 | 具体逻辑 |
 |---|---|---|
 | **加载 webview.js** | 沙箱执行 | esbuild 打包的 IIFE 在 webview 沙箱中运行（无 CommonJS、无 node 内置模块） |
-| **main()** | 脚本入口 | [webviewEntry.ts](file:///c:/WorkSpace/TraeSpace/jsonl-viewer/src/webview/webviewEntry.ts#L153-L675) 先注入 `CSS_TEXT` 样式；`createVSCodeApi()` 取 `acquireVsCodeApi()`（缺失则显示友好错误并退出）；建 `RpcBus`；初始化 `AppState`（概览/缓存/在途请求/字段/布局/搜索/过滤/持久化键）；随后创建工具栏、详情面板、两栏布局与拖拽分栏、错误横幅，最后建 `VirtualRecordList` |
+| **main()** | 脚本入口 | [webviewEntry.ts](../src/webview/webviewEntry.ts#L153-L675) 先注入 `CSS_TEXT` 样式；`createVSCodeApi()` 取 `acquireVsCodeApi()`（缺失则显示友好错误并退出）；建 `RpcBus`；初始化 `AppState`（概览/缓存/在途请求/字段/布局/搜索/过滤/持久化键）；随后创建工具栏、详情面板、两栏布局与拖拽分栏、错误横幅，最后建 `VirtualRecordList` |
 | **发送 READY** | main() 末尾 | `bus.post(HostEndpoint.READY)`；同时挂 8s 超时兜底 —— 若迟迟收不到 init 回执，横幅提示并给出「重试」（重新发送 READY） |
-| **dispatchMessage(READY)** | 宿主收到消息 | [rpc.ts](file:///c:/WorkSpace/TraeSpace/jsonl-viewer/src/protocol/rpc.ts#L256-L358) 对 READY 调用 `onReady`：内部执行 `data.getOverview()`（**这是索引构建的触发点**），构建完成后组装 `initReply`，并**并行**发起 `getErrorSummary()` 主动推送抽样窗口坏行统计（顶栏红标/概要的数据源） |
-| **ensureIndex() 惰性构建** | getOverview 首次调用 | [dataService.ts](file:///c:/WorkSpace/TraeSpace/jsonl-viewer/src/host/dataService.ts#L79-L97) 并发安全（`building` 缓存 Promise，多次同时调用只构建一次） |
-| **LineIndex.build()** | 索引构建 | [lineIndex.ts](file:///c:/WorkSpace/TraeSpace/jsonl-viewer/src/indexer/lineIndex.ts#L76-L124) 用 `createReadStream` 逐块扫描，单字节 `\n` 切行，把「每行起始的绝对字节偏移」push 进扁平升序数组（约 8B/行）；游标法不做跨块拼接，超大单行下构建期内存恒定有界；每 4 MiB 回调一次进度 |
+| **dispatchMessage(READY)** | 宿主收到消息 | [rpc.ts](../src/protocol/rpc.ts#L256-L358) 对 READY 调用 `onReady`：内部执行 `data.getOverview()`（**这是索引构建的触发点**），构建完成后组装 `initReply`，并**并行**发起 `getErrorSummary()` 主动推送抽样窗口坏行统计（顶栏红标/概要的数据源） |
+| **ensureIndex() 惰性构建** | getOverview 首次调用 | [dataService.ts](../src/host/dataService.ts#L79-L97) 并发安全（`building` 缓存 Promise，多次同时调用只构建一次） |
+| **LineIndex.build()** | 索引构建 | [lineIndex.ts](../src/indexer/lineIndex.ts#L76-L124) 用 `createReadStream` 逐块扫描，单字节 `\n` 切行，把「每行起始的绝对字节偏移」push 进扁平升序数组（约 8B/行）；游标法不做跨块拼接，超大单行下构建期内存恒定有界；每 4 MiB 回调一次进度 |
 | **打开读取器 + 记快照** | 构建完成 | `openFileReader(path)` 用 `fs.open` 打开随机读句柄；同时 `stat()` 记录 size/mtime 快照，作为后续「文件变更检测」的基线 |
 | **回执 init** | 构建完成后 | 回 `init`（uri/行数/字节数/构建耗时/eof）→ webview 侧 `onInit` 进入阶段 ③ |
 
@@ -190,36 +190,36 @@ flowchart TD
 |---|---|---|
 | **onInit：恢复持久化** | 收到 init | 组装持久化键 `jsonlViewer.state.<uri>`，向宿主 `LOAD_STATE` 读回上次的字段布局/过滤条件/搜索词；读回后经 `mergePersistedState` 净化（只接受合法字段与合法过滤条件）再合并到当前状态；搜索词只回填输入框、**不自动触发搜索**（避免打开即扫全文件） |
 | **并行拉取字段与概览** | onInit 内 | `GET_SAMPLE_FIELDS` → 宿主 `inferFields` 只扫前 N 行（默认 200），产出 `FieldInfo[]`（类型频率/示例值/覆盖率/恒对象/恒数组），供摘要卡片与筛选/字段面板的下拉；`GET_OVERVIEW` → 重新拉精确概览（索引构建后的统计更准） |
-| **渲染工具栏统计** | 数据到达 | [toolbar.ts](file:///c:/WorkSpace/TraeSpace/jsonl-viewer/src/webview/toolbar.ts#L501-L510) 的 `update()` 刷新文件名/总行数/已解析行数/当前可见范围/打开耗时/状态点 |
-| **目录 rebuild() → onRangeChange** | 列表初始化 | [virtualScroll.ts](file:///c:/WorkSpace/TraeSpace/jsonl-viewer/src/webview/virtualScroll.ts#L254-L306) 按当前页渲染卡片后调用 `cb.onRangeChange(first, lastExclusive)`，把当前页展示位（过滤态下映射为真实行号）push 进 `ThrottleQueue` 调度器 —— 高频触发被合并，保证任意时刻最多一个读批 worker 在执行 |
+| **渲染工具栏统计** | 数据到达 | [toolbar.ts](../src/webview/toolbar.ts#L501-L510) 的 `update()` 刷新文件名/总行数/已解析行数/当前可见范围/打开耗时/状态点 |
+| **目录 rebuild() → onRangeChange** | 列表初始化 | [virtualScroll.ts](../src/webview/virtualScroll.ts#L254-L306) 按当前页渲染卡片后调用 `cb.onRangeChange(first, lastExclusive)`，把当前页展示位（过滤态下映射为真实行号）push 进 `ThrottleQueue` 调度器 —— 高频触发被合并，保证任意时刻最多一个读批 worker 在执行 |
 
 #### ④ 按需拉取与列表渲染
 
 | 节点 | 触发点 | 具体逻辑 |
 |---|---|---|
-| **fetchWindow()** | ThrottleQueue(40ms) 执行 | [webviewEntry.ts](file:///c:/WorkSpace/TraeSpace/jsonl-viewer/src/webview/webviewEntry.ts#L483-L521) 先 `computeFetchWindow` 跳过两端已缓存/已在途的行，**只请求中间缺失段**；若上一请求仍在途则 `supersede` 标记并通知宿主中断，再发 `READ_RECORDS`（startLine + count） |
-| **宿主 readBatch** | 收到 READ_RECORDS | [jsonParser.ts](file:///c:/WorkSpace/TraeSpace/jsonl-viewer/src/parser/jsonParser.ts#L140-L156) 对每行：`LineIndex.lineRange(line)` 二分拿到 `[start,end)` 字节区间 → 超过 `maxLineBytes`(16MiB) 报「超长行」→ 否则 `fd.read` 随机读回 → 剥离 `\r\n` → 单行 `JSON.parse`；**逐行检查 `shouldCancel`**，被取消立即停（不占 CPU）；坏行结果登记进 `knownBadLines` 缓存 |
+| **fetchWindow()** | ThrottleQueue(40ms) 执行 | [webviewEntry.ts](../src/webview/webviewEntry.ts#L483-L521) 先 `computeFetchWindow` 跳过两端已缓存/已在途的行，**只请求中间缺失段**；若上一请求仍在途则 `supersede` 标记并通知宿主中断，再发 `READ_RECORDS`（startLine + count） |
+| **宿主 readBatch** | 收到 READ_RECORDS | [jsonParser.ts](../src/parser/jsonParser.ts#L140-L156) 对每行：`LineIndex.lineRange(line)` 二分拿到 `[start,end)` 字节区间 → 超过 `maxLineBytes`(16MiB) 报「超长行」→ 否则 `fd.read` 随机读回 → 剥离 `\r\n` → 单行 `JSON.parse`；**逐行检查 `shouldCancel`**，被取消立即停（不占 CPU）；坏行结果登记进 `knownBadLines` 缓存 |
 | **回执 records → LRU** | 宿主回包 | 按 `requestId` 关联到对应 Promise；`superseded` 的迟到响应被 `RpcBus` 直接丢弃；有效数据写入 `LRUCache`（容量 600，超出逐出最久未用并释放大对象），更新 `maxLoaded`，`list.refresh()` 重绘当前页 |
-| **渲染当前页卡片** | refresh() | [virtualScroll.ts](file:///c:/WorkSpace/TraeSpace/jsonl-viewer/src/webview/virtualScroll.ts#L309-L418) 每张卡片 = 行号徽章 `L{n}` + 类型徽章（string/number/…/error）+ keys/items 计数 + 字段摘要预览（按字段布局截取，超长省略）；未加载显示「加载中…」占位；坏行红标 + 精简错误文案；悬停复制行号、右键菜单（定位到源码行/复制行号/复制 JSON） |
+| **渲染当前页卡片** | refresh() | [virtualScroll.ts](../src/webview/virtualScroll.ts#L309-L418) 每张卡片 = 行号徽章 `L{n}` + 类型徽章（string/number/…/error）+ keys/items 计数 + 字段摘要预览（按字段布局截取，超长省略）；未加载显示「加载中…」占位；坏行红标 + 精简错误文案；悬停复制行号、右键菜单（定位到源码行/复制行号/复制 JSON） |
 
 #### ⑤ 详情树渲染
 
 | 节点 | 触发点 | 具体逻辑 |
 |---|---|---|
 | **点击卡片** | 用户交互 | `onSelect(line)` → 记录选中行、`list.select()` 高亮 → `showDetailForLine(line)` |
-| **showDetailForLine()** | 选中行 | [webviewEntry.ts](file:///c:/WorkSpace/TraeSpace/jsonl-viewer/src/webview/webviewEntry.ts#L447-L476)：坏行命中缓存直接 `detail.showError`（不再请求宿主）；好行先 `supersede` 取消上一在途详情请求，再发 `READ_RECORD`，响应按 requestId 校验，被更新选择取代则丢弃 |
+| **showDetailForLine()** | 选中行 | [webviewEntry.ts](../src/webview/webviewEntry.ts#L447-L476)：坏行命中缓存直接 `detail.showError`（不再请求宿主）；好行先 `supersede` 取消上一在途详情请求，再发 `READ_RECORD`，响应按 requestId 校验，被更新选择取代则丢弃 |
 | **宿主 readRecord** | 收到 READ_RECORD | 单行读取解析（复用阶段 ④ 的读行逻辑），解析错误返回精简错误 + 字符位置 |
-| **detailTree.showRecord()** | 数据到达 | [detailTree.ts](file:///c:/WorkSpace/TraeSpace/jsonl-viewer/src/webview/detailTree.ts#L606-L618)：`TreeState` 复位（收起全部 → 展开到第 1 层）→ `render()` 懒递归建树 —— 只为「已展开」节点建 DOM；容器节点先渲染折叠摘要 `{…} N fields`，展开时经 `expandContainer` 生成子项并播抽屉动画（0→scrollHeight 拉出） |
+| **detailTree.showRecord()** | 数据到达 | [detailTree.ts](../src/webview/detailTree.ts#L606-L618)：`TreeState` 复位（收起全部 → 展开到第 1 层）→ `render()` 懒递归建树 —— 只为「已展开」节点建 DOM；容器节点先渲染折叠摘要 `{…} N fields`，展开时经 `expandContainer` 生成子项并播抽屉动画（0→scrollHeight 拉出） |
 | **交互能力** | 树渲染后 | 面包屑导航（点击段 `forceExpand` 祖先链并定位）；折叠/展开走**局部增量**（`expandNodeLocal` 懒构建子节点，不整树重建）；大数组分段预览（首屏 50 项 + 「还有 M 项，点击加载更多」，`revealed` 记录已展开额外项数）；批量操作（全部展开/折叠/展开到 N 层）增量逐层瀑布，保持干脆不重播；切换记录时字段逐条错峰入场（30ms×10，420ms 内完成） |
 
 #### ⑥ 后台守护（常驻）
 
 | 节点 | 触发点 | 具体逻辑 |
 |---|---|---|
-| **5s 轮询 checkStale()** | 索引构建后启动的 `setInterval` | [dataService.ts](file:///c:/WorkSpace/TraeSpace/jsonl-viewer/src/host/dataService.ts#L114-L124) 每次 `stat()` 对比基线快照的 size/mtime：无变化返回 `{changed:false}` 并复位 `staleSignaled`；变化/删除返回走样语义 + 友好提示 |
+| **5s 轮询 checkStale()** | 索引构建后启动的 `setInterval` | [dataService.ts](../src/host/dataService.ts#L114-L124) 每次 `stat()` 对比基线快照的 size/mtime：无变化返回 `{changed:false}` 并复位 `staleSignaled`；变化/删除返回走样语义 + 友好提示 |
 | **文件变更/删除** | 检测命中 | 只在「正常 → 走样」翻转时（`staleSignaled` 防抖）推送一次 `FILE_STALE`，避免重复弹横幅刷屏 |
-| **webview 顶部横幅** | 收到 fileStale | [webviewEntry.ts](file:///c:/WorkSpace/TraeSpace/jsonl-viewer/src/webview/webviewEntry.ts#L664-L666) `banner.show(message, '重新加载', …)` |
-| **重新加载 → reload()** | 用户点击 | [webviewEntry.ts](file:///c:/WorkSpace/TraeSpace/jsonl-viewer/src/webview/webviewEntry.ts#L617-L662) 先 `supersede` 全部在途请求（读批/搜索/过滤/详情）避免新旧数据交错 → 发 `RELOAD` → 宿主 `DataService.reload()`：关闭旧文件句柄、清空索引/快照/坏行缓存，重新 `ensureIndex()` → 回新概览 → webview 整体复位（清 LRU/搜索/过滤/字段，重拉字段推断），随后回到阶段 ③ 继续运行 |
+| **webview 顶部横幅** | 收到 fileStale | [webviewEntry.ts](../src/webview/webviewEntry.ts#L664-L666) `banner.show(message, '重新加载', …)` |
+| **重新加载 → reload()** | 用户点击 | [webviewEntry.ts](../src/webview/webviewEntry.ts#L617-L662) 先 `supersede` 全部在途请求（读批/搜索/过滤/详情）避免新旧数据交错 → 发 `RELOAD` → 宿主 `DataService.reload()`：关闭旧文件句柄、清空索引/快照/坏行缓存，重新 `ensureIndex()` → 回新概览 → webview 整体复位（清 LRU/搜索/过滤/字段，重拉字段推断），随后回到阶段 ③ 继续运行 |
 
 > 上述阶段中，②④⑤ 每一条宿主请求都带 `requestId` 并通过 `RpcBus` 关联回执；`supersede` 语义 = 本地标记 + 通知宿主 CANCEL，迟到的响应一律丢弃，从根上杜绝「旧窗口数据污染新 UI」。
 
