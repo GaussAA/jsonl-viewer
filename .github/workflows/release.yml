@@ -2,10 +2,11 @@
 # Marketplace 自动发布流水线。
 #
 # 触发方式：
-#   1. git tag v1.3.0 && git push origin v1.3.0     → 构建 + 发布到 Marketplace
-#   2. GitHub Actions 页面 → Run workflow → 手动触发 → 构建 + 上传 VSIX 工件
-#      （发布步骤以 `github.event_name == 'push'` 为闸，故手动触发不会发布；
-#        如需手动也能发布，请先确认后改动那行 if 的条件。）
+#   1. git tag v1.3.0 && git push origin v1.3.0   → 构建 + 发布到 Marketplace
+#   2. Actions 页 → Run workflow（手动触发）      → 构建 + 上传 VSIX 工件（**默认不发布**）
+#      若确要发布，勾选 `publish` 输入即可（见下 workflow_dispatch.inputs）。
+#      设计理由：发布到 Marketplace 属不可逆外部动作，故**默认安全**、须显式勾选；
+#      同时保留「手动也能发布」的能力，无需为此特意打 tag。
 #
 # 前置条件（一次性配置）：
 #   a. 创建 Azure DevOps PAT（https://dev.azure.com → User Settings → Personal Access Tokens）
@@ -26,6 +27,11 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      publish:
+        description: '发布到 Marketplace（勾选才发布；不勾则仅构建并上传 VSIX）'
+        type: boolean
+        default: false
 
 jobs:
   publish:
@@ -80,8 +86,9 @@ jobs:
           path: '*.vsix'
 
       - name: Publish to Marketplace
-        # 判的是 env（非 secrets）；未配置 VSCE_PAT 时这步自动跳过，不会报红。
-        # 配好 PAT 后直接生效；vsce 默认识别 VSCE_PAT 环境变量，无需 -p 传参
-        # （官方亦建议避免把密钥放到命令行，以免进入进程表/审计日志）。
-        if: github.event_name == 'push' && env.VSCE_PAT != ''
+        # 发布闸（三者同时成立才发布）：
+        #   1. VSCE_PAT 已配置（判 env，不可判 secrets —— 见文件头与 job 级 env 注释）
+        #   2. 且 「tag push（事件为 push，因本工作流仅 tag 触发）」或「手动触发时勾了 publish」
+        # 未配置 PAT 或未勾选 → 自动跳过，不会报红。
+        if: env.VSCE_PAT != '' && (github.event_name == 'push' || inputs.publish)
         run: npx @vscode/vsce publish
