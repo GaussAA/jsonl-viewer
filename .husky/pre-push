@@ -1,0 +1,37 @@
+#!/bin/sh
+# 推送前门禁：把「本地本可查出」的问题挡在推送之前，使远程 CI 不再是唯一守门人。
+#
+# 为何加这道：2026-09 实测发现，仓库虽配了 CI 矩阵，但因工作流自身失效，**红色 CI
+# 连续数日无人察觉**（详见 docs/MAINTENANCE_AUDIT.md §2.6）。CI 是终态权威，但若本地
+# 无任何强制，问题会先落到 main 上再被发现 —— 故在此补一道低成本的前置强制。
+#
+# 为何只查这三项：
+#   - typecheck / 单测：本地能确定性复现的核心风险，代价约十秒
+#   - 工作流静态校验：专治本类「静默失效」（缺 actionlint 则**跳过并提示**，绝不误拦）
+# 为何不把 CI 的全部内容搬来：Node 22/24 双版本、覆盖率门槛、3 OS × 3 VS Code 集成矩阵
+# 在本地复现代价过高且无必要 —— 那些仍由 CI 承担。
+# 若确需绕过：git push --no-verify
+set -e
+
+# ── 1. 工作流静态校验（可选：未安装 actionlint 时跳过，避免因缺工具而误拦） ──
+if command -v actionlint >/dev/null 2>&1; then
+  echo "[pre-push] actionlint：校验 .github/workflows/"
+  actionlint
+else
+  echo "[pre-push] 跳过工作流校验：未找到 actionlint（CI 的 lint job 会执行；本地可另行安装）"
+fi
+
+# ── 2. 类型检查 ──
+echo "[pre-push] tsc --noEmit"
+node node_modules/typescript/bin/tsc --noEmit
+
+# ── 3. 单元测试（Node ≥ 22 才支持 --experimental-transform-types；低版本跳过并提示） ──
+NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]')"
+if [ "$NODE_MAJOR" -ge 22 ]; then
+  echo "[pre-push] node --test（Node $(node -v)）"
+  node --experimental-transform-types --test "src/**/*.test.ts"
+else
+  echo "[pre-push] 跳过单测：当前 node $(node -v) < 22，不支持 --experimental-transform-types（CI 会执行）"
+fi
+
+echo "[pre-push] 本地门禁通过"
