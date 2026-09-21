@@ -137,7 +137,7 @@ indexer/ parser/ infer/ perf/ constants.ts  ← 共享叶子（被 host/webview 
 
 ## 七、验收与下一步
 
-- 当前门禁有效：`tsc --noEmit` 零错误；`node --experimental-transform-types --test "src/**/*.test.ts"` **215/215**（含 webview jsdom 测试网；Node 22 与 24 双验）；覆盖率门槛 `pnpm test:coverage:gate`（见 §八）；探针 `scripts/audit-stability.ts` **0 失败**；300MB 回归 `scripts/validate-300mb.ts` **全绿**。
+- 当前门禁有效：`tsc --noEmit` 零错误；`node --experimental-transform-types --test "src/**/*.test.ts"` **232/232**（含 webview jsdom 测试网；Node 22 与 24 双验）；覆盖率门槛 `pnpm test:coverage:gate`（见 §八）；探针 `scripts/audit-stability.ts` **0 失败**；300MB 回归 `scripts/validate-300mb.ts` **全绿**。
 - **八笔重构后全量复验（实测取证）**：稳定性探针覆盖 worker 回退 / 空文件 / 纯换行 / BOM / 深嵌套 5000 层 / 越界与 NaN 参数 / 批量上限 / dispose 后调用自愈 / 文件删除陈旧检测 / GBK / 坏路径，**未发现缺陷**；300MB（315.4MB）回归：307200 行索引 **352ms**、检查点 300 个（索引≈5KB）、随机读 300/300 与暴力解一致、分批读 4/4 窗口一致、三组关键词搜索集与全量暴力扫描**完全一致**。
 - **集成测试需本机网络**：`pnpm test:integration` 依赖 `@vscode/test-electron` 下载 VS Code；沙箱无直连外网且 `~/.vscode-test` 无缓存，本地未能执行——请在联网环境跑一次以覆盖 Extension Host 路径。
 - **T5 决策记录（暂不抽 store，附明确触发条件）**：`AppState` 维持「单一可变对象 + 闭包捕获」现状。理由：原评审的触发条件是「**继续膨胀**」，而本轮为收缩（`webviewEntry` 1112→822 行，−26%）；且 store / DI 类抽象已由 B1 判为过度设计（YAGNI）。**满足其一再抽**：① 新增 ≥2 个需跨模块共享的状态字段；② 同一状态字段出现 ≥3 处写入点且定位困难；③ 需要撤销·重放或状态快照。届时先补状态迁移测试网，再动结构。
@@ -153,10 +153,10 @@ indexer/ parser/ infer/ perf/ constants.ts  ← 共享叶子（被 host/webview 
 
 | 指标 | 起始 | 现状 | 变化 |
 |---|---|---|---|
-| 测试用例 | 184 | **215** | +31 |
-| 行覆盖 | 83.37% | **85.53%** | +2.16 |
-| 分支覆盖 | 85.99% | **87.97%** | +1.98 |
-| 函数覆盖 | 72.90% | **77.10%** | +4.20 |
+| 测试用例 | 184 | **232** | +48 |
+| 行覆盖 | 83.37% | **87.45%** | +4.08 |
+| 分支覆盖 | 85.99% | **88.60%** | +2.61 |
+| 函数覆盖 | 72.90% | **79.87%** | +6.97 |
 
 优先补强对象＝**核心引擎**（崩溃即插件彻底不可用，风险最高）：
 
@@ -166,16 +166,18 @@ indexer/ parser/ infer/ perf/ constants.ts  ← 共享叶子（被 host/webview 
 | `host/dataService.ts` | 91.93 → 95.96 | **62.00 → 80.30** | 60.87 → **69.57** | 脏参数守卫 / 非法行号 / scope 解析 / getter / 删除陈旧检测 |
 | `parser/jsonParser.ts` | 95.28 → 97.64 | **78.57 → 86.57** | 95.45 | 无效行号 / 批读守卫 / shouldCancel 提前停 / 读取器越界 |
 | `webview/columnLayout.ts` | 80.68 → **98.86** | 80.00 → 87.50 | **57.14 → 100.00** | 收起/展开动画全路径（含 reduce-motion 降级）、拖拽调宽与夹取、双击复位、持久化宽度/折叠恢复、ResizeObserver 跨断点重排 |
+| `webview/virtualScroll.ts` | 48.63 → **69.48** | **60.00 → 85.82** | 30.51 → **64.41** | 分页数学与夹取、翻页/首末页禁用态、页码滑动窗口与省略号、跳页输入校验回退、过滤态展示位↔真实行映射、空态与清除过滤、键盘导航（↑↓/Home/End/PgUp/PgDn/Enter）、选中高亮、换页动画路径、释放 |
 
 ### 8.2 可测性接缝（行为不变，向后兼容）
 - `indexHost.ts`：新增 `WorkerLike` 最小接口与 `WorkerIndexHost(scriptPath, workerFactory?)` 第二参（默认仍为 `new Worker(path)`）。该类原先的「消息分发 / 异常退出 / 崩溃结算 / 释放归还」只能靠真实线程覆盖，现可注入伪 Worker 逐分支驱动 —— 这是把「不可测的稳定性命脉」变为「可回归」的关键一步。
 
 ### 8.3 回归门槛（工具强制 > 人工遵守）
 - 新增脚本：`pnpm test:coverage`（仅出报告）；`pnpm test:coverage:gate`（出报告 + 阈值校验，低于即 **exit 1**）。
-- CI 新增 `coverage` job：**阈值 行 84 / 分支 86 / 函数 74**，随覆盖提升再抬升。
+- CI 新增 `coverage` job：**阈值 行 86 / 分支 87 / 函数 78**（随覆盖提升逐轮抬升；起始为 84/86/74）。
 - **为何锁 Node 22**：Node 24 默认**不把测试文件计入**覆盖率 → 两版 `all files` 分母不同（同一文件逐行数值完全一致，如 `dataService` 两版均为 95.96/80.30/69.57）。跨版本共用阈值会被误杀，故 `verify` 矩阵仍跑 Node 22+24 的 `pnpm test`，覆盖率门槛只在 Node 22 执行。
 
 ### 8.4 待办与已知缺口
 - **死代码（不写测试凑数，宜择机删除）**：`parser/jsonParser.ts` 的 `FileByteReader.pathName` getter 全库零引用。
 - **剩余核心缺口**：`dataService.ts` 101-111（构建期 dispose/reload 竞态，需为 `ensureIndex` 加可控 host 接缝才能确定性覆盖）、`host/searchEngine.ts` 分支 80.52%、`indexer/lineIndex.ts` 分支 83.33%、`core/query.ts` 分支 78.57%。
-- **webview 视图层**（体量大，当前靠 jsdom 冒烟网托底）: `toolbar.ts` 45.01%、`detailTree.ts` 44.86%、`virtualScroll.ts` 48.63%、`webviewEntry.ts` 65.77% —— 建议按「用户可见行为」优先级逐模块配 jsdom 组件测试。
+- **webview 视图层**（体量大，当前靠 jsdom 冒烟网托底）：`virtualScroll.ts` ✅ 已补强（见 8.1）；`toolbar.ts` 45.01%、`detailTree.ts` 44.86%、`webviewEntry.ts` 65.77% 待补 —— 按「用户可见行为」优先级逐模块配 jsdom 组件测试。
+- **jsdom 选择器怪癖（实测踩坑，务必记牢）**：同一文档内存在多个 `VirtualRecordList` 时，`el.querySelector('.jlv-inner > *')` 会**返回 null**，而 `querySelectorAll` 用同一选择器却正常。视图层测试请直接用 DOM 属性（`.children` / `.firstElementChild`）访问，勿依赖 `> *` 选择器。

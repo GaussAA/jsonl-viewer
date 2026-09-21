@@ -13,6 +13,7 @@ samples/
 .audit_*.txt
 .build_out.txt
 .cov_flag_probe.txt
+.diag_*.ts
 .coverage_*.txt
 .coverage_out.txt
 .pnpm_diag.txt
