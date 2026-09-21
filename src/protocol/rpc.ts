@@ -109,11 +109,6 @@ export interface RecordsPayload {
   hasMore: boolean;
 }
 
-export interface ErrorPayload {
-  requestId?: string;
-  message: string;
-}
-
 export interface JumpToSourcePayload {
   line: number;
 }
@@ -124,13 +119,6 @@ export interface StaleFilePayload {
   message: string;
   /** 是否检测到文件被删除（vs 内容变更）。 */
   deleted: boolean;
-}
-
-/** 携带 requestId（用于关联异步响应 / 取消）的请求体。 */
-export interface RequestEnvelope {
-  type: string;
-  requestId: string;
-  payload?: unknown;
 }
 
 /** 搜索结果有效载荷。 */

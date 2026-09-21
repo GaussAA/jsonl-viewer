@@ -14,6 +14,7 @@ import {
   RpcMessage,
 } from './protocol/rpc.ts';
 import type { FieldCondition } from './core/query.ts';
+import { FILE_STALE_POLL_MS } from './constants.ts';
 
 /** The `viewType` used by the standalone webview panel (命令 / 资源管理器右键菜单路径). */
 export const VIEW_TYPE = 'jsonlViewer.webview';
@@ -402,7 +403,7 @@ function startStaleWatch(deps: StaleWatchDeps): ReturnType<typeof setInterval> {
     if (staleSignaled) return; // 已提示过，避免重复弹横幅
     staleSignaled = true;
     post({ type: HostReply.FILE_STALE, payload: { message: res.message, deleted: res.deleted } });
-  }, 5000);
+  }, FILE_STALE_POLL_MS);
 }
 
 /**

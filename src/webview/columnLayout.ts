@@ -4,12 +4,14 @@
  * 职责（纯 DOM 协调，不含业务逻辑）：
  *   - 收起/展开「拉抽屉」动画（含 prefers-reduced-motion 降级）；
  *   - 分隔条拖拽调宽（双击恢复默认）；
- *   - 窄容器(<700px)响应式：off-canvas 目录抽屉（汉堡 + 遮罩），跨断点重排。
+ *   - 窄容器（宽度 < NARROW_BREAKPOINT_PX）响应式：off-canvas 目录抽屉（汉堡 + 遮罩），跨断点重排。
  *
  * 行为抽取（非 DOM 抽取）：DOM 节点的创建与挂载顺序仍由 main 负责（保证 z-order 与首帧不变），
  * 本模块仅接收已创建的节点并接管全部逻辑/状态/事件接线，行为与原 main 内联实现逐字一致。
  * 通过依赖注入与 main 解耦：rootEl / detailRoot / 各节点 / 刷新与导航回调 / 四个持久化辅助由外部提供。
  */
+
+import { NARROW_BREAKPOINT_PX } from '../constants.ts';
 
 /** 左栏默认宽度（拖拽分栏基准）。 */
 export const DEFAULT_LIST_WIDTH = 320;
@@ -66,7 +68,7 @@ export function createColumnLayout(deps: ColumnLayoutDeps): ColumnLayout {
   let listAnimTimer: ReturnType<typeof setTimeout> | undefined;
   /** 窄容器态：布局以 #app 容器宽度为基准（与 CSS @container max-width:699px 对齐），而非视口。
    *  首次取初始容器宽度；后续由 onContainerResize() 跨断点时更新并触发重排。 */
-  let narrow = rootEl.clientWidth < 700;
+  let narrow = rootEl.clientWidth < NARROW_BREAKPOINT_PX;
   /** 最近一次展开态下的左栏宽度（用于展开动画的初始边距）。 */
   let expandedWidthPx: number;
 
@@ -238,7 +240,7 @@ export function createColumnLayout(deps: ColumnLayoutDeps): ColumnLayout {
   /** 容器(面板)宽度跨窄/宽断点 → 更新 narrow 并重排；同侧变化（拖动调整面板）不重排。 */
   let roNarrow: ResizeObserver | null = null;
   function onContainerResize(): void {
-    const n = rootEl.clientWidth < 700;
+    const n = rootEl.clientWidth < NARROW_BREAKPOINT_PX;
     if (n === narrow) return;
     narrow = n;
     syncResponsive();

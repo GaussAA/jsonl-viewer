@@ -43,8 +43,8 @@ export const RPC_TIMEOUT_MS = 15_000;
  */
 export const RPC_HEAVY_TIMEOUT_MS = 120_000;
 
-/** 文件 stale 检测触发后，自动 reload 的 debounce 窗口。 */
-export const FILE_STALE_DEBOUNCE_MS = 1_000;
+/** 文件陈旧（被改/被删）检测的轮询间隔。 */
+export const FILE_STALE_POLL_MS = 5_000;
 
 /** 全文/字段搜索每扫描多少行 yield 一次，避免阻塞事件循环。 */
 export const SEARCH_SCAN_EVERY = 256;
@@ -68,8 +68,8 @@ export const INIT_TIMEOUT_MS = 8_000;
 /** 分页每页条目数。 */
 export const PAGE_SIZE = 20;
 
-/** 字段抽样上限（getSampleFields 扫描前 N 行推断字段集合）。 */
-export const SAMPLE_SCAN_LINES = 1_000;
+/** 字段抽样推断的默认扫描行数（可被 `jsonlViewer.sampleLines` 配置或调用方参数覆盖）。 */
+export const SAMPLE_SCAN_LINES = 200;
 
 /** 统计芯片 maxKeys 默认值（卡片式摘要默认展示多少个字段）。 */
 export const DEFAULT_MAX_KEYS = 4;

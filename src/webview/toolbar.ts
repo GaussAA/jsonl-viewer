@@ -6,6 +6,7 @@
  */
 
 import type { FieldCondition, FieldLayout } from './queryLogic.ts';
+import { formatBuildMs, formatCount } from './logic.ts';
 
 export interface ToolbarInfo {
   fileName: string;
@@ -585,8 +586,8 @@ export function createToolbar(
   const update = (info: Partial<ToolbarInfo> & { fileName?: string }): void => {
     if (info.fileName !== undefined) fileNameEl.textContent = info.fileName;
     if (info.totalLines !== undefined)
-      totalLinesEl.textContent = ` · ${info.totalLines.toLocaleString('en-US')} 行`;
-    if (info.buildMs !== undefined) buildMsEl.textContent = ` · ${formatMs(info.buildMs)}`;
+      totalLinesEl.textContent = ` · ${formatCount(info.totalLines)} 行`;
+    if (info.buildMs !== undefined) buildMsEl.textContent = ` · ${formatBuildMs(info.buildMs)}`;
     if (info.range) rangeEl.textContent = `${info.range[0] + 1}–${info.range[1] + 1}`;
     if (info.status) {
       statusRootEl.className = `jlv-sub ${info.status === 'ready' ? 'ready' : info.status === 'error' ? 'error' : ''}`;
@@ -699,11 +700,6 @@ function vlabel(text: string, control: HTMLElement): HTMLElement {
   wrap.appendChild(t);
   wrap.appendChild(control);
   return wrap;
-}
-
-function formatMs(ms: number): string {
-  if (!Number.isFinite(ms)) return '—';
-  return ms >= 1000 ? `${(ms / 1000).toFixed(2)}s` : `${Math.round(ms)}ms`;
 }
 
 function statusText(s: ToolbarInfo['status']): string {

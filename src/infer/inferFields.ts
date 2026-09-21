@@ -19,6 +19,7 @@
 
 import type { LineIndex } from '../indexer/lineIndex.ts';
 import type { ByteReader } from '../parser/jsonParser.ts';
+import { SAMPLE_SCAN_LINES } from '../constants.ts';
 import { readRecord } from '../parser/jsonParser.ts';
 
 export type FieldType = 'string' | 'number' | 'boolean' | 'null' | 'object' | 'array' | 'undefined';
@@ -168,7 +169,7 @@ export async function inferFields(
   li: LineIndex,
   opts: InferFieldsOpts = {}
 ): Promise<InferFieldsResult> {
-  const sampleLines = opts.sampleLines ?? 200;
+  const sampleLines = opts.sampleLines ?? SAMPLE_SCAN_LINES;
   const sampleMaxLen = opts.sampleMaxLen ?? 120;
   const scanned = Math.min(sampleLines, li.totalLines);
 

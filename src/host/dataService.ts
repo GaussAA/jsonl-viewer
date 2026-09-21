@@ -21,7 +21,7 @@ import { inferFields } from '../infer/inferFields.ts';
 import type { FieldCondition } from '../core/query.ts';
 import type { FilterLinesResult, SearchLinesResult } from './searchEngine.ts';
 import {
-  RECORD_INLINE_MAX_BYTES,
+  SAMPLE_SCAN_LINES,
   RECORDS_MAX_COUNT,
   SEARCH_MAX_RESULTS,
   FILTER_MAX_RESULTS,
@@ -34,7 +34,13 @@ import type {
   RecordsPayloadItem,
   SampleFieldsPayload,
 } from '../protocol/rpc.ts';
-import { jsonCountOf, jsonKindOf, makeSummary, summarizeRawLine } from './recordSummary.ts';
+import {
+  isOversized,
+  jsonCountOf,
+  jsonKindOf,
+  makeSummary,
+  summarizeRawLine,
+} from './recordSummary.ts';
 
 /** 检测文件是否已变更（size/mtime）的最小快照。 */
 export interface FileSnapshot {
@@ -192,7 +198,7 @@ export class DataService {
     if (n <= 0) return buildRecordsPayload(startLine, [], li.totalLines);
 
     // 阶段三（UI 热路径）：列表态不整条解析、不缓存整条巨物。
-    // - 普通行（≤ RECORD_INLINE_MAX_BYTES）：JSON.parse 后附带「有界摘要」；
+    // - 普通行（≤ 内联阈值，见 constants.ts 的 RECORD_INLINE_MAX_BYTES）：JSON.parse 后附带「有界摘要」；
     // - 超大行（> 阈值）：跳过整条 parse，浅扫描得类型/顶层条目数/预览并标记 truncated，
     //   完整值仍由 readRecord 按需拉取。如此 list 内存只与「可见窗口 + 有界摘要」成正比。
     const items: RecordsPayloadItem[] = [];
@@ -205,7 +211,7 @@ export class DataService {
         continue;
       }
       const byteLen = r.bytes.length;
-      if (byteLen > RECORD_INLINE_MAX_BYTES) {
+      if (isOversized(byteLen)) {
         const raw = summarizeRawLine(r.bytes);
         items.push({
           line: r.line,
@@ -252,7 +258,7 @@ export class DataService {
   async getSampleFields(count?: number): Promise<SampleFieldsPayload> {
     const li = await this.ensureIndex();
     const reader = this.reader!;
-    const n = count ?? this.opts.sampleLines ?? 200;
+    const n = count ?? this.opts.sampleLines ?? SAMPLE_SCAN_LINES;
     const res = await inferFields(reader, li, { sampleLines: n });
     for (const line of res.errorLines) this.knownBadLines.add(line);
     return { fields: res.fields, total: res.total, scanned: res.scanned };

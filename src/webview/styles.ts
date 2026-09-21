@@ -106,10 +106,11 @@ body {
   *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }
 
-/* 窄容器（<700px）：off-canvas 抽屉 —— 详情常驻为主视图；目录左栏收进左上角「汉堡菜单」，
+/* 窄容器（宽度 < NARROW_BREAKPOINT_PX）：off-canvas 抽屉 —— 详情常驻为主视图；目录左栏收进左上角「汉堡菜单」，
  * 点开从左侧滑入为抽屉；选中记录后抽屉收起回到详情。
  * （窄屏 master–detail 的主流推荐模式，同 iOS 邮件 / Material 导航抽屉 / Bootstrap offcanvas。）
- * 容器查询：断点取 #app 容器宽度，而非视口。 */
+ * 容器查询：断点取 #app 容器宽度，而非视口。
+ * ⚠️ CSS 无法引用 TS 常量，故 699/700 系硬编码 —— 必须与 constants.ts 的 NARROW_BREAKPOINT_PX（700）保持同步。 */
 @container (max-width: 699px) {
   .jlv-resizer,
   .jlv-resizer__toggle,
