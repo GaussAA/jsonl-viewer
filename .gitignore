@@ -14,6 +14,7 @@ samples/
 .build_out.txt
 .cov_flag_probe.txt
 .diag_*.ts
+.diag_*.txt
 .coverage_*.txt
 .coverage_out.txt
 .pnpm_diag.txt

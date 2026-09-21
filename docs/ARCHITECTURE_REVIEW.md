@@ -137,7 +137,7 @@ indexer/ parser/ infer/ perf/ constants.ts  ← 共享叶子（被 host/webview 
 
 ## 七、验收与下一步
 
-- 当前门禁有效：`tsc --noEmit` 零错误；`node --experimental-transform-types --test "src/**/*.test.ts"` **254/254**（含 webview jsdom 测试网；Node 22 与 24 双验）；覆盖率门槛 `pnpm test:coverage:gate`（见 §八）；探针 `scripts/audit-stability.ts` **0 失败**；300MB 回归 `scripts/validate-300mb.ts` **全绿**。
+- 当前门禁有效：`tsc --noEmit` 零错误；`node --experimental-transform-types --test "src/**/*.test.ts"` **290/290**（含 webview jsdom 测试网；Node 22 与 24 双验）；覆盖率门槛 `pnpm test:coverage:gate`（行 97.04% / 分支 86.55% / 函数 89.17%，阈值见 §八）；探针 `scripts/audit-stability.ts` **0 失败**；300MB 回归 `scripts/validate-300mb.ts` **全绿**。
 - **八笔重构后全量复验（实测取证）**：稳定性探针覆盖 worker 回退 / 空文件 / 纯换行 / BOM / 深嵌套 5000 层 / 越界与 NaN 参数 / 批量上限 / dispose 后调用自愈 / 文件删除陈旧检测 / GBK / 坏路径，**未发现缺陷**；300MB（315.4MB）回归：307200 行索引 **352ms**、检查点 300 个（索引≈5KB）、随机读 300/300 与暴力解一致、分批读 4/4 窗口一致、三组关键词搜索集与全量暴力扫描**完全一致**。
 - **集成测试需本机网络**：`pnpm test:integration` 依赖 `@vscode/test-electron` 下载 VS Code；沙箱无直连外网且 `~/.vscode-test` 无缓存，本地未能执行——请在联网环境跑一次以覆盖 Extension Host 路径。
 - **T5 决策记录（暂不抽 store，附明确触发条件）**：`AppState` 维持「单一可变对象 + 闭包捕获」现状。理由：原评审的触发条件是「**继续膨胀**」，而本轮为收缩（`webviewEntry` 1112→822 行，−26%）；且 store / DI 类抽象已由 B1 判为过度设计（YAGNI）。**满足其一再抽**：① 新增 ≥2 个需跨模块共享的状态字段；② 同一状态字段出现 ≥3 处写入点且定位困难；③ 需要撤销·重放或状态快照。届时先补状态迁移测试网，再动结构。
@@ -153,12 +153,12 @@ indexer/ parser/ infer/ perf/ constants.ts  ← 共享叶子（被 host/webview 
 
 | 指标 | 起始 | 现状 | 变化 |
 |---|---|---|---|
-| 测试用例 | 184 | **254** | +70 |
-| 行覆盖 | 83.37% | **93.42%** | +10.05 |
-| 分支覆盖 | 85.99% | **85.92%** | −0.07 |
-| 函数覆盖 | 72.90% | **84.97%** | +12.07 |
+| 测试用例 | 184 | **290** | +106 |
+| 行覆盖 | 83.37% | **97.04%** | +13.67 |
+| 分支覆盖 | 85.99% | **86.55%** | +0.56 |
+| 函数覆盖 | 72.90% | **89.17%** | +16.27 |
 
-> 注：**分支覆盖率持平而非回退**——每轮新覆盖的视图层文件（`detailTree` 67.91%、`toolbar` 59.34% 分支）会以「新增的部分覆盖分支」进入分母，抵消了同时拿下的已覆盖分支。行/函数两项持续显著上行。分支绝对值从 85.99 → 85.92 属统计口径效应，非质量下降。
+> 注：**分支覆盖率增长最慢，属统计口径效应而非质量下降**——每轮新覆盖的视图层文件（`detailTree` 67.91%、`toolbar` 59.14% 分支）会以「新增的部分覆盖分支」进入分母，抵消了同时拿下的已覆盖分支。行/函数/用例三项持续显著上行；分支已在末期转正（85.92 → 86.55）。
 
 优先补强对象＝**核心引擎**（崩溃即插件彻底不可用，风险最高）：
 
@@ -168,22 +168,29 @@ indexer/ parser/ infer/ perf/ constants.ts  ← 共享叶子（被 host/webview 
 | `host/dataService.ts` | 91.93 → 95.96 | **62.00 → 80.30** | 60.87 → **69.57** | 脏参数守卫 / 非法行号 / scope 解析 / getter / 删除陈旧检测 |
 | `parser/jsonParser.ts` | 95.28 → 97.64 | **78.57 → 86.57** | 95.45 | 无效行号 / 批读守卫 / shouldCancel 提前停 / 读取器越界 |
 | `webview/columnLayout.ts` | 80.68 → **98.86** | 80.00 → 87.50 | **57.14 → 100.00** | 收起/展开动画全路径（含 reduce-motion 降级）、拖拽调宽与夹取、双击复位、持久化宽度/折叠恢复、ResizeObserver 跨断点重排 |
-| `webview/virtualScroll.ts` | 48.63 → **69.48** | **60.00 → 85.82** | 30.51 → **64.41** | 分页数学与夹取、翻页/首末页禁用态、页码滑动窗口与省略号、跳页输入校验回退、过滤态展示位↔真实行映射、空态与清除过滤、键盘导航（↑↓/Home/End/PgUp/PgDn/Enter）、选中高亮、换页动画路径、释放 |
+| `webview/virtualScroll.ts` | 48.63 → **87.24** | **60.00 → 82.42** | 30.51 → **73.24** | 分页数学与夹取、翻页/首末页禁用态、页码滑动窗口与省略号、跳页输入校验回退、过滤态展示位↔真实行映射、空态与清除过滤、键盘导航（↑↓/Home/End/PgUp/PgDn/Enter）、选中高亮、换页动画路径、释放 |
 | `webview/detailTree.ts` | 44.86 → **89.72** | 70.59 → 67.91 | 26.19 → **89.80** | 顶层键渲染与头部 Record #n、嵌套容器默认折叠、点击展开/收起（高度归零 + 折叠信号）、展开全部/全部折叠、大数组懒加载（首屏一页 + 加载更多）、加载占位与错误态、clear、上下条按钮与禁用态、复制（兼容路径 + 脉冲反馈）、释放 |
-| `webview/toolbar.ts` | 45.01 → **89.34** | 72.73 → 59.34 | **9.09 → 64.15** | 文件名/行数/范围/耗时/状态展示与状态类（就绪/索引中/错误）、搜索防抖回调、清除搜索、上下匹配（含未启用时的禁用语义）、匹配计数、过滤截断提示显隐、浮层面板开合（单实例复用：淡出隐藏不移除 DOM）、字段布局面板勾选回调、refresh/destroy |
+| `webview/toolbar.ts` | 45.01 → **89.61** | 72.73 → 59.14 | **9.09 → 66.04** | 文件名/行数/范围/耗时/状态展示与状态类（就绪/索引中/错误）、搜索防抖回调、清除搜索、上下匹配（含未启用时的禁用语义）、匹配计数、过滤截断提示显隐、浮层面板开合（单实例复用：淡出隐藏不移除 DOM）、字段布局面板勾选回调、refresh/destroy |
+| `webview/webviewEntry.ts` | **65.77 → 97.81** | 82.05 → 82.28 | **26.42 → 81.67** | 装配层集成：init 回执与四个派生请求、按需拉取调度（节流窗口 → 窗口计算 → 缓存填充 → 卡片刷新）、翻页窗口移动、详情按需拉取与坏行/失败错误态、上下条导航、横幅四场景（文件变更 / reload 失败 / 宿主错误 / 非 JSONL 警示）、reload 全局复位、偏好恢复与写回、搜索接线与跳转、右键菜单（按需拉取完整值 / 定位源码）、折叠与调宽落盘、装配边界与清理 |
 
 ### 8.2 可测性接缝（行为不变，向后兼容）
 - `indexHost.ts`：新增 `WorkerLike` 最小接口与 `WorkerIndexHost(scriptPath, workerFactory?)` 第二参（默认仍为 `new Worker(path)`）。该类原先的「消息分发 / 异常退出 / 崩溃结算 / 释放归还」只能靠真实线程覆盖，现可注入伪 Worker 逐分支驱动 —— 这是把「不可测的稳定性命脉」变为「可回归」的关键一步。
 
 ### 8.3 回归门槛（工具强制 > 人工遵守）
 - 新增脚本：`pnpm test:coverage`（仅出报告）；`pnpm test:coverage:gate`（出报告 + 阈值校验，低于即 **exit 1**）。
-- CI 新增 `coverage` job：**阈值 行 91 / 分支 85 / 函数 84**（随覆盖提升逐轮抬升；历次 84/86/74 → 86/87/78 → 88/85/82 → 91/85/84）。
+- CI 新增 `coverage` job：**阈值 行 96 / 分支 86 / 函数 88**（随覆盖提升逐轮抬升；历次 84/86/74 → 86/87/78 → 88/85/82 → 91/85/84 → 96/86/88）。
 - **为何锁 Node 22**：Node 24 默认**不把测试文件计入**覆盖率 → 两版 `all files` 分母不同（同一文件逐行数值完全一致，如 `dataService` 两版均为 95.96/80.30/69.57）。跨版本共用阈值会被误杀，故 `verify` 矩阵仍跑 Node 22+24 的 `pnpm test`，覆盖率门槛只在 Node 22 执行。
 
 ### 8.4 待办与已知缺口
 - **死代码（不写测试凑数，宜择机删除）**：`parser/jsonParser.ts` 的 `FileByteReader.pathName` getter 全库零引用。
 - **剩余核心缺口**：`dataService.ts` 101-111（构建期 dispose/reload 竞态，需为 `ensureIndex` 加可控 host 接缝才能确定性覆盖）、`host/searchEngine.ts` 分支 80.52%、`indexer/lineIndex.ts` 分支 83.33%、`core/query.ts` 分支 78.57%。
-- **webview 视图层**（体量大）：`virtualScroll.ts` ✅、`detailTree.ts` ✅、`toolbar.ts` ✅ 已补强（见 8.1）；**仅剩 `webviewEntry.ts`**（65.77% 行 / 26.42% 函数）待补 —— 其为装配层，需覆盖记录拉取调度、详情跳转与导航联动等集成路径。
+- **webview 视图层已全部补强**：`virtualScroll.ts` ✅、`detailTree.ts` ✅、`toolbar.ts` ✅、`webviewEntry.ts` ✅（装配层集成，见 8.1）。
+- **`webviewEntry.ts` 剩余未覆盖（知情缺口，非缺陷）**：`109-110`（横幅 `actionLabel` 为空的分支——当前调用点均走默认值「重新加载」，属防御分支）、`174-184`/`189-190`（localStorage 读写的边界与异常子分支）、`544-546`（在途请求覆盖式取消——需两条拉取路径真并发，单测难以确定性构造）。
+- **装配层测试四要点（实测）**：① 每例 `setupWebviewDom()` 新建隔离 jsdom 后**显式调用导出的 `main()`**，可获得互不干扰的完整实例（模块顶层条件挂载在 node 环境不触发）；② 等待一律用 `node:timers/promises`——harness 把全局 `setTimeout` 包成 unref 版，用它等待会因事件循环空转提前退出；③ `RpcBus.request` 把 payload **展平到消息顶层**，回执须带同一 `requestId`（type 用 `HostEndpoint.RESULT` 走精确关联分支）；④ `INIT_TIMEOUT_MS`（8s）路径用 `t.mock.timers.enable({ apis: ['setTimeout'] })` + `tick(8000)` 覆盖，避免真实等待拖慢套件。
+- **模块级单例的测试约束（实测踩坑）**：右键菜单容器（`virtualScroll` 的 `ensureCtx()`）是**模块级单例**，仅首次创建时挂入当时的 document，后续复用同一节点 —— 同一测试进程内**只有首个右键用例**能在当前文档查到该容器。故「按需拉取完整值」「定位到源码行」两条右键路径须合并到同一用例验证。
+- **偏好恢复的时序前提**：`tryApplyPersisted()` 以 `state.fields` 就绪为前提（字段未到则策略性跳过、待字段到位后补齐）。凡测「恢复 fieldLayout / filter / searchQuery」**必先回执 `getSampleFields`**，否则不会应用（此为正确行为，非缺陷）。
+- **换页动画延迟**：jsdom 下 `matchMedia(matches:false)` → 非 reduce-motion 路径，翻页走「旧卡片滑出 → 动画落定后重建」，`onRangeChange` 与新卡片均延迟至动画结束（约 160ms + 错峰）——相关断言须等待 ≥400ms，否则会误判为「翻页未触发拉取」。
+- **查看仓库状态**：`git status` 应保持干净；本地诊断产物（`.diag_*.ts` / `.diag_*.txt` / `.coverage_*.txt` / `.test_*.txt` 等）已由 `.gitignore` 收编。
 - **视图层测试三坑（实测，务必记牢）**：① 浮层面板挂在 `document.body` 而非工具栏子树，须按文档查询；② 相邻用例共享同一 jsdom 文档时，前序残留节点会让内部文档级查询命中错误元素（表现为「点击无反应」）——每例先 `document.body.innerHTML = ''` 隔离；③ 工具栏导航按钮初始 `disabled`，jsdom 下 `.click()` 对 disabled 按钮是**空操作**（`dispatchEvent` 才会强发），须先走真实流程（`setSearchResult(total>0)`）启用。
 - **jsdom 选择器怪癖（实测踩坑，务必记牢）**：同一文档内存在多个 `VirtualRecordList` 时，`el.querySelector('.jlv-inner > *')` 会**返回 null**，而 `querySelectorAll` 用同一选择器却正常。视图层测试请直接用 DOM 属性（`.children` / `.firstElementChild`）访问，勿依赖 `> *` 选择器。
 - **harness 需桥接 rAF**：生产代码使用**裸** `requestAnimationFrame`（非 `window.rAF`），jsdom 只挂在 `window` 上 —— `domHarness` 已显式桥接 `requestAnimationFrame`/`cancelAnimationFrame` 到 `globalThis`，否则视图层动画回调抛 `requestAnimationFrame is not defined`（表现为「部分容器未展开」等隐晦症状）。
