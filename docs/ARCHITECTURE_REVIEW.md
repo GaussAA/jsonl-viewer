@@ -137,7 +137,10 @@ indexer/ parser/ infer/ perf/ constants.ts  ← 共享叶子（被 host/webview 
 
 ## 七、验收与下一步
 
-- 当前门禁有效：`tsc --noEmit` 零错误；`node --experimental-transform-types --test "src/**/*.test.ts"` **184/184**（含 webview jsdom 测试网；实测递归正常）；探针 `scripts/audit-stability.ts` 0 失败；300MB 回归全绿。
+- 当前门禁有效：`tsc --noEmit` 零错误；`node --experimental-transform-types --test "src/**/*.test.ts"` **184/184**（含 webview jsdom 测试网；实测递归正常）；探针 `scripts/audit-stability.ts` **0 失败**；300MB 回归 `scripts/validate-300mb.ts` **全绿**。
+- **八笔重构后全量复验（实测取证）**：稳定性探针覆盖 worker 回退 / 空文件 / 纯换行 / BOM / 深嵌套 5000 层 / 越界与 NaN 参数 / 批量上限 / dispose 后调用自愈 / 文件删除陈旧检测 / GBK / 坏路径，**未发现缺陷**；300MB（315.4MB）回归：307200 行索引 **352ms**、检查点 300 个（索引≈5KB）、随机读 300/300 与暴力解一致、分批读 4/4 窗口一致、三组关键词搜索集与全量暴力扫描**完全一致**。
+- **集成测试需本机网络**：`pnpm test:integration` 依赖 `@vscode/test-electron` 下载 VS Code；沙箱无直连外网且 `~/.vscode-test` 无缓存，本地未能执行——请在联网环境跑一次以覆盖 Extension Host 路径。
+- **T5 决策记录（暂不抽 store，附明确触发条件）**：`AppState` 维持「单一可变对象 + 闭包捕获」现状。理由：原评审的触发条件是「**继续膨胀**」，而本轮为收缩（`webviewEntry` 1112→822 行，−26%）；且 store / DI 类抽象已由 B1 判为过度设计（YAGNI）。**满足其一再抽**：① 新增 ≥2 个需跨模块共享的状态字段；② 同一状态字段出现 ≥3 处写入点且定位困难；③ 需要撤销·重放或状态快照。届时先补状态迁移测试网，再动结构。
 - **A 组已全部落地**（独立提交、每步全量测试不回归）：A1（抽 `core/query.ts` 消除 host→webview 反向依赖）、A3（拆 `mountViewer` 上帝函数）、A4（`releaseService.dispose` 补 `.catch` + 注册表抽纯模块 `host/serviceRegistry.ts` + `HostRuntime` 显式注入）、A2（`dispatchMessage` 改为 `HostHandlerMap` 注册表查表分发）。T1–T4/T7 债务状态见 §三表格。
 - **T7 亦已修复**（`fc0049b`）：异常回执经 `requestIdOf` 保留 requestId，webview 精确 reject 对应请求（不再弹全局横幅、不再挂死到超时）。
 - 报告与既有 `docs/STABILITY_AUDIT.md` 互补：稳定性审计关注"不崩溃"，本评审关注"结构可维护"。
