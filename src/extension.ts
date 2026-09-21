@@ -132,17 +132,16 @@ function isFsReadable(uri: vscode.Uri): boolean {
 /** 非本地资源的占位页面（自定义编辑器无法挂载查看器时展示）。 */
 function notLocalHtml(rawScheme: string): string {
   const scheme = rawScheme.replace(/[^\w+.-]/g, ''); // 防御性清洗，仅保留合法 scheme 字符
-  return `<!DOCTYPE html>
-<html lang="zh">
-<head>
-  <meta charset="UTF-8">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline';">
-</head>
-<body style="font-family:var(--vscode-font-family);padding:16px;line-height:1.6;color:var(--vscode-foreground)">
-  <p>JSONL Viewer 仅支持本地文件（或远程工作区中的文件）。</p>
-  <p style="opacity:.75">当前资源类型：<code>${scheme}</code>，没有可随机读取的磁盘路径。</p>
-</body>
-</html>`;
+  return renderWebviewShell({
+    lang: 'zh',
+    csp: `default-src 'none'; style-src 'unsafe-inline';`,
+    viewport: false,
+    title: 'JSONL Viewer',
+    bodyStyle: 'font-family:var(--vscode-font-family);padding:16px;line-height:1.6;color:var(--vscode-foreground)',
+    bodyInner:
+      '<p>JSONL Viewer 仅支持本地文件（或远程工作区中的文件）。</p>\n' +
+      `  <p style="opacity:.75">当前资源类型：<code>${scheme}</code>，没有可随机读取的磁盘路径。</p>`,
+  });
 }
 
 /** viewer 挂载目标：普通 WebviewPanel 与自定义编辑器面板的 webview 语义一致，统一抽象。 */
@@ -202,22 +201,55 @@ function mountViewer(target: ViewerTarget, uri: vscode.Uri, context: vscode.Exte
 }
 
 /**
+ * 统一的 webview HTML 外壳工厂（T6 收敛：viewer 模板与 notLocal 占位共用同一套结构，
+ * 仅 CSP / 是否加载脚本 / body 内容不同）。单一事实来源，模板改动只此一处。
+ */
+function renderWebviewShell(opts: {
+  lang: string;
+  csp: string;
+  nonce?: string;
+  title: string;
+  /** 是否输出 viewport meta（占位页不需要自适应视口）。默认 true。 */
+  viewport?: boolean;
+  /** <body> 内联样式（占位页用）。 */
+  bodyStyle?: string;
+  /** 外部脚本入口（viewer 需要；占位页不需要）。 */
+  scriptSrc?: string;
+  bodyInner: string;
+}): string {
+  const viewportMeta =
+    opts.viewport === false
+      ? ''
+      : '  <meta name="viewport" content="width=device-width, initial-scale=1.0">\n';
+  const bodyStyle = opts.bodyStyle ? ` style="${opts.bodyStyle}"` : '';
+  const scriptTag = opts.scriptSrc
+    ? `  <script nonce="${opts.nonce ?? ''}" src="${opts.scriptSrc}"></script>\n`
+    : '';
+  return `<!DOCTYPE html>
+<html lang="${opts.lang}">
+<head>
+  <meta charset="UTF-8">
+${viewportMeta}  <meta http-equiv="Content-Security-Policy" content="${opts.csp}">
+  <title>${opts.title}</title>
+</head>
+<body${bodyStyle}>
+  ${opts.bodyInner}
+${scriptTag}</body>
+</html>`;
+}
+
+/**
  * 渲染 webview 的 HTML 外壳（CSP + nonce + 外部脚本入口）。纯函数，便于复用与单测。
  */
 function renderViewerHtml(scriptUri: vscode.Uri, cspSource: string, nonce: string): string {
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';">
-  <title>JSONL Viewer</title>
-</head>
-<body>
-  <main id="app"></main>
-  <script nonce="${nonce}" src="${scriptUri}"></script>
-</body>
-</html>`;
+  return renderWebviewShell({
+    lang: 'en',
+    csp: `default-src 'none'; style-src ${cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';`,
+    nonce,
+    title: 'JSONL Viewer',
+    scriptSrc: scriptUri.toString(),
+    bodyInner: '<main id="app"></main>',
+  });
 }
 
 interface HostHandlerDeps {

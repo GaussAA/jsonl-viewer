@@ -54,7 +54,7 @@ indexer/ parser/ infer/ perf/ constants.ts  ← 共享叶子（被 host/webview 
 | **T3** | `host/* → webview/queryLogic.ts` | host 反向依赖 webview（见 §二） | 核心层依赖 UI 层；若 webview 引入浏览器专属依赖会污染宿主；层边界失真 | 中（DIP） | ~~A1：抽 core/ 共享 FieldCondition+matchesFilter+recordFieldValue~~ **✅ 已修复（A1）** |
 | **T4** | `extension.ts:46,83-91` | 模块级全局单例 `serviceRegistry` / `openPanels` 未注入；`releaseService` 中 `void hit.svc.dispose()` 无 `.catch` | 隐式全局状态难测；dispose 当前不 reject（所有 await 已 `.catch`）但脆弱 | 低~中 | ~~A4：dispose 补 .catch~~ **✅ 部分修复（A4：dispose 已补 .catch；registry 显式持有/注入待办）** |
 | **T5** | `webviewEntry.ts:200-1100` + `AppState:122-153` | 前端协调层膨胀（样式/横幅/分栏动画/响应式/搜索/过滤/导航/持久化/生命周期）+ 30+ 字段手写状态机 | 认知负担高；一处 state 字段改动波及众多闭包 | 中（前端 God Object） | 暂不拆（logic.ts 已隔离纯逻辑）；若加功能再抽协调器 |
-| **T6** | `extension.ts:164-177,127-140` | 两处 webview HTML 模板内联（mountViewer + notLocalHtml），CSP/nonce 内联 | 轻微重复；模板改动要改两处 | 低 | 抽 `renderWebviewHtml(nonce, csp)` 工厂 |
+| **T6** | `extension.ts` 两处 webview HTML 模板（viewer 外壳 + notLocal 占位） | 模板结构内联两处，CSP/nonce 重复表达 | 轻微重复；模板改动要改两处 | 低 | ~~抽 renderWebviewHtml 工厂~~ **✅ 已修复（T6）：收敛为单一 `renderWebviewShell` 外壳工厂，`renderViewerHtml` 与 `notLocalHtml` 共用** |
 | **T7** | `extension.ts:275` | 异常回执 `errReply(undefined, …)`，requestId 丢失 | webview 走全局 error handler 弹横幅，可能把单请求异常升级为全局提示 | 低 | 异常路径带 requestId 或明确走 banner 而非 error 广播 |
 | **T8** | `package.json:98` `test` 脚本 | `node --test "src/**/*.test.ts"` 依赖 Node ≥22 的 glob 递归行为 | 实测 OK（收集 150/150）；但 CI 若用老 Node 会静默跑 0 测试 | 低（已核实有效） | CI 锁定 `node>=22.18`；或在脚本加 `engines` 校验 |
 
@@ -96,7 +96,7 @@ indexer/ parser/ infer/ perf/ constants.ts  ← 共享叶子（被 host/webview 
 
 ### DRY
 - **良好**：`searchEngine`（搜索/过滤算法单份）、`logic.ts`（LRUCache/ThrottleQueue/窗口计算单份）、`protocol/rpc.ts`（协议类型单份）、`LineIndex.build`（构建单份）。
-- **局部重复**：端点映射——常量+联合类型在 rpc.ts 单份、handler 注册在调用点（A2 已消除 dispatchMessage 内 switch 分支）；HTML 模板两处（T6，待 A 组外处理）。
+- **局部重复**：端点映射——常量+联合类型在 rpc.ts 单份、handler 注册在调用点（A2 已消除 dispatchMessage 内 switch 分支）；HTML 模板已收敛为单一 `renderWebviewShell` 外壳工厂（T6 已修复）。
 - 总体：**DRY 达标**，T3 的动机恰是 DRY（前后端过滤一致），只是归属错了层；**A1 已将其归位到 `src/core/query.ts`**，两端仍共用单一事实来源，且层边界恢复单向。
 
 ### KISS
