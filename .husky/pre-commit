@@ -1,0 +1,11 @@
+# 提交前本地门禁（husky v9）。仅做「快检查」以保持提交即时性：
+#   oxlint 全仓约 20ms；prettier --check 约 1~2s
+# 类型检查（typecheck）与单元测试（290 用例）由 CI 矩阵与编辑器实时诊断把关，
+# 不在此重复，避免每次提交都等待数秒。
+#
+# 为何直调 node_modules 下的二进制而非 `pnpm lint`：
+#   钩子由 git 以独立 shell 调起，PATH 中未必有 pnpm；且本仓库对 pnpm run 有
+#   「冻结安装校验」副作用（见 docs/MAINTENANCE_AUDIT.md）。直调二进制跨平台稳定。
+#
+# 如需临时跳过：git commit --no-verify（请在 CI 变红之前自行补跑）。
+node node_modules/oxlint/bin/oxlint && node node_modules/prettier/bin/prettier.cjs --check .
