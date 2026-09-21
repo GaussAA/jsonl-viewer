@@ -17,6 +17,7 @@ samples/
 .diag_*.txt
 .coverage_*.txt
 .coverage_out.txt
+.integration_*.txt
 .pnpm_diag.txt
 .test_*.txt
 .tsc_out.txt

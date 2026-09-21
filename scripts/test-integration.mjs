@@ -9,7 +9,9 @@
 //   VSCODE_TEST_VERSION=insiders pnpm test:integration # insiders nightly
 //
 // 依赖：@vscode/test-electron（devDependency）
-// VS Code 缓存位置：~/.vscode-test/vscode-<version>-<platform>/
+// VS Code 缓存位置：**项目根** `.vscode-test/vscode-<platform>-archive-<version>/`
+//   （@vscode/test-electron 默认以当前工作目录为 cachePath，并非用户主目录；
+//     实测目录示例：.vscode-test/vscode-win32-x64-archive-1.100.0）
 // CI 中跑 Ubuntu 需要 xvfb-run 提供虚拟显示服务器。
 
 import { runTests } from '@vscode/test-electron';
