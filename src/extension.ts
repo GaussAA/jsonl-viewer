@@ -7,6 +7,7 @@ import {
   errReply,
   initReply,
   okReply,
+  requestIdOf,
   HostEndpoint,
   HostReply,
   RpcMessage,
@@ -354,7 +355,8 @@ function registerHostHandlers(deps: HostHandlerDeps): vscode.Disposable {
         ).response;
       } catch (e) {
         hostErr('处理消息时异常: ' + (e instanceof Error ? (e.stack || e.message) : String(e)));
-        response = errReply(undefined, e instanceof Error ? e.message : String(e));
+        // T7：异常回执保留 requestId，使 webview 精确 reject 对应请求（而非升级为全局 error 横幅）。
+        response = errReply(requestIdOf(message), e instanceof Error ? e.message : String(e));
       }
       // 回执发送同样纳入 try：避免「面板已销毁」等异常逃逸成未处理 rejection。
       if (response) {

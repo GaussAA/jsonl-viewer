@@ -208,6 +208,19 @@ function isObject(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null;
 }
 
+/**
+ * 从任意消息中安全取 requestId（无该字段 / 非字符串 → undefined）。
+ *
+ * 用途（T7）：异常回执须保留请求关联——带 requestId 的 ERROR 会被 webview 精确 reject 到
+ * 对应请求（`webview/rpc.ts` 命中 pending 即早返回），而非升级为全局 error 横幅、
+ * 也不留下永不 settle 的在途请求。READY 之类无 requestId 的端点自然得到 undefined。
+ */
+export function requestIdOf(msg: unknown): string | undefined {
+  if (!isObject(msg)) return undefined;
+  const rid = (msg as { requestId?: unknown }).requestId;
+  return typeof rid === 'string' ? rid : undefined;
+}
+
 /** 校验并归一化一批待渲染记录，附带 hasMore 推断。 */
 export function buildRecordsPayload(
   startLine: number,
@@ -261,7 +274,7 @@ export interface DispatchResult {
 export async function dispatchMessage(msg: unknown, handlers: HostHandlerMap): Promise<DispatchResult> {
   if (!isHostRequest(msg)) return { response: undefined };
   // READY 端点无 requestId 字段，故安全取值（可能 undefined）；errReply 已兼容 undefined 入参。
-  const requestId = (msg as { requestId?: string }).requestId;
+  const requestId = requestIdOf(msg);
   const registry = handlers as unknown as Record<string, (req: HostRequest) => Promise<HostResponse | undefined>>;
   const handler = registry[msg.type];
   if (!handler) {

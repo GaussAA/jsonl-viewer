@@ -7,6 +7,7 @@ import {
   initReply,
   okReply,
   isHostRequest,
+  requestIdOf,
   type HostHandlerMap,
 } from '../rpc.ts';
 import type { OverviewPayload } from '../rpc.ts';
@@ -209,4 +210,59 @@ test('RELOAD 回新概览；CANCEL 无回执', async () => {
 test('未知端点被 isHostRequest 过滤（无回执，不进 handler）', async () => {
   const { response } = await call({ type: 'nope', requestId: 'x' }, baseHandlers);
   assert.equal(response, undefined);
+});
+
+/* -------- T7：异常回执保留 requestId（避免全局横幅 + 在途请求永不 settle） -------- */
+
+test('requestIdOf：字符串取回；缺失 / 非字符串 / 非对象一律 undefined', () => {
+  assert.equal(requestIdOf({ type: 'x', requestId: 'rid-9' }), 'rid-9');
+  assert.equal(requestIdOf({ type: 'x' }), undefined, '缺失字段');
+  assert.equal(requestIdOf({ requestId: 123 }), undefined, '非字符串');
+  assert.equal(requestIdOf(null), undefined, 'null');
+  assert.equal(requestIdOf('nope'), undefined, '非对象');
+});
+
+test('handler 抛异常：回执为 ERROR 且保留 requestId', async () => {
+  const { response } = await call(
+    { type: HostEndpoint.GET_OVERVIEW, requestId: 'rid-err' },
+    {
+      ...baseHandlers,
+      [HostEndpoint.GET_OVERVIEW]: () => {
+        throw new Error('boom');
+      },
+    }
+  );
+  assert.ok(response, '异常也须回执');
+  assert.equal(response.type, HostReply.ERROR);
+  assert.equal(
+    (response as unknown as { requestId?: string }).requestId,
+    'rid-err',
+    'requestId 被保留，webview 可精确 reject 该请求'
+  );
+  assert.equal((response as unknown as { message: string }).message, 'boom');
+});
+
+test('handler 异步 reject：回执为 ERROR 且保留 requestId', async () => {
+  const { response } = await call(
+    { type: HostEndpoint.SEARCH, requestId: 'rid-async' },
+    {
+      ...baseHandlers,
+      [HostEndpoint.SEARCH]: async () => {
+        throw new Error('async boom');
+      },
+    }
+  );
+  assert.equal(response?.type, HostReply.ERROR);
+  assert.equal((response as unknown as { requestId?: string }).requestId, 'rid-async');
+});
+
+test('无 requestId 的端点（READY）抛异常：回执 requestId 为 undefined', async () => {
+  const { response } = await call(req(HostEndpoint.READY), {
+    ...baseHandlers,
+    [HostEndpoint.READY]: () => {
+      throw new Error('ready boom');
+    },
+  });
+  assert.equal(response?.type, HostReply.ERROR);
+  assert.equal((response as unknown as { requestId?: string }).requestId, undefined);
 });

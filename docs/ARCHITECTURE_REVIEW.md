@@ -55,7 +55,7 @@ indexer/ parser/ infer/ perf/ constants.ts  ← 共享叶子（被 host/webview 
 | **T4** | `extension.ts:46,83-91` | 模块级全局单例 `serviceRegistry` / `openPanels` 未注入；`releaseService` 中 `void hit.svc.dispose()` 无 `.catch` | 隐式全局状态难测；dispose 当前不 reject（所有 await 已 `.catch`）但脆弱 | 低~中 | ~~A4：dispose 补 .catch~~ **✅ 部分修复（A4：dispose 已补 .catch；registry 显式持有/注入待办）** |
 | **T5** | `webviewEntry.ts` + `AppState` | 前端协调层膨胀（样式/横幅/分栏动画/响应式/搜索/过滤/导航/持久化/生命周期）+ 30+ 字段手写状态机 | 认知负担高；一处 state 字段改动波及众多闭包 | 中（前端 God Object） | **增量+测试网（2026-09-20 钦定），进行中**：① 测试网基建 ✅ #29（domHarness + webviewEntry.test 冒烟测试）；② `webviewEntry` 导出化 ✅ #28（`main` 导出 + 条件挂载）；③ 抽 `columnLayout` ✅ #30（收起/展开动画 + 拖拽调宽 + 窄容器响应式抽屉 → 独立工厂 `createColumnLayout(deps)`，行为抽取**不搬 DOM 创建顺序**，`webviewEntry.ts` 1112→951 行，新增模块级回归测试 6 项）；④ 抽 `queryActions` ✅ #31（supersede/jumpToMatch/runSearch/stepSearch/runFilter/clearFilterForCond/applyLayout → 独立工厂 `createQueryActions(deps)`，list/toolbar 经访问器晚绑定，`webviewEntry.ts` 951→834 行，新增模块级回归测试 10 项）；⑤ 抽 `persistence` ✅ #32（偏好防抖写回 → `createPersistence(deps)`，`webviewEntry.ts` 834→822 行，新增模块级回归测试 3 项）。**T5 收尾：`webviewEntry.ts` 由 1112 → 822 行（−290，−26%），新增 3 模块（columnLayout/queryActions/persistence）+ 19 项模块级测试**。每步 tsc/test/build 全绿且独立提交 |
 | **T6** | `extension.ts` 两处 webview HTML 模板（viewer 外壳 + notLocal 占位） | 模板结构内联两处，CSP/nonce 重复表达 | 轻微重复；模板改动要改两处 | 低 | ~~抽 renderWebviewHtml 工厂~~ **✅ 已修复（T6）：收敛为单一 `renderWebviewShell` 外壳工厂，`renderViewerHtml` 与 `notLocalHtml` 共用** |
-| **T7** | `extension.ts:275` | 异常回执 `errReply(undefined, …)`，requestId 丢失 | webview 走全局 error handler 弹横幅，可能把单请求异常升级为全局提示 | 低 | 异常路径带 requestId 或明确走 banner 而非 error 广播 |
+| **T7** | `extension.ts` 消息处理外层 catch | 异常回执 `errReply(undefined, …)`，requestId 丢失 | webview 走全局 error handler 弹横幅，且该在途请求永不 settle（只能等超时） | 低 | ~~异常路径带 requestId~~ **✅ 已修复（T7）**：新增 `protocol/rpc.ts#requestIdOf(msg)` 安全取值；`extension.ts` 外层 catch 与 `dispatchMessage` 均改用它，异常回执保留 requestId → webview 命中 pending 即精确 reject 并早返回（不弹全局横幅）。新增 4 项回归测试 |
 | **T8** | `package.json:98` `test` 脚本 | `node --test "src/**/*.test.ts"` 依赖 Node ≥22 的 glob 递归行为 | 实测 OK（收集 154/154）；但 CI 若用老 Node 会静默跑 0 测试 | 低（已核实有效） | CI 锁定 `node>=22.18`；脚本已加 `--experimental-transform-types`（webview 测试网引入 jsdom + 含不可剥离 TS 语法，需 transform 模式）；`engines` 已声明 `node>=22.18` |
 
 > 实测已排除的疑似债务：`npm test` glob **确实递归**（150 全绿，非 0）；`DataService.dispose` 实际不 reject（`reader.close`/`host.dispose`/`building` 三处 await 均 `.catch`）；worker 与主线程双实现算法**未重复**（搜索/过滤单份 `searchEngine.ts`，build 单份 `LineIndex.build`）。
@@ -136,6 +136,6 @@ indexer/ parser/ infer/ perf/ constants.ts  ← 共享叶子（被 host/webview 
 
 ## 七、验收与下一步
 
-- 当前门禁有效：`tsc --noEmit` 零错误；`node --experimental-transform-types --test "src/**/*.test.ts"` **173/173**（含 webview jsdom 测试网；实测递归正常）；探针 `scripts/audit-stability.ts` 0 失败；300MB 回归全绿。
+- 当前门禁有效：`tsc --noEmit` 零错误；`node --experimental-transform-types --test "src/**/*.test.ts"` **177/177**（含 webview jsdom 测试网；实测递归正常）；探针 `scripts/audit-stability.ts` 0 失败；300MB 回归全绿。
 - **A 组已全部落地**（独立提交、每步全量测试不回归）：A1（抽 `core/query.ts` 消除 host→webview 反向依赖）、A3（拆 `mountViewer` 上帝函数）、A4（`releaseService.dispose` 补 `.catch`）、A2（`dispatchMessage` 改为 `HostHandlerMap` 注册表查表分发）。T1–T4 债务状态见 §三表格。
 - 报告与既有 `docs/STABILITY_AUDIT.md` 互补：稳定性审计关注"不崩溃"，本评审关注"结构可维护"。
