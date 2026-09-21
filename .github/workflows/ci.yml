@@ -76,6 +76,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # 工作流自身的静态校验（actionlint）。
+      # 为何必须：本类错误（上下文用错位置、键名拼错、表达式类型不符）**只在运行时才暴露**，
+      # 且会**静默让整份工作流失效** —— 2026-09 的 `if: secrets.X != ''` 即让 release.yml
+      # 失效数日（每次 push 都产生一个无 job 的失败运行）而无人察觉（见 MAINTENANCE_AUDIT §2.6）。
+      # 用官方镜像并**钉死版本**，而非执行远端 `main` 分支的下载脚本 —— 避免供应链风险与版本漂移。
+      - name: Lint workflow files (actionlint)
+        uses: docker://rhysd/actionlint:1.7.12
+        with:
+          args: -color
+
       - name: Setup Node.js 22
         uses: actions/setup-node@v4
         with:
