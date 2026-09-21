@@ -59,6 +59,8 @@ function makeList(pageSize?: number): Harness {
       return Promise.resolve({ ok: true, value: { id: line } });
     },
   };
+  // 用例级隔离：清空文档，避免前序用例残留的列表干扰选择器与内部查询。
+  globalThis.document.body.innerHTML = '';
   const list = pageSize === undefined ? new VirtualRecordList(cb) : new VirtualRecordList(cb, pageSize);
   globalThis.document.body.append(list.scrollEl, list.pagerEl);
   return { list, calls, loaded };

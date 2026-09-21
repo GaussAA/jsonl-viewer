@@ -25,6 +25,8 @@ interface Harness {
 
 function makeTree(): Harness {
   const doc = globalThis.document;
+  // 用例级隔离：清空文档，避免前序用例残留节点被内部文档级查询命中。
+  doc.body.innerHTML = '';
   const host = doc.createElement('div');
   doc.body.append(host);
   const nav = { prev: 0, next: 0 };
