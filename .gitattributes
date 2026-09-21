@@ -1,0 +1,17 @@
+# 统一行尾为 LF —— 与 .editorconfig（end_of_line=lf）和 .prettierrc.json（endOfLine=lf）一致。
+#
+# 为何必须显式声明：Git 默认按 core.autocrlf 在 checkout 时把 LF 转成 CRLF，
+# 而 prettier --check 期望 LF —— 于是「刚 checkout 完」的文件会被判为格式不合规，
+# 使 pre-commit 钩子误报（工具撒谎比没有工具更糟）。
+# 声明 eol=lf 后，工作区始终为 LF，三处约定一致。
+* text=auto eol=lf
+
+# 二进制文件不参与行尾转换与 diff 文本化
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.svg text eol=lf
+*.vsix binary
+*.sha256 text eol=lf
