@@ -7,12 +7,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import {
-  jsonCountOf,
-  jsonKindOf,
-  makeSummary,
-  summarizeRawLine,
-} from '../recordSummary.ts';
+import { jsonCountOf, jsonKindOf, makeSummary, summarizeRawLine } from '../recordSummary.ts';
 
 /* ---------------- makeSummary ---------------- */
 

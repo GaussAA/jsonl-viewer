@@ -225,10 +225,13 @@ describe('createColumnLayout（T5 #30 抽取回归）', () => {
     const resizer = deps.resizer as HTMLDivElement;
     const leftCol = deps.leftCol as HTMLDivElement;
     // jsdom 无布局与指针捕获：补桩（宽 320 + 位移 160 = 480）
-    (leftCol as unknown as { getBoundingClientRect: () => { width: number } }).getBoundingClientRect = () => ({
+    (
+      leftCol as unknown as { getBoundingClientRect: () => { width: number } }
+    ).getBoundingClientRect = () => ({
       width: 320,
     });
-    (resizer as unknown as { setPointerCapture: (id?: number) => void }).setPointerCapture = () => {};
+    (resizer as unknown as { setPointerCapture: (id?: number) => void }).setPointerCapture =
+      () => {};
 
     createColumnLayout(deps);
     dispatchPointer(resizer, 'pointerdown', 100);
@@ -246,10 +249,13 @@ describe('createColumnLayout（T5 #30 抽取回归）', () => {
     const { deps } = makeFixtures(900);
     const resizer = deps.resizer as HTMLDivElement;
     const leftCol = deps.leftCol as HTMLDivElement;
-    (leftCol as unknown as { getBoundingClientRect: () => { width: number } }).getBoundingClientRect = () => ({
+    (
+      leftCol as unknown as { getBoundingClientRect: () => { width: number } }
+    ).getBoundingClientRect = () => ({
       width: 320,
     });
-    (resizer as unknown as { setPointerCapture: (id?: number) => void }).setPointerCapture = () => {};
+    (resizer as unknown as { setPointerCapture: (id?: number) => void }).setPointerCapture =
+      () => {};
     createColumnLayout(deps);
 
     dispatchPointer(resizer, 'pointerdown', 500);
@@ -260,7 +266,8 @@ describe('createColumnLayout（T5 #30 抽取回归）', () => {
   it('折叠态禁止拖拽（pointerdown 直接返回）', () => {
     const { deps } = makeFixtures(900, { reduceMotion: true });
     const resizer = deps.resizer as HTMLDivElement;
-    (resizer as unknown as { setPointerCapture: (id?: number) => void }).setPointerCapture = () => {};
+    (resizer as unknown as { setPointerCapture: (id?: number) => void }).setPointerCapture =
+      () => {};
     createColumnLayout(deps);
 
     (deps.collapseBtn as HTMLButtonElement).click(); // 折叠
@@ -272,10 +279,13 @@ describe('createColumnLayout（T5 #30 抽取回归）', () => {
     const { deps, calls } = makeFixtures(900);
     const resizer = deps.resizer as HTMLDivElement;
     const leftCol = deps.leftCol as HTMLDivElement;
-    (leftCol as unknown as { getBoundingClientRect: () => { width: number } }).getBoundingClientRect = () => ({
+    (
+      leftCol as unknown as { getBoundingClientRect: () => { width: number } }
+    ).getBoundingClientRect = () => ({
       width: 320,
     });
-    (resizer as unknown as { setPointerCapture: (id?: number) => void }).setPointerCapture = () => {};
+    (resizer as unknown as { setPointerCapture: (id?: number) => void }).setPointerCapture =
+      () => {};
     createColumnLayout(deps);
 
     dispatchPointer(resizer, 'pointerdown', 100);
@@ -288,11 +298,19 @@ describe('createColumnLayout（T5 #30 抽取回归）', () => {
   it('初始化：持久化宽度存在时即应用，缺省则不写内联宽', () => {
     const withSaved = makeFixtures(900, { savedWidth: 400 });
     createColumnLayout(withSaved.deps);
-    assert.strictEqual((withSaved.deps.leftCol as HTMLDivElement).style.width, '400px', '应用持久化宽度');
+    assert.strictEqual(
+      (withSaved.deps.leftCol as HTMLDivElement).style.width,
+      '400px',
+      '应用持久化宽度'
+    );
 
     const noSaved = makeFixtures(900);
     createColumnLayout(noSaved.deps);
-    assert.strictEqual((noSaved.deps.leftCol as HTMLDivElement).style.width, '', '无持久化值不写内联宽');
+    assert.strictEqual(
+      (noSaved.deps.leftCol as HTMLDivElement).style.width,
+      '',
+      '无持久化值不写内联宽'
+    );
   });
 
   it('宽容器 + 持久化折叠态：初始化即落定折叠', () => {
@@ -340,13 +358,17 @@ describe('createColumnLayout（T5 #30 抽取回归）', () => {
 
 /** 派发指针事件（jsdom 无 PointerEvent 构造器时用 MouseEvent 承载 clientX）。 */
 function dispatchPointer(target: Element, type: string, clientX: number): void {
-  const win = (globalThis as unknown as { window: { MouseEvent: new (t: string, o?: unknown) => Event } }).window;
+  const win = (
+    globalThis as unknown as { window: { MouseEvent: new (t: string, o?: unknown) => Event } }
+  ).window;
   target.dispatchEvent(new win.MouseEvent(type, { clientX, bubbles: true }));
 }
 
 /** 派发普通鼠标事件。 */
 function dispatchMouse(target: Element, type: string): void {
-  const win = (globalThis as unknown as { window: { MouseEvent: new (t: string, o?: unknown) => Event } }).window;
+  const win = (
+    globalThis as unknown as { window: { MouseEvent: new (t: string, o?: unknown) => Event } }
+  ).window;
   target.dispatchEvent(new win.MouseEvent(type, { bubbles: true }));
 }
 

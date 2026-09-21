@@ -26,7 +26,10 @@ function fail(msg: string, detail?: string): void {
   console.log(`  ❌ ${msg}${detail ? `\n      ↳ ${detail}` : ''}`);
 }
 
-async function tmpFile(lines: string[], name = 'data.jsonl'): Promise<{ dir: string; file: string }> {
+async function tmpFile(
+  lines: string[],
+  name = 'data.jsonl'
+): Promise<{ dir: string; file: string }> {
   const dir = await mkdtemp(join(tmpdir(), 'jlv-audit-'));
   const file = join(dir, name);
   await writeFile(file, lines.join('\n'));
@@ -245,7 +248,10 @@ async function main(): Promise<void> {
         if (r === 'TIMEOUT') fail('dispose 后 search 挂起（>4s）');
         else pass('dispose 后 search 未抛错（已自愈重建）');
       } catch (e) {
-        fail('dispose 后 search 抛错（调用方需自行兜底）', e instanceof Error ? e.message : String(e));
+        fail(
+          'dispose 后 search 抛错（调用方需自行兜底）',
+          e instanceof Error ? e.message : String(e)
+        );
       }
       await ds.dispose();
     } catch (e) {
@@ -271,7 +277,9 @@ async function main(): Promise<void> {
         if (r === 'TIMEOUT') fail('文件删除后 readRecords 挂起');
         else pass('文件删除后 readRecords 仍走已建索引（句柄有效），未崩溃');
       } catch (e) {
-        pass(`文件删除后 readRecords 抛错但被调用方可见（${e instanceof Error ? e.message : String(e)}）`);
+        pass(
+          `文件删除后 readRecords 抛错但被调用方可见（${e instanceof Error ? e.message : String(e)}）`
+        );
       }
       await ds.dispose();
     } catch (e) {
@@ -298,7 +306,9 @@ async function main(): Promise<void> {
       const p = await ds.readRecords(0, 2);
       const it0 = p.items[0];
       if (it0?.ok === false) {
-        pass(`GBK 行被判为非法（error="${it0.error?.slice(0, 50)}"）——但无"编码"提示，用户可能困惑`);
+        pass(
+          `GBK 行被判为非法（error="${it0.error?.slice(0, 50)}"）——但无"编码"提示，用户可能困惑`
+        );
       } else {
         pass('GBK 行被容错解析（乱码但未报错）');
       }
@@ -315,7 +325,9 @@ async function main(): Promise<void> {
   /* ---------- J. 文件权限不可读 ---------- */
   console.log('\n[J] 不存在的路径 / 目录路径');
   {
-    const ds = new DataService('file:///nope', join(tmpdir(), 'jlv-not-exist-xyz.jsonl'), { sampleLines: 5 });
+    const ds = new DataService('file:///nope', join(tmpdir(), 'jlv-not-exist-xyz.jsonl'), {
+      sampleLines: 5,
+    });
     try {
       await withTimeout(ds.getOverview(), 4000, 'overview-missing');
       fail('不存在的文件 getOverview 未抛错（应向上抛出以便 UI 提示）');

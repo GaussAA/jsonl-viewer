@@ -100,10 +100,7 @@ export class LineIndex implements LineIndexStats {
 
   /** 流式顺序扫描，构建稀疏检查点索引。返回可查询的 LineIndex（含统计）。 */
   static async build(
-    handle:
-      | NodeJS.ReadableStream
-      | AsyncIterable<Buffer | string>
-      | Iterable<Buffer | string>,
+    handle: NodeJS.ReadableStream | AsyncIterable<Buffer | string> | Iterable<Buffer | string>,
     opts: LineIndexOpts = {}
   ): Promise<LineIndex> {
     const interval = opts.checkpointInterval ?? INDEX_CHECKPOINT_INTERVAL;

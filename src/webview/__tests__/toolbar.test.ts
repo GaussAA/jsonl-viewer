@@ -67,7 +67,9 @@ const byTitle = (h: Harness, title: string): HTMLButtonElement => {
 
 /** 派发输入事件（触发防抖搜索）。 */
 function fireInput(el: HTMLElement): void {
-  const win = (globalThis as unknown as { window: { Event: new (t: string, o?: unknown) => Event } }).window;
+  const win = (
+    globalThis as unknown as { window: { Event: new (t: string, o?: unknown) => Event } }
+  ).window;
   el.dispatchEvent(new win.Event('input', { bubbles: true }));
 }
 
@@ -78,7 +80,14 @@ describe('createToolbar（视图层覆盖率补强）', () => {
 
   it('update：文件名 / 行数 / 范围 / 构建耗时 / 状态文案落到对应元素', () => {
     const h = makeToolbar();
-    h.tb.update({ fileName: 'big.jsonl', totalLines: 1000, loadedLines: 42, range: [0, 20], buildMs: 12, status: 'ready' });
+    h.tb.update({
+      fileName: 'big.jsonl',
+      totalLines: 1000,
+      loadedLines: 42,
+      range: [0, 20],
+      buildMs: 12,
+      status: 'ready',
+    });
 
     assert.strictEqual(h.tb.els.fileNameEl.textContent, 'big.jsonl', '文件名');
     assert.match(h.tb.els.totalLinesEl.textContent ?? '', /1,000/, '总行数（千分位）');
@@ -91,11 +100,26 @@ describe('createToolbar（视图层覆盖率补强）', () => {
   it('update：非就绪状态不带 ready 类；错误态带 error 类并展示自定义文案', () => {
     const h = makeToolbar();
 
-    h.tb.update({ fileName: 'a', totalLines: 0, loadedLines: 0, range: [0, 0], buildMs: undefined, status: 'indexing' });
+    h.tb.update({
+      fileName: 'a',
+      totalLines: 0,
+      loadedLines: 0,
+      range: [0, 0],
+      buildMs: undefined,
+      status: 'indexing',
+    });
     assert.ok(!/ready/.test(h.tb.els.statusRootEl.className), '索引中不带 ready');
     assert.ok(!/error/.test(h.tb.els.statusRootEl.className), '索引中不带 error');
 
-    h.tb.update({ fileName: 'a', totalLines: 0, loadedLines: 0, range: [0, 0], buildMs: undefined, status: 'error', statusText: '索引失败' });
+    h.tb.update({
+      fileName: 'a',
+      totalLines: 0,
+      loadedLines: 0,
+      range: [0, 0],
+      buildMs: undefined,
+      status: 'error',
+      statusText: '索引失败',
+    });
     assert.match(h.tb.els.statusRootEl.className, /error/, '错误态样式类');
     assert.strictEqual(h.tb.els.statusEl.textContent, '索引失败', '自定义状态文案');
   });
@@ -176,7 +200,11 @@ describe('createToolbar（视图层覆盖率补强）', () => {
 
     await wait(220); // 淡出 120ms 后置 display:none（定时器被 unref，须用原生定时器维持循环）
     assert.strictEqual(panel.style.display, 'none', '淡出后隐藏');
-    assert.strictEqual(doc.querySelectorAll('.jlv-float-panel').length, 1, '单实例复用：未移除 DOM');
+    assert.strictEqual(
+      doc.querySelectorAll('.jlv-float-panel').length,
+      1,
+      '单实例复用：未移除 DOM'
+    );
   });
 
   it('字段布局面板：打开后渲染字段列表；勾选变更即回调布局', () => {
@@ -192,21 +220,30 @@ describe('createToolbar（视图层覆盖率补强）', () => {
     const rows = Array.from(list.querySelectorAll('.jlv-layout-row'));
     assert.ok(rows.length >= 2, `字段行已渲染（实际 ${rows.length}）`);
 
-    const before = h.calls.layout.length;
+    const beforeCount = h.calls.layout.length;
     const cb = rows[0].querySelector<HTMLInputElement>('.jlv-layout-hidden');
     assert.ok(cb, '字段行带显隐勾选框');
     cb.checked = !cb.checked;
     cb.dispatchEvent(
-      new (globalThis as unknown as { window: { Event: new (t: string, o?: unknown) => Event } }).window.Event('change', {
+      new (
+        globalThis as unknown as { window: { Event: new (t: string, o?: unknown) => Event } }
+      ).window.Event('change', {
         bubbles: true,
       })
     );
-    assert.ok(h.calls.layout.length > before, '变更后回调 onApplyLayout');
+    assert.ok(h.calls.layout.length > beforeCount, '变更后回调 onApplyLayout');
   });
 
   it('refresh / destroy：均不抛错，且 destroy 后交互安全', () => {
     const h = makeToolbar();
-    h.tb.update({ fileName: 'a', totalLines: 5, loadedLines: 5, range: [0, 5], buildMs: 1, status: 'ready' });
+    h.tb.update({
+      fileName: 'a',
+      totalLines: 5,
+      loadedLines: 5,
+      range: [0, 5],
+      buildMs: 1,
+      status: 'ready',
+    });
     assert.doesNotThrow(() => h.tb.refresh());
     assert.doesNotThrow(() => h.tb.destroy());
     assert.doesNotThrow(() => byTitle(h, '下一个匹配').click(), 'destroy 后点击安全');

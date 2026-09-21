@@ -35,13 +35,7 @@ export interface FieldCondition {
 /* ------------------- 值 → 类型（本地轻量实现） ------------------- */
 
 export type LocalFieldType =
-  | 'string'
-  | 'number'
-  | 'boolean'
-  | 'null'
-  | 'object'
-  | 'array'
-  | 'undefined';
+  'string' | 'number' | 'boolean' | 'null' | 'object' | 'array' | 'undefined';
 
 export function fieldTypeOf(value: unknown): LocalFieldType {
   if (value === null) return 'null';
@@ -112,7 +106,9 @@ export function matchesFilter(value: unknown, cond: FieldCondition): boolean {
     }
     case 'contains': {
       const s = stringifyValue(value);
-      ok = cond.value === '' || (ci ? s.toLowerCase().includes(cond.value.toLowerCase()) : s.includes(cond.value));
+      ok =
+        cond.value === '' ||
+        (ci ? s.toLowerCase().includes(cond.value.toLowerCase()) : s.includes(cond.value));
       break;
     }
     default:

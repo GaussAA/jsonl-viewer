@@ -32,8 +32,7 @@ test('escapeHtml: 单引号被正确转义', () => {
 
 test('escapeHtml: 组合所有危险字符', () => {
   const input = `<script>alert("x'ss")</script>&`;
-  const expected =
-    '&lt;script&gt;alert(&quot;x&#39;ss&quot;)&lt;/script&gt;&amp;';
+  const expected = '&lt;script&gt;alert(&quot;x&#39;ss&quot;)&lt;/script&gt;&amp;';
   assert.equal(escapeHtml(input), expected);
 });
 

@@ -61,7 +61,12 @@ test('readRecords：按需读回正确记录，坏行入 knownBadLines', async (
 test('getSampleFields：抽样推断字段（对象记录抽键位，数组记录映射 $array）', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
   try {
-    const file = await makeFile(dir, ['{"name":"a","tags":[1]}', '{"name":"b","tags":[2]}', '[1,2]', '[3,4]']);
+    const file = await makeFile(dir, [
+      '{"name":"a","tags":[1]}',
+      '{"name":"b","tags":[2]}',
+      '[1,2]',
+      '[3,4]',
+    ]);
     const ds = makeService(file);
     const res = await ds.getSampleFields();
     const keys = res.fields.map((f) => f.key);
@@ -76,7 +81,11 @@ test('getSampleFields：抽样推断字段（对象记录抽键位，数组记�
 test('search / filter：返回匹配行号', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
   try {
-    const file = await makeFile(dir, ['{"id":1,"tag":"a"}', '{"id":2,"tag":"b"}', '{"id":3,"tag":"a"}']);
+    const file = await makeFile(dir, [
+      '{"id":1,"tag":"a"}',
+      '{"id":2,"tag":"b"}',
+      '{"id":3,"tag":"a"}',
+    ]);
     const ds = makeService(file);
     const s = await ds.search('"tag":"a"');
     assert.deepEqual(s.matches, [0, 2]);

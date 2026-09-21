@@ -54,7 +54,11 @@ interface HostRuntime {
 }
 
 /** 构造该 uri 的 DataService（读取配置 + worker 脚本路径 + 限速进度日志）。 */
-function makeDataService(key: string, uri: vscode.Uri, context: vscode.ExtensionContext): DataService {
+function makeDataService(
+  key: string,
+  uri: vscode.Uri,
+  context: vscode.ExtensionContext
+): DataService {
   const sampleLines = vscode.workspace
     .getConfiguration('jsonlViewer')
     .get<number>('sampleLines', 200);
@@ -120,7 +124,8 @@ function notLocalHtml(rawScheme: string): string {
     csp: `default-src 'none'; style-src 'unsafe-inline';`,
     viewport: false,
     title: 'JSONL Viewer',
-    bodyStyle: 'font-family:var(--vscode-font-family);padding:16px;line-height:1.6;color:var(--vscode-foreground)',
+    bodyStyle:
+      'font-family:var(--vscode-font-family);padding:16px;line-height:1.6;color:var(--vscode-foreground)',
     bodyInner:
       '<p>JSONL Viewer 仅支持本地文件（或远程工作区中的文件）。</p>\n' +
       `  <p style="opacity:.75">当前资源类型：<code>${scheme}</code>，没有可随机读取的磁盘路径。</p>`,
@@ -163,7 +168,9 @@ function mountViewer(
   // 大文件扫描时主线程（webview 消息循环 / 其它扩展）不被阻塞；spawn 失败自动回退主线程。
   // 按 uri 复用：同一文件的多个视图（默认编辑器 / 命令面板）共享同一份索引与 worker。
   const serviceKey = uri.toString();
-  const data = runtime.services.acquire(serviceKey, () => makeDataService(serviceKey, uri, context));
+  const data = runtime.services.acquire(serviceKey, () =>
+    makeDataService(serviceKey, uri, context)
+  );
   /**
    * 向 webview 发送消息。
    *
@@ -271,7 +278,7 @@ function registerHostHandlers(deps: HostHandlerDeps): vscode.Disposable {
         `无法在编辑器中定位第 ${line + 1} 行：文件过大，VS Code 不能以文本文档打开。` +
           `可改用「复制该行 JSON」查看内容。`
       );
-      hostErr('jumpToSource 失败: ' + (e instanceof Error ? (e.stack || e.message) : String(e)));
+      hostErr('jumpToSource 失败: ' + (e instanceof Error ? e.stack || e.message : String(e)));
     }
   };
 
@@ -294,7 +301,9 @@ function registerHostHandlers(deps: HostHandlerDeps): vscode.Disposable {
               okReply(HostReply.OVERVIEW, req.requestId, await data.getOverview()),
             [HostEndpoint.READ_RECORDS]: async (req) => {
               // 真正的可中断：读批逐行检测 cancel 集合，被取消即提前返回。
-              const p = await data.readRecords(req.startLine, req.count, () => cancel.has(req.requestId));
+              const p = await data.readRecords(req.startLine, req.count, () =>
+                cancel.has(req.requestId)
+              );
               cancel.delete(req.requestId);
               return okReply(HostReply.RECORDS, req.requestId, p);
             },
@@ -307,14 +316,20 @@ function registerHostHandlers(deps: HostHandlerDeps): vscode.Disposable {
               return undefined;
             },
             [HostEndpoint.GET_SAMPLE_FIELDS]: async (req) =>
-              okReply(HostReply.SAMPLE_FIELDS, req.requestId, await data.getSampleFields(req.count)),
+              okReply(
+                HostReply.SAMPLE_FIELDS,
+                req.requestId,
+                await data.getSampleFields(req.count)
+              ),
             [HostEndpoint.JUMP_TO_SOURCE]: async (req) => {
               await jumpToSource(req.line);
               return okReply(HostReply.RESULT, req.requestId, { jumped: true });
             },
             // 全文/字段搜索（宿主流式扫描；被 cancel 则中断）。
             [HostEndpoint.SEARCH]: async (req) => {
-              const p = await data.search(req.query, req.field, req.scope, () => cancel.has(req.requestId));
+              const p = await data.search(req.query, req.field, req.scope, () =>
+                cancel.has(req.requestId)
+              );
               cancel.delete(req.requestId);
               return okReply(HostReply.SEARCH_RESULTS, req.requestId, p);
             },
@@ -322,7 +337,10 @@ function registerHostHandlers(deps: HostHandlerDeps): vscode.Disposable {
             [HostEndpoint.FILTER]: async (req) => {
               const cond =
                 req.field &&
-                (req.op === 'eq' || req.op === 'contains' || req.op === 'exists' || req.op === 'type')
+                (req.op === 'eq' ||
+                  req.op === 'contains' ||
+                  req.op === 'exists' ||
+                  req.op === 'type')
                   ? ({ field: req.field, op: req.op, value: req.value ?? '' } as FieldCondition)
                   : null;
               const p = await data.filter(cond, () => cancel.has(req.requestId));
@@ -342,7 +360,7 @@ function registerHostHandlers(deps: HostHandlerDeps): vscode.Disposable {
           })
         ).response;
       } catch (e) {
-        hostErr('处理消息时异常: ' + (e instanceof Error ? (e.stack || e.message) : String(e)));
+        hostErr('处理消息时异常: ' + (e instanceof Error ? e.stack || e.message : String(e)));
         // T7：异常回执保留 requestId，使 webview 精确 reject 对应请求（而非升级为全局 error 横幅）。
         response = errReply(requestIdOf(message), e instanceof Error ? e.message : String(e));
       }
@@ -402,7 +420,7 @@ export async function openJsonlViewer(
   try {
     await openJsonlViewerUnsafe(context, runtime, fileUri);
   } catch (e) {
-    hostErr('openJsonlViewer 异常: ' + (e instanceof Error ? (e.stack || e.message) : String(e)));
+    hostErr('openJsonlViewer 异常: ' + (e instanceof Error ? e.stack || e.message : String(e)));
     void vscode.window.showErrorMessage(
       `无法用 JSONL Viewer 打开该文件：${e instanceof Error ? e.message : String(e)}`
     );
@@ -524,7 +542,9 @@ class JsonlCustomEditorProvider implements vscode.CustomReadonlyEditorProvider {
       );
     } catch (e) {
       // 挂载失败（webview 配额 / 已销毁竞态）同样不得冒泡到扩展宿主。
-      hostErr('resolveCustomEditor 异常: ' + (e instanceof Error ? (e.stack || e.message) : String(e)));
+      hostErr(
+        'resolveCustomEditor 异常: ' + (e instanceof Error ? e.stack || e.message : String(e))
+      );
     }
   }
 }
@@ -537,7 +557,9 @@ export function activate(context: vscode.ExtensionContext): void {
   const runtime: HostRuntime = {
     panels: new Map<string, vscode.WebviewPanel>(),
     services: createServiceRegistry<DataService>((e) =>
-      hostErr('DataService dispose 失败: ' + (e instanceof Error ? (e.stack || e.message) : String(e)))
+      hostErr(
+        'DataService dispose 失败: ' + (e instanceof Error ? e.stack || e.message : String(e))
+      )
     ),
   };
 
@@ -556,7 +578,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand(OPEN_COMMAND, (uri?: vscode.Uri) => {
       // 双层防护：openJsonlViewer 自身已收口异常，此处再兜一道，杜绝未处理 rejection。
       void openJsonlViewer(context, runtime, uri).catch((e) => {
-        hostErr('命令执行失败: ' + (e instanceof Error ? (e.stack || e.message) : String(e)));
+        hostErr('命令执行失败: ' + (e instanceof Error ? e.stack || e.message : String(e)));
       });
     })
   );

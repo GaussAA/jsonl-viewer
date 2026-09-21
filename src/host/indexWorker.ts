@@ -73,7 +73,11 @@ async function handle(msg: WorkerRequest): Promise<void> {
         // 索引未就绪（build 未完成或失败）时必须**回执错误**：
         // 此前直接 return，主线程 pending 永不结算 → 调用方永久挂起（webview 要等 15s 超时）。
         if (!li || !reader) {
-          post({ type: 'error', requestId: msg.requestId, message: '索引尚未就绪（构建未完成或失败）' });
+          post({
+            type: 'error',
+            requestId: msg.requestId,
+            message: '索引尚未就绪（构建未完成或失败）',
+          });
           return;
         }
         try {
@@ -93,7 +97,11 @@ async function handle(msg: WorkerRequest): Promise<void> {
       }
       case 'filter': {
         if (!li || !reader) {
-          post({ type: 'error', requestId: msg.requestId, message: '索引尚未就绪（构建未完成或失败）' });
+          post({
+            type: 'error',
+            requestId: msg.requestId,
+            message: '索引尚未就绪（构建未完成或失败）',
+          });
           return;
         }
         try {
@@ -131,7 +139,10 @@ async function handle(msg: WorkerRequest): Promise<void> {
   } catch (e) {
     post({
       type: 'error',
-      requestId: msg.type === 'build' || msg.type === 'search' || msg.type === 'filter' ? msg.requestId : undefined,
+      requestId:
+        msg.type === 'build' || msg.type === 'search' || msg.type === 'filter'
+          ? msg.requestId
+          : undefined,
       message: e instanceof Error ? e.message : String(e),
     });
   }

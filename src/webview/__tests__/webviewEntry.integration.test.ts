@@ -139,12 +139,25 @@ const makeItems = (
   start: number,
   count: number,
   bad: number[] = []
-): { line: number; ok: boolean; value?: unknown; error?: string; kind?: 'object'; count?: number }[] =>
+): {
+  line: number;
+  ok: boolean;
+  value?: unknown;
+  error?: string;
+  kind?: 'object';
+  count?: number;
+}[] =>
   Array.from({ length: count }, (_, i) => {
     const line = start + i;
     return bad.includes(line)
       ? { line, ok: false, error: `第 ${line + 1} 行不是合法 JSON` }
-      : { line, ok: true, value: { id: line, name: `n${line}` }, kind: 'object' as const, count: 2 };
+      : {
+          line,
+          ok: true,
+          value: { id: line, name: `n${line}` },
+          kind: 'object' as const,
+          count: 2,
+        };
   });
 
 /** init → 等待节流窗口 → 返回首个 records 请求。 */
@@ -632,7 +645,10 @@ describe('webviewEntry 装配层（集成）', () => {
       const { host, app } = await bootWithRecords();
       reply(host, lastReq(host, HostEndpoint.READ_RECORDS)!, {
         startLine: 0,
-        items: [{ line: 0, ok: true, truncated: true, kind: 'object', count: 2 }, ...makeItems(1, 19)],
+        items: [
+          { line: 0, ok: true, truncated: true, kind: 'object', count: 2 },
+          ...makeItems(1, 19),
+        ],
         hasMore: true,
       });
       await sleep(20);

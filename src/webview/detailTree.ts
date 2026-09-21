@@ -76,7 +76,10 @@ export interface DetailTreeController {
 const MAX_SCALAR_TEXT = 400;
 
 /** 面包屑/树行内使用的标量格式化。 */
-function formatScalar(value: string | number | boolean, kind: string): { text: string; title: string } {
+function formatScalar(
+  value: string | number | boolean,
+  kind: string
+): { text: string; title: string } {
   let text: string;
   if (kind === 'string') {
     text = JSON.stringify(value);
@@ -105,7 +108,10 @@ function matchMediaReduced(): boolean {
   );
 }
 
-export function createDetailTree(host: HTMLElement, navHandlers: DetailTreeNavHandlers = {}): DetailTreeController {
+export function createDetailTree(
+  host: HTMLElement,
+  navHandlers: DetailTreeNavHandlers = {}
+): DetailTreeController {
   /* 右栏：大卡片（原型 .col-detail > .detail-card > .detail-header + 树体） */
   const root = document.createElement('aside');
   root.className = 'jlv-col-detail';
@@ -343,12 +349,7 @@ export function createDetailTree(host: HTMLElement, navHandlers: DetailTreeNavHa
   /** 递归构建单个节点及其（已展开的）子树。
    *  节点 = 块容器（.jlv-tree-node）：header 行在上、子树块（.jlv-tree-block）在其下方逐级缩进；
    *  避免旧版「子节点作为 flex 项横向堆积到父标签右侧」造成深层嵌套水平压缩的问题。 */
-  function buildNode(
-    parent: HTMLElement,
-    segs: PathSeg[],
-    depth: number,
-    value: unknown
-  ): void {
+  function buildNode(parent: HTMLElement, segs: PathSeg[], depth: number, value: unknown): void {
     const kind = jsonKindOf(value);
     const container = isContainer(value);
 
@@ -465,7 +466,9 @@ export function createDetailTree(host: HTMLElement, navHandlers: DetailTreeNavHa
         expandMode = 'all';
         syncExpandToggle();
         state.expandAll();
-        const rows = Array.from(body.querySelectorAll<HTMLElement>('.jlv-tree-row[data-container="1"]'));
+        const rows = Array.from(
+          body.querySelectorAll<HTMLElement>('.jlv-tree-row[data-container="1"]')
+        );
         chunkedExpand(rows);
       } else {
         // 全部折叠：逐个抽屉收回（错峰），保留缓存，不整树重建
@@ -502,8 +505,11 @@ export function createDetailTree(host: HTMLElement, navHandlers: DetailTreeNavHa
         if (node) expandNodeLocal(row, node, (i % 10) * 30);
       }
       if (i < rows.length) {
-        const w = window as { requestIdleCallback?: (cb: () => void, o?: { timeout?: number }) => void };
-        if (typeof w.requestIdleCallback === 'function') w.requestIdleCallback(step, { timeout: 80 });
+        const w = window as {
+          requestIdleCallback?: (cb: () => void, o?: { timeout?: number }) => void;
+        };
+        if (typeof w.requestIdleCallback === 'function')
+          w.requestIdleCallback(step, { timeout: 80 });
         else setTimeout(step, 16);
       }
     };
@@ -537,7 +543,12 @@ export function createDetailTree(host: HTMLElement, navHandlers: DetailTreeNavHa
   }
 
   /** 局部构建某容器节点的子节点到 inner（懒构建，缓存保留）。 */
-  function buildChildrenInto(inner: HTMLElement, segs: PathSeg[], value: unknown, depth: number): void {
+  function buildChildrenInto(
+    inner: HTMLElement,
+    segs: PathSeg[],
+    value: unknown,
+    depth: number
+  ): void {
     const { items, remaining } = expandContainer(value as object, pathKey(segs), revealed);
     for (const it of items) buildNode(inner, [...segs, it.seg], depth + 1, it.value);
     if (remaining > 0) {

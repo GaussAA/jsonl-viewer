@@ -1,7 +1,12 @@
 import { describe, it, before } from 'node:test';
 import assert from 'node:assert';
 import { setupWebviewDom } from './domHarness.ts';
-import { VirtualRecordList, PAGE_SIZE, type ListCallbacks, type RecordEntry } from '../virtualScroll.ts';
+import {
+  VirtualRecordList,
+  PAGE_SIZE,
+  type ListCallbacks,
+  type RecordEntry,
+} from '../virtualScroll.ts';
 
 /**
  * VirtualRecordList 组件测试（覆盖率补强：视图层）。
@@ -24,7 +29,12 @@ function wait(ms: number): Promise<void> {
 /** 开关 reduce-motion（虚拟滚动据此决定换页动画是走动画还是同步重建）。 */
 function setReducedMotion(on: boolean): void {
   const w = (globalThis as unknown as { window: { matchMedia: (q: string) => unknown } }).window;
-  w.matchMedia = (q: string) => ({ matches: on, media: q, addEventListener() {}, removeEventListener() {} });
+  w.matchMedia = (q: string) => ({
+    matches: on,
+    media: q,
+    addEventListener() {},
+    removeEventListener() {},
+  });
   (globalThis as unknown as Record<string, unknown>).matchMedia = w.matchMedia;
 }
 
@@ -46,7 +56,13 @@ function makeList(pageSize?: number): Harness {
   const cb: ListCallbacks = {
     getRecord: (line): RecordEntry | undefined =>
       loaded.has(line)
-        ? { ok: true, value: { id: line }, summary: [{ key: 'id', display: String(line) }], kind: 'object', count: 1 }
+        ? {
+            ok: true,
+            value: { id: line },
+            summary: [{ key: 'id', display: String(line) }],
+            kind: 'object',
+            count: 1,
+          }
         : undefined,
     getFields: () => null,
     onSelect: (line) => calls.select.push(line),
@@ -61,7 +77,8 @@ function makeList(pageSize?: number): Harness {
   };
   // 用例级隔离：清空文档，避免前序用例残留的列表干扰选择器与内部查询。
   globalThis.document.body.innerHTML = '';
-  const list = pageSize === undefined ? new VirtualRecordList(cb) : new VirtualRecordList(cb, pageSize);
+  const list =
+    pageSize === undefined ? new VirtualRecordList(cb) : new VirtualRecordList(cb, pageSize);
   globalThis.document.body.append(list.scrollEl, list.pagerEl);
   return { list, calls, loaded };
 }
@@ -106,10 +123,20 @@ describe('VirtualRecordList（视图层覆盖率补强）', () => {
   it('setTotalRows：页数按 pageSize 上取整且至少 1 页；getPageInfo 反映概览', () => {
     const { list } = makeList();
     list.setTotalRows(1);
-    assert.deepStrictEqual(list.getPageInfo(), { page: 0, pages: 1, pageSize: PAGE_SIZE, totalRows: 1 });
+    assert.deepStrictEqual(list.getPageInfo(), {
+      page: 0,
+      pages: 1,
+      pageSize: PAGE_SIZE,
+      totalRows: 1,
+    });
 
     list.setTotalRows(100);
-    assert.deepStrictEqual(list.getPageInfo(), { page: 0, pages: 5, pageSize: PAGE_SIZE, totalRows: 100 });
+    assert.deepStrictEqual(list.getPageInfo(), {
+      page: 0,
+      pages: 5,
+      pageSize: PAGE_SIZE,
+      totalRows: 100,
+    });
 
     list.setTotalRows(101);
     assert.strictEqual(list.getPageInfo().pages, 6, '101 行 → 6 页');
@@ -176,26 +203,58 @@ describe('VirtualRecordList（视图层覆盖率补强）', () => {
   it('页码窗口：页数≤3 全显示无省略号；页数多时含省略号且必含当前页', () => {
     const small = makeList();
     small.list.setTotalRows(40); // 2 页
-    assert.strictEqual(small.list.pagerEl.querySelectorAll('.jlv-pager-ellipsis').length, 0, '少页无省略号');
+    assert.strictEqual(
+      small.list.pagerEl.querySelectorAll('.jlv-pager-ellipsis').length,
+      0,
+      '少页无省略号'
+    );
 
     const many = makeList();
     many.list.setTotalRows(400); // 20 页
     // 窗口 [1,2,3] 位于首端 → 仅尾部省略号
-    assert.strictEqual(many.list.pagerEl.querySelectorAll('.jlv-pager-ellipsis').length, 1, '首端仅尾部省略号');
-    assert.strictEqual(many.list.pagerEl.querySelector('.jlv-pager-btn.active')?.textContent, '1', '当前页高亮');
+    assert.strictEqual(
+      many.list.pagerEl.querySelectorAll('.jlv-pager-ellipsis').length,
+      1,
+      '首端仅尾部省略号'
+    );
+    assert.strictEqual(
+      many.list.pagerEl.querySelector('.jlv-pager-btn.active')?.textContent,
+      '1',
+      '当前页高亮'
+    );
 
     // 跳到中段（第 6 页）→ 窗口两侧皆有省略号
     const jump = many.list.pagerEl.querySelector<HTMLInputElement>('.jlv-pager-input');
     assert.ok(jump);
     jump.value = '6';
-    jump.dispatchEvent(new (globalThis as unknown as { window: { Event: new (t: string) => Event } }).window.Event('change'));
-    assert.strictEqual(many.list.pagerEl.querySelector('.jlv-pager-btn.active')?.textContent, '6', '高亮随页移动');
-    assert.strictEqual(many.list.pagerEl.querySelectorAll('.jlv-pager-ellipsis').length, 2, '中段两侧省略号');
+    jump.dispatchEvent(
+      new (globalThis as unknown as { window: { Event: new (t: string) => Event } }).window.Event(
+        'change'
+      )
+    );
+    assert.strictEqual(
+      many.list.pagerEl.querySelector('.jlv-pager-btn.active')?.textContent,
+      '6',
+      '高亮随页移动'
+    );
+    assert.strictEqual(
+      many.list.pagerEl.querySelectorAll('.jlv-pager-ellipsis').length,
+      2,
+      '中段两侧省略号'
+    );
 
     // 末页 → 仅首部省略号
     clickByTitle(many.list, '末页');
-    assert.strictEqual(many.list.pagerEl.querySelectorAll('.jlv-pager-ellipsis').length, 1, '末端仅首部省略号');
-    assert.strictEqual(many.list.pagerEl.querySelector('.jlv-pager-btn.active')?.textContent, '20', '末页高亮');
+    assert.strictEqual(
+      many.list.pagerEl.querySelectorAll('.jlv-pager-ellipsis').length,
+      1,
+      '末端仅首部省略号'
+    );
+    assert.strictEqual(
+      many.list.pagerEl.querySelector('.jlv-pager-btn.active')?.textContent,
+      '20',
+      '末页高亮'
+    );
   });
 
   it('跳页输入：合法值跳转并回写，非法值回退原页码', () => {
@@ -205,7 +264,9 @@ describe('VirtualRecordList（视图层覆盖率补强）', () => {
     const change = (): void => {
       const el = list.pagerEl.querySelector<HTMLInputElement>('.jlv-pager-input');
       el?.dispatchEvent(
-        new (globalThis as unknown as { window: { Event: new (t: string) => Event } }).window.Event('change')
+        new (globalThis as unknown as { window: { Event: new (t: string) => Event } }).window.Event(
+          'change'
+        )
       );
     };
     const valueOf = (): string =>
@@ -267,32 +328,50 @@ describe('VirtualRecordList（视图层覆盖率补强）', () => {
 
     list.select(3);
     assert.strictEqual(list.getSelected(), 3);
-    assert.strictEqual(list.scrollEl.querySelector('#jlv-opt-3')?.getAttribute('aria-selected'), 'true');
-    assert.strictEqual(list.scrollEl.querySelector('#jlv-opt-4')?.getAttribute('aria-selected'), 'false');
+    assert.strictEqual(
+      list.scrollEl.querySelector('#jlv-opt-3')?.getAttribute('aria-selected'),
+      'true'
+    );
+    assert.strictEqual(
+      list.scrollEl.querySelector('#jlv-opt-4')?.getAttribute('aria-selected'),
+      'false'
+    );
   });
 
   it('键盘 ArrowDown/ArrowUp：移动选中并联动详情', () => {
     const { list, calls } = makeList();
     list.setTotalRows(25);
-    const win = (globalThis as unknown as { window: { KeyboardEvent: new (t: string, o?: unknown) => Event } }).window;
+    const win = (
+      globalThis as unknown as { window: { KeyboardEvent: new (t: string, o?: unknown) => Event } }
+    ).window;
 
-    list.scrollEl.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+    list.scrollEl.dispatchEvent(
+      new win.KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true })
+    );
     assert.strictEqual(list.getSelected(), 0, '无选中时从本页首行开始');
     assert.deepStrictEqual(calls.select.at(-1), 0, '联动 onSelect');
 
-    list.scrollEl.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+    list.scrollEl.dispatchEvent(
+      new win.KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true })
+    );
     assert.strictEqual(list.getSelected(), 1, '下移一格');
 
-    list.scrollEl.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }));
+    list.scrollEl.dispatchEvent(
+      new win.KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true })
+    );
     assert.strictEqual(list.getSelected(), 0, '上移一格');
   });
 
   it('键盘 Home/End/PageDown：翻页并选中目标行', () => {
     const { list, calls } = makeList();
     list.setTotalRows(100); // 5 页
-    const win = (globalThis as unknown as { window: { KeyboardEvent: new (t: string, o?: unknown) => Event } }).window;
+    const win = (
+      globalThis as unknown as { window: { KeyboardEvent: new (t: string, o?: unknown) => Event } }
+    ).window;
 
-    list.scrollEl.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'PageDown', bubbles: true }));
+    list.scrollEl.dispatchEvent(
+      new win.KeyboardEvent('keydown', { key: 'PageDown', bubbles: true })
+    );
     assert.strictEqual(list.getPageInfo().page, 1, 'PageDown 翻到第 2 页');
     assert.strictEqual(list.getSelected(), 20, '选中新页首行');
 
@@ -309,7 +388,9 @@ describe('VirtualRecordList（视图层覆盖率补强）', () => {
   it('键盘 Enter：激活当前选中行（无选中则本页首行）', () => {
     const { list, calls } = makeList();
     list.setTotalRows(25);
-    const win = (globalThis as unknown as { window: { KeyboardEvent: new (t: string, o?: unknown) => Event } }).window;
+    const win = (
+      globalThis as unknown as { window: { KeyboardEvent: new (t: string, o?: unknown) => Event } }
+    ).window;
 
     list.scrollEl.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
     assert.strictEqual(list.getSelected(), 0, '无选中 → 本页首行');
@@ -338,8 +419,8 @@ describe('VirtualRecordList（视图层覆盖率补强）', () => {
     try {
       const { list } = makeList();
       list.setTotalRows(100);
-      const before = cards(list)[0];
-      assert.ok(before);
+      const firstCard = cards(list)[0];
+      assert.ok(firstCard);
 
       clickByTitle(list, '下一页');
       assert.strictEqual(list.getPageInfo().page, 1, '页码已切换');

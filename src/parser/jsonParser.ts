@@ -13,8 +13,7 @@ import { MAX_LINE_BYTES } from '../constants.ts';
 
 /** 解析单行的结果。合法行返回 value；非法行返回 error（含定位）。 */
 export type JsonParseResult =
-  | { ok: true; value: unknown }
-  | { ok: false; error: string; line: number; column: number };
+  { ok: true; value: unknown } | { ok: false; error: string; line: number; column: number };
 
 /** 一条记录的读取/解析结果（供列表渲染与错误行红标定位）。 */
 export interface RecordResult {

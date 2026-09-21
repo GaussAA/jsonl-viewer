@@ -152,7 +152,10 @@ export class TreeState {
 /* ------------------------------ 大数组分段 / 子项展开 ------------------------------ */
 
 /** 大数组分段计：可见项数与剩余项数（revealedExtra 为已通过「加载更多」增加的额外项）。 */
-export function arraySegmentCount(length: number, revealedExtra: number): { visible: number; remaining: number } {
+export function arraySegmentCount(
+  length: number,
+  revealedExtra: number
+): { visible: number; remaining: number } {
   const visible = Math.min(length, LARGE_ARRAY_PREVIEW + Math.max(0, revealedExtra));
   return { visible, remaining: length - visible };
 }

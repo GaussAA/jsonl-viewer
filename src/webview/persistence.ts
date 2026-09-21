@@ -50,7 +50,9 @@ export function createPersistence(deps: PersistDeps): Persistence {
         filter: state.filterCond,
         searchQuery: state.searchQuery.trim() || undefined,
       });
-      bus.request(HostEndpoint.PERSIST_STATE, { key: state.persistKey, value }).promise.catch(() => {});
+      bus
+        .request(HostEndpoint.PERSIST_STATE, { key: state.persistKey, value })
+        .promise.catch(() => {});
     }, debounceMs);
   }
 

@@ -57,7 +57,9 @@ console.log(`[release] LATEST  -> ${version}`);
 
 const dirty = execSync('git status --porcelain', { cwd: root, encoding: 'utf8' }).trim();
 if (dirty) {
-  console.warn('[release] 提示：工作区有未提交改动，建议先 commit 再继续，否则 tag 不会指向本次代码。');
+  console.warn(
+    '[release] 提示：工作区有未提交改动，建议先 commit 再继续，否则 tag 不会指向本次代码。'
+  );
 }
 // tag 可追溯性：已存在则必须指向当前 HEAD，否则退出（防止产物不可溯源）。
 const tag = `v${version}`;

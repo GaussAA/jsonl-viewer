@@ -11,12 +11,7 @@
  * 给 Task 6；这里都用注入钩子/字段预留，不改动协议即可对接。
  */
 
-import {
-  computeFetchWindow,
-  LRUCache,
-  segmentSortedLines,
-  ThrottleQueue,
-} from './logic.ts';
+import { computeFetchWindow, LRUCache, segmentSortedLines, ThrottleQueue } from './logic.ts';
 import type { FieldLike } from './logic.ts';
 import type { RecordEntry } from './virtualScroll.ts';
 import { VirtualRecordList } from './virtualScroll.ts';
@@ -27,10 +22,7 @@ import { createColumnLayout, type ColumnLayout } from './columnLayout.ts';
 import { createQueryActions, type QueryActions } from './queryActions.ts';
 import { createPersistence } from './persistence.ts';
 import { createVSCodeApi, RpcBus } from './rpc.ts';
-import {
-  mergePersistedState,
-  summarizeWithLayout,
-} from './queryLogic.ts';
+import { mergePersistedState, summarizeWithLayout } from './queryLogic.ts';
 import type { FieldCondition, FieldLayout } from './queryLogic.ts';
 import { HostEndpoint } from '../protocol/rpc.ts';
 import type { InitPayload, OverviewPayload, RecordsPayload } from '../protocol/rpc.ts';
@@ -409,7 +401,7 @@ export function main(): void {
     saveListWidth,
   });
 
-/* ---------------- prev / next 导航 ---------------- */
+  /* ---------------- prev / next 导航 ---------------- */
 
   /** 获取当前可见记录总数（考虑过滤态）。 */
   function getTotalVisible(): number {
@@ -536,7 +528,11 @@ export function main(): void {
     const total = ov.totalLines;
     const s = clamp(win.first, 0, total);
     const e = clamp(win.lastExclusive, s, total);
-    const missing = computeFetchWindow(s, e, (line) => state.cache.has(line) || state.pending.has(line));
+    const missing = computeFetchWindow(
+      s,
+      e,
+      (line) => state.cache.has(line) || state.pending.has(line)
+    );
     if (!missing) return false;
 
     // 覆盖式取消：若上一请求仍在途，本地标记并请宿主尽力中断。
@@ -613,11 +609,15 @@ export function main(): void {
   function tryApplyPersisted(): void {
     if (!savedLoaded || !state.fields) return;
     const known = new Set(state.fields.map((f) => f.key));
-    const merged = mergePersistedState(savedState, {
-      fieldLayout: state.fieldLayout,
-      filter: state.filterCond,
-      searchQuery: state.searchQuery,
-    }, known);
+    const merged = mergePersistedState(
+      savedState,
+      {
+        fieldLayout: state.fieldLayout,
+        filter: state.filterCond,
+        searchQuery: state.searchQuery,
+      },
+      known
+    );
     if (merged.fieldLayout) {
       state.fieldLayout = merged.fieldLayout;
       toolbar.setLayout(state.fieldLayout);
@@ -720,9 +720,13 @@ export function main(): void {
     detail.showLoading();
 
     try {
-      const ov = await bus.request<OverviewPayload>(HostEndpoint.RELOAD, {}, {
-        timeoutMs: RPC_HEAVY_TIMEOUT_MS,
-      }).promise;
+      const ov = await bus.request<OverviewPayload>(
+        HostEndpoint.RELOAD,
+        {},
+        {
+          timeoutMs: RPC_HEAVY_TIMEOUT_MS,
+        }
+      ).promise;
       if (!ov) return;
       state.overview = ov;
       // 索引重建后，旧的缓存 / 搜索 / 过滤结果全部失效，整体复位。
@@ -750,10 +754,10 @@ export function main(): void {
       // 重新拉字段推断（供摘要卡片 / 过滤下拉）。
       void bus
         .request<{ fields: FieldLike[] }>(
-        HostEndpoint.GET_SAMPLE_FIELDS,
-        {},
-        { timeoutMs: RPC_HEAVY_TIMEOUT_MS }
-      )
+          HostEndpoint.GET_SAMPLE_FIELDS,
+          {},
+          { timeoutMs: RPC_HEAVY_TIMEOUT_MS }
+        )
         .promise.then((res) => {
           if (res && Array.isArray(res.fields)) {
             state.fields = res.fields;
@@ -769,7 +773,11 @@ export function main(): void {
   }
 
   bus.onStale((payload) => {
-    banner.show(payload.message ?? '文件已变更，索引可能过期。', '重新加载', () => void reloadFile());
+    banner.show(
+      payload.message ?? '文件已变更，索引可能过期。',
+      '重新加载',
+      () => void reloadFile()
+    );
   });
 
   // 初始：向宿主报告就绪，等待 init 回执。

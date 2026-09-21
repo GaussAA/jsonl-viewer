@@ -42,13 +42,13 @@ class FakeWorker {
   }
 
   emitMessage(m: WorkerResponse): void {
-    for (const h of [...this.handlers.message]) h(m);
+    for (const h of this.handlers.message) h(m);
   }
   emitError(e: Error): void {
-    for (const h of [...this.handlers.error]) h(e);
+    for (const h of this.handlers.error) h(e);
   }
   emitExit(code: number): void {
-    for (const h of [...this.handlers.exit]) h(code);
+    for (const h of this.handlers.exit) h(code);
   }
 
   /** 某类请求的最近一条消息。 */
@@ -102,7 +102,12 @@ describe('WorkerIndexHost 分支（覆盖率补强）', () => {
     assert.ok(req && req.type === 'build', '已发出 build 请求');
     assert.strictEqual(req?.type === 'build' ? req.path : '', '/data.jsonl');
 
-    worker.emitMessage({ type: 'progress', requestId: worker.lastRequestIdOf('build'), bytesRead: 128, lines: 7 });
+    worker.emitMessage({
+      type: 'progress',
+      requestId: worker.lastRequestIdOf('build'),
+      bytesRead: 128,
+      lines: 7,
+    });
     assert.deepStrictEqual(progress, [{ bytesRead: 128, lines: 7, done: false }], '进度已转发');
 
     worker.emitMessage({
@@ -205,10 +210,16 @@ describe('WorkerIndexHost 分支（覆盖率补强）', () => {
 
     const p = host.search('q', undefined, undefined, 10);
     worker.emitMessage({ type: 'error', message: 'no requestId' }); // 无 requestId：应被忽略
-    worker.emitMessage({ type: 'error', requestId: worker.lastRequestIdOf('search'), message: 'scan failed' });
+    worker.emitMessage({
+      type: 'error',
+      requestId: worker.lastRequestIdOf('search'),
+      message: 'scan failed',
+    });
     await assert.rejects(p, /scan failed/, '带 requestId 的 error 精确 reject');
 
-    assert.doesNotThrow(() => worker.emitMessage({ type: 'error', requestId: 424242, message: 'x' }));
+    assert.doesNotThrow(() =>
+      worker.emitMessage({ type: 'error', requestId: 424242, message: 'x' })
+    );
 
     await host.dispose();
   });

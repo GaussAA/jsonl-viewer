@@ -73,9 +73,7 @@ export interface PersistedState {
 /** 原始行文本的字符串匹配（明文，不做 JSON.parse）。大小写不敏感默认开。 */
 export function rawLineMatches(text: string, query: string, caseInsensitive = true): boolean {
   if (!query) return false;
-  return caseInsensitive
-    ? text.toLowerCase().includes(query.toLowerCase())
-    : text.includes(query);
+  return caseInsensitive ? text.toLowerCase().includes(query.toLowerCase()) : text.includes(query);
 }
 
 /* ---------------- 字段定制：布局构造 / 校验 / 对摘要映射 ---------------- */
@@ -130,7 +128,10 @@ export function normalizeFieldLayout(raw: unknown, knownKeys?: Set<string> | nul
 }
 
 /** 计算「应展示的字段键」：pinned（先）> order，跳过 hidden，截断到 maxKeys。 */
-export function visibleFieldKeys(fields: readonly { key: string }[] | null, layout: FieldLayout): string[] {
+export function visibleFieldKeys(
+  fields: readonly { key: string }[] | null,
+  layout: FieldLayout
+): string[] {
   const known = new Set((fields ?? []).map((f) => f.key));
   const hidden = new Set(layout.hidden);
   const out: string[] = [];

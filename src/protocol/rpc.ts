@@ -159,8 +159,20 @@ export type HostRequest =
   | { type: typeof HostEndpoint.GET_SAMPLE_FIELDS; requestId: string; count?: number }
   | { type: typeof HostEndpoint.READ_RECORDS; requestId: string; startLine: number; count: number }
   | { type: typeof HostEndpoint.READ_RECORD; requestId: string; line: number }
-  | { type: typeof HostEndpoint.SEARCH; requestId: string; query: string; field?: string; scope?: string }
-  | { type: typeof HostEndpoint.FILTER; requestId: string; field?: string; op?: string; value?: string }
+  | {
+      type: typeof HostEndpoint.SEARCH;
+      requestId: string;
+      query: string;
+      field?: string;
+      scope?: string;
+    }
+  | {
+      type: typeof HostEndpoint.FILTER;
+      requestId: string;
+      field?: string;
+      op?: string;
+      value?: string;
+    }
   | { type: typeof HostEndpoint.JUMP_TO_SOURCE; requestId: string; line: number }
   | { type: typeof HostEndpoint.CANCEL; requestId: string }
   | { type: typeof HostEndpoint.PERSIST_STATE; requestId: string; key: string; value: unknown }
@@ -247,18 +259,42 @@ export function buildRecordsPayload(
  * **dispatchMessage 本体无需改动**（OCP）。
  */
 export type HostHandlerMap = {
-  [HostEndpoint.READY]: (req: Extract<HostRequest, { type: typeof HostEndpoint.READY }>) => Promise<HostResponse> | HostResponse;
-  [HostEndpoint.GET_OVERVIEW]: (req: Extract<HostRequest, { type: typeof HostEndpoint.GET_OVERVIEW }>) => Promise<HostResponse> | HostResponse;
-  [HostEndpoint.GET_SAMPLE_FIELDS]: (req: Extract<HostRequest, { type: typeof HostEndpoint.GET_SAMPLE_FIELDS }>) => Promise<HostResponse> | HostResponse;
-  [HostEndpoint.READ_RECORDS]: (req: Extract<HostRequest, { type: typeof HostEndpoint.READ_RECORDS }>) => Promise<HostResponse> | HostResponse;
-  [HostEndpoint.READ_RECORD]: (req: Extract<HostRequest, { type: typeof HostEndpoint.READ_RECORD }>) => Promise<HostResponse> | HostResponse;
-  [HostEndpoint.JUMP_TO_SOURCE]: (req: Extract<HostRequest, { type: typeof HostEndpoint.JUMP_TO_SOURCE }>) => Promise<HostResponse | undefined> | HostResponse | undefined;
-  [HostEndpoint.SEARCH]: (req: Extract<HostRequest, { type: typeof HostEndpoint.SEARCH }>) => Promise<HostResponse> | HostResponse;
-  [HostEndpoint.FILTER]: (req: Extract<HostRequest, { type: typeof HostEndpoint.FILTER }>) => Promise<HostResponse> | HostResponse;
-  [HostEndpoint.PERSIST_STATE]: (req: Extract<HostRequest, { type: typeof HostEndpoint.PERSIST_STATE }>) => Promise<HostResponse> | HostResponse;
-  [HostEndpoint.LOAD_STATE]: (req: Extract<HostRequest, { type: typeof HostEndpoint.LOAD_STATE }>) => Promise<HostResponse> | HostResponse;
-  [HostEndpoint.RELOAD]: (req: Extract<HostRequest, { type: typeof HostEndpoint.RELOAD }>) => Promise<HostResponse> | HostResponse;
-  [HostEndpoint.CANCEL]: (req: Extract<HostRequest, { type: typeof HostEndpoint.CANCEL }>) => HostResponse | undefined;
+  [HostEndpoint.READY]: (
+    req: Extract<HostRequest, { type: typeof HostEndpoint.READY }>
+  ) => Promise<HostResponse> | HostResponse;
+  [HostEndpoint.GET_OVERVIEW]: (
+    req: Extract<HostRequest, { type: typeof HostEndpoint.GET_OVERVIEW }>
+  ) => Promise<HostResponse> | HostResponse;
+  [HostEndpoint.GET_SAMPLE_FIELDS]: (
+    req: Extract<HostRequest, { type: typeof HostEndpoint.GET_SAMPLE_FIELDS }>
+  ) => Promise<HostResponse> | HostResponse;
+  [HostEndpoint.READ_RECORDS]: (
+    req: Extract<HostRequest, { type: typeof HostEndpoint.READ_RECORDS }>
+  ) => Promise<HostResponse> | HostResponse;
+  [HostEndpoint.READ_RECORD]: (
+    req: Extract<HostRequest, { type: typeof HostEndpoint.READ_RECORD }>
+  ) => Promise<HostResponse> | HostResponse;
+  [HostEndpoint.JUMP_TO_SOURCE]: (
+    req: Extract<HostRequest, { type: typeof HostEndpoint.JUMP_TO_SOURCE }>
+  ) => Promise<HostResponse | undefined> | HostResponse | undefined;
+  [HostEndpoint.SEARCH]: (
+    req: Extract<HostRequest, { type: typeof HostEndpoint.SEARCH }>
+  ) => Promise<HostResponse> | HostResponse;
+  [HostEndpoint.FILTER]: (
+    req: Extract<HostRequest, { type: typeof HostEndpoint.FILTER }>
+  ) => Promise<HostResponse> | HostResponse;
+  [HostEndpoint.PERSIST_STATE]: (
+    req: Extract<HostRequest, { type: typeof HostEndpoint.PERSIST_STATE }>
+  ) => Promise<HostResponse> | HostResponse;
+  [HostEndpoint.LOAD_STATE]: (
+    req: Extract<HostRequest, { type: typeof HostEndpoint.LOAD_STATE }>
+  ) => Promise<HostResponse> | HostResponse;
+  [HostEndpoint.RELOAD]: (
+    req: Extract<HostRequest, { type: typeof HostEndpoint.RELOAD }>
+  ) => Promise<HostResponse> | HostResponse;
+  [HostEndpoint.CANCEL]: (
+    req: Extract<HostRequest, { type: typeof HostEndpoint.CANCEL }>
+  ) => HostResponse | undefined;
 };
 
 export interface DispatchResult {
@@ -271,11 +307,17 @@ export interface DispatchResult {
  * 本函数只做「类型校验 → 查表 → 调用 → 异常兜底」，不含任何端点专属分支。
  * 未知端点（非 HostEndpoint）直接被 isHostRequest 过滤，无回执。
  */
-export async function dispatchMessage(msg: unknown, handlers: HostHandlerMap): Promise<DispatchResult> {
+export async function dispatchMessage(
+  msg: unknown,
+  handlers: HostHandlerMap
+): Promise<DispatchResult> {
   if (!isHostRequest(msg)) return { response: undefined };
   // READY 端点无 requestId 字段，故安全取值（可能 undefined）；errReply 已兼容 undefined 入参。
   const requestId = requestIdOf(msg);
-  const registry = handlers as unknown as Record<string, (req: HostRequest) => Promise<HostResponse | undefined>>;
+  const registry = handlers as unknown as Record<
+    string,
+    (req: HostRequest) => Promise<HostResponse | undefined>
+  >;
   const handler = registry[msg.type];
   if (!handler) {
     return { response: errReply(requestId, `endpoint not implemented yet: ${msg.type}`) };

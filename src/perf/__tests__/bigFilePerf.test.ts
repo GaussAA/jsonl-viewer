@@ -24,12 +24,7 @@ import { mkdtemp, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { LineIndex } from '../../indexer/lineIndex.ts';
-import {
-  openFileReader,
-  readBatch,
-  readRecord,
-  MemoryReader,
-} from '../../parser/jsonParser.ts';
+import { openFileReader, readBatch, readRecord, MemoryReader } from '../../parser/jsonParser.ts';
 
 /** 单行记录：固定约 0.5KB，含唯一 id 便于随机访问校验。 */
 function makeLine(i: number): string {
@@ -143,7 +138,9 @@ test('超大单行：超过 maxLineBytes 被友好拒绝（readRecord 捕获为�
 
 test('searchLines：shouldCancel 提前终止（不再扫剩余文件）', async () => {
   const buf = Buffer.from(
-    Array.from({ length: 100 }, (_, i) => JSON.stringify({ id: i, tag: i % 2 ? 'hit' : 'miss' })).join('\n'),
+    Array.from({ length: 100 }, (_, i) =>
+      JSON.stringify({ id: i, tag: i % 2 ? 'hit' : 'miss' })
+    ).join('\n'),
     'utf8'
   );
   const li = await LineIndex.build([buf]);

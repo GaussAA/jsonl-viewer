@@ -20,16 +20,21 @@ import { openFileReader, parseJsonLine, readRecord as readRecordAt } from '../pa
 import { inferFields } from '../infer/inferFields.ts';
 import type { FieldCondition } from '../core/query.ts';
 import type { FilterLinesResult, SearchLinesResult } from './searchEngine.ts';
-import { RECORD_INLINE_MAX_BYTES, RECORDS_MAX_COUNT, SEARCH_MAX_RESULTS, FILTER_MAX_RESULTS } from '../constants.ts';
+import {
+  RECORD_INLINE_MAX_BYTES,
+  RECORDS_MAX_COUNT,
+  SEARCH_MAX_RESULTS,
+  FILTER_MAX_RESULTS,
+} from '../constants.ts';
 import { buildIndexWithFallback, type IndexHost } from './indexHost.ts';
 import { buildRecordsPayload } from '../protocol/rpc.ts';
-import type { OverviewPayload, RecordsPayload, RecordsPayloadItem, SampleFieldsPayload } from '../protocol/rpc.ts';
-import {
-  jsonCountOf,
-  jsonKindOf,
-  makeSummary,
-  summarizeRawLine,
-} from './recordSummary.ts';
+import type {
+  OverviewPayload,
+  RecordsPayload,
+  RecordsPayloadItem,
+  SampleFieldsPayload,
+} from '../protocol/rpc.ts';
+import { jsonCountOf, jsonKindOf, makeSummary, summarizeRawLine } from './recordSummary.ts';
 
 /** 检测文件是否已变更（size/mtime）的最小快照。 */
 export interface FileSnapshot {
@@ -39,9 +44,7 @@ export interface FileSnapshot {
 
 /** 文件变更检测结果。null 表示索引尚未构建、无法判断。 */
 export type StaleCheckResult =
-  | { changed: false }
-  | { changed: true; deleted: boolean; message: string }
-  | null;
+  { changed: false } | { changed: true; deleted: boolean; message: string } | null;
 
 export interface DataServiceOptions {
   onProgress?: (info: { bytesRead: number; lines: number; done: boolean }) => void;
@@ -94,7 +97,11 @@ export class DataService {
         // 保证「打得开」这条底线不被 worker 加载异常击穿。
         let host: IndexHost | undefined;
         try {
-          const built = await buildIndexWithFallback(this.opts.workerScriptPath, this.path, this.opts.onProgress);
+          const built = await buildIndexWithFallback(
+            this.opts.workerScriptPath,
+            this.path,
+            this.opts.onProgress
+          );
           host = built.host;
           const { index, stats } = built.result;
           if (gen !== this.generation) {
@@ -146,7 +153,11 @@ export class DataService {
     if (!this.snapshot) return null;
     const cur = await this.currentSnapshot();
     if (!cur) {
-      return { changed: true, deleted: true, message: '文件已被删除，索引可能已失效，请重新加载。' };
+      return {
+        changed: true,
+        deleted: true,
+        message: '文件已被删除，索引可能已失效，请重新加载。',
+      };
     }
     if (cur.size !== this.snapshot.size || cur.mtimeMs !== this.snapshot.mtimeMs) {
       return { changed: true, deleted: false, message: '文件已更改，行索引可能过期，请重新加载。' };
@@ -268,7 +279,10 @@ export class DataService {
   }
 
   /** Task 6 字段值过滤：委托 IndexHost 对流解析并评估，返回匹配行号（结果行号数组有上限）。 */
-  async filter(cond: FieldCondition | null, shouldCancel?: () => boolean): Promise<FilterLinesResult> {
+  async filter(
+    cond: FieldCondition | null,
+    shouldCancel?: () => boolean
+  ): Promise<FilterLinesResult> {
     await this.ensureIndex();
     return this.host!.filter(cond, FILTER_MAX_RESULTS, shouldCancel);
   }

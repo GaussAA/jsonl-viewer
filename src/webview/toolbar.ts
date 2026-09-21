@@ -60,7 +60,10 @@ interface LayoutPanelState {
   maxInput: HTMLInputElement;
 }
 
-export function createToolbar(host: HTMLElement, handlers: ToolbarHandlers = {}): {
+export function createToolbar(
+  host: HTMLElement,
+  handlers: ToolbarHandlers = {}
+): {
   root: HTMLElement;
   update(info: Partial<ToolbarInfo> & { fileName?: string }): void;
   refresh(): void;
@@ -146,7 +149,13 @@ export function createToolbar(host: HTMLElement, handlers: ToolbarHandlers = {})
   nextBtn.disabled = true;
   navGroup.append(prevBtn, nextBtn);
 
-  search.append(iconSpan('jlv-search-ic', ICON_SEARCH), searchInputEl, searchClear, matchInfo, navGroup);
+  search.append(
+    iconSpan('jlv-search-ic', ICON_SEARCH),
+    searchInputEl,
+    searchClear,
+    matchInfo,
+    navGroup
+  );
   root.appendChild(search);
 
   const updateClear = (): void => {
@@ -288,10 +297,10 @@ export function createToolbar(host: HTMLElement, handlers: ToolbarHandlers = {})
       ['存在', 'exists'],
       ['类型', 'type'],
     ];
-    for (const [label, val] of OPS) {
+    for (const [opLabel, val] of OPS) {
       const o = document.createElement('option');
       o.value = val;
-      o.textContent = label;
+      o.textContent = opLabel;
       opSel.appendChild(o);
     }
     const valueInput = document.createElement('input');
@@ -339,7 +348,12 @@ export function createToolbar(host: HTMLElement, handlers: ToolbarHandlers = {})
       close();
     });
 
-    panel.append(vlabel('字段', fieldSel), vlabel('运算符', opSel), vlabel('值', valueInput), vlabel('类型', typeSel));
+    panel.append(
+      vlabel('字段', fieldSel),
+      vlabel('运算符', opSel),
+      vlabel('值', valueInput),
+      vlabel('类型', typeSel)
+    );
     const acts = document.createElement('div');
     acts.className = 'jlv-panel-actions';
     acts.append(clearBtn, applyBtn);
@@ -570,7 +584,8 @@ export function createToolbar(host: HTMLElement, handlers: ToolbarHandlers = {})
 
   const update = (info: Partial<ToolbarInfo> & { fileName?: string }): void => {
     if (info.fileName !== undefined) fileNameEl.textContent = info.fileName;
-    if (info.totalLines !== undefined) totalLinesEl.textContent = ` · ${info.totalLines.toLocaleString('en-US')} 行`;
+    if (info.totalLines !== undefined)
+      totalLinesEl.textContent = ` · ${info.totalLines.toLocaleString('en-US')} 行`;
     if (info.buildMs !== undefined) buildMsEl.textContent = ` · ${formatMs(info.buildMs)}`;
     if (info.range) rangeEl.textContent = `${info.range[0] + 1}–${info.range[1] + 1}`;
     if (info.status) {
@@ -654,7 +669,8 @@ export function createToolbar(host: HTMLElement, handlers: ToolbarHandlers = {})
     els,
     update,
     refresh: () => update({}),
-    searchInput: () => document.querySelector<HTMLInputElement>('.jlv-search input') ?? searchInputEl,
+    searchInput: () =>
+      document.querySelector<HTMLInputElement>('.jlv-search input') ?? searchInputEl,
     setFields,
     setLayout,
     setSearchResult,

@@ -101,22 +101,33 @@ export interface RawLineSummary {
  * @param bytes 单行原始 UTF-8 字节（不含行尾 `\n`/`\r\n`）。
  * @param previewChars 预览最多展示字符数。
  */
-export function summarizeRawLine(bytes: Buffer, previewChars = SUMMARY_MAX_PREVIEW_CHARS): RawLineSummary {
+export function summarizeRawLine(
+  bytes: Buffer,
+  previewChars = SUMMARY_MAX_PREVIEW_CHARS
+): RawLineSummary {
   const n = bytes.length;
   let i = 0;
   // 跳过前导空白（空格/Tab/LF/CR）。
-  while (i < n && (bytes[i] === 0x20 || bytes[i] === 0x09 || bytes[i] === 0x0a || bytes[i] === 0x0d)) {
+  while (
+    i < n &&
+    (bytes[i] === 0x20 || bytes[i] === 0x09 || bytes[i] === 0x0a || bytes[i] === 0x0d)
+  ) {
     i++;
   }
   if (i >= n) return { kind: 'null', count: 0, preview: '' };
 
   const first = bytes[i];
   let kind: JsonKind;
-  if (first === 0x7b) kind = 'object'; // {
-  else if (first === 0x5b) kind = 'array'; // [
-  else if (first === 0x22) kind = 'string'; // "
-  else if (first === 0x74 || first === 0x66) kind = 'boolean'; // t / f
-  else if (first === 0x6e) kind = 'null'; // n
+  if (first === 0x7b)
+    kind = 'object'; // {
+  else if (first === 0x5b)
+    kind = 'array'; // [
+  else if (first === 0x22)
+    kind = 'string'; // "
+  else if (first === 0x74 || first === 0x66)
+    kind = 'boolean'; // t / f
+  else if (first === 0x6e)
+    kind = 'null'; // n
   else kind = 'number'; // 数字或 '-'
 
   let count = 0;
@@ -130,7 +141,8 @@ export function summarizeRawLine(bytes: Buffer, previewChars = SUMMARY_MAX_PREVI
       if (inStr) {
         hasContent = true; // 字符串内必有内容
         if (esc) esc = false;
-        else if (c === 0x5c) esc = true; // backslash
+        else if (c === 0x5c)
+          esc = true; // backslash
         else if (c === 0x22) inStr = false; // 关闭字符串
         continue;
       }
@@ -140,10 +152,12 @@ export function summarizeRawLine(bytes: Buffer, previewChars = SUMMARY_MAX_PREVI
         continue;
       }
       if (c === 0x7b || c === 0x5b) {
-        if (j === i) depth = 1; // 顶层容器起始
+        if (j === i)
+          depth = 1; // 顶层容器起始
         else depth++;
       } else if (c === 0x7d || c === 0x5d) {
-        if (depth === 1) depth = 0; // 顶层容器闭合
+        if (depth === 1)
+          depth = 0; // 顶层容器闭合
         else if (depth > 0) depth--;
       } else if (c === 0x2c && depth === 1) {
         count++; // 顶层逗号 = 顶层条目分隔

@@ -35,11 +35,14 @@ export interface WorkerLike {
   terminate(): Promise<number>;
 }
 
-/** 索引宿主统一接口。 */export interface IndexHost {
+/** 索引宿主统一接口。 */ export interface IndexHost {
   /** 'worker' | 'main'，便于诊断与日志。 */
   readonly kind: 'worker' | 'main';
   /** 流式构建行索引；返回主线程侧重建的 LineIndex + 概要统计。 */
-  build(path: string, onProgress?: (info: { bytesRead: number; lines: number; done: boolean }) => void): Promise<BuildResult>;
+  build(
+    path: string,
+    onProgress?: (info: { bytesRead: number; lines: number; done: boolean }) => void
+  ): Promise<BuildResult>;
   /** 全文/字段搜索（worker 内部顺序扫全文件；主线程版同）。 */
   search(
     query: string,
@@ -49,7 +52,11 @@ export interface WorkerLike {
     shouldCancel?: () => boolean
   ): Promise<SearchLinesResult>;
   /** 字段值过滤。 */
-  filter(cond: FieldCondition | null, maxResults: number, shouldCancel?: () => boolean): Promise<FilterLinesResult>;
+  filter(
+    cond: FieldCondition | null,
+    maxResults: number,
+    shouldCancel?: () => boolean
+  ): Promise<FilterLinesResult>;
   /** 释放资源（关闭 reader / 终止 worker）。 */
   dispose(): Promise<void>;
 }
@@ -93,7 +100,12 @@ export class MainThreadIndexHost implements IndexHost {
     const li = this.index;
     return {
       index: li,
-      stats: { buildMs: li.buildMs, eof: li.eof, totalBytes: li.totalBytes, totalLines: li.totalLines },
+      stats: {
+        buildMs: li.buildMs,
+        eof: li.eof,
+        totalBytes: li.totalBytes,
+        totalLines: li.totalLines,
+      },
     };
   }
 
@@ -104,10 +116,20 @@ export class MainThreadIndexHost implements IndexHost {
     maxResults: number,
     shouldCancel?: () => boolean
   ): Promise<SearchLinesResult> {
-    return searchLines(this.reader!, this.index!, { query, field, scope, maxResults, shouldCancel });
+    return searchLines(this.reader!, this.index!, {
+      query,
+      field,
+      scope,
+      maxResults,
+      shouldCancel,
+    });
   }
 
-  async filter(cond: FieldCondition | null, maxResults: number, shouldCancel?: () => boolean): Promise<FilterLinesResult> {
+  async filter(
+    cond: FieldCondition | null,
+    maxResults: number,
+    shouldCancel?: () => boolean
+  ): Promise<FilterLinesResult> {
     return filterLines(this.reader!, this.index!, cond, { maxResults, shouldCancel });
   }
 
@@ -180,7 +202,9 @@ export class WorkerIndexHost implements IndexHost {
   private onMessage(m: WorkerResponse): void {
     if (m.type === 'progress') {
       // 构建进度：转发给该请求的 onProgress（大文件构建期间供宿主反馈进展）。
-      this.pending.get(m.requestId)?.progress?.({ bytesRead: m.bytesRead, lines: m.lines, done: false });
+      this.pending
+        .get(m.requestId)
+        ?.progress?.({ bytesRead: m.bytesRead, lines: m.lines, done: false });
       return;
     }
     if (m.type === 'built') {
@@ -193,7 +217,12 @@ export class WorkerIndexHost implements IndexHost {
         });
         p.resolve({
           index,
-          stats: { buildMs: m.buildMs, eof: m.eof, totalBytes: m.totalBytes, totalLines: m.totalLines },
+          stats: {
+            buildMs: m.buildMs,
+            eof: m.eof,
+            totalBytes: m.totalBytes,
+            totalLines: m.totalLines,
+          },
         });
       }
       return;
@@ -259,12 +288,20 @@ export class WorkerIndexHost implements IndexHost {
         }, 30);
         stop = () => clearInterval(timer);
       }
-      this.pending.set(requestId, { resolve: (v) => resolve(v as SearchLinesResult), reject, stop });
+      this.pending.set(requestId, {
+        resolve: (v) => resolve(v as SearchLinesResult),
+        reject,
+        stop,
+      });
       this.post({ type: 'search', requestId, query, field, scope, maxResults });
     });
   }
 
-  async filter(cond: FieldCondition | null, maxResults: number, shouldCancel?: () => boolean): Promise<FilterLinesResult> {
+  async filter(
+    cond: FieldCondition | null,
+    maxResults: number,
+    shouldCancel?: () => boolean
+  ): Promise<FilterLinesResult> {
     const requestId = this.nextId++;
     return new Promise<FilterLinesResult>((resolve, reject) => {
       let stop: (() => void) | undefined;
@@ -277,7 +314,11 @@ export class WorkerIndexHost implements IndexHost {
         }, 30);
         stop = () => clearInterval(timer);
       }
-      this.pending.set(requestId, { resolve: (v) => resolve(v as FilterLinesResult), reject, stop });
+      this.pending.set(requestId, {
+        resolve: (v) => resolve(v as FilterLinesResult),
+        reject,
+        stop,
+      });
       this.post({ type: 'filter', requestId, cond, maxResults });
     });
   }
@@ -318,7 +359,10 @@ export function createIndexHost(workerScriptPath?: string): IndexHost {
       return new WorkerIndexHost(workerScriptPath);
     } catch (e) {
       // 仅能捕获同步失败（如参数非法）；异步加载失败见 buildIndexWithFallback。
-      console.warn('[indexHost] worker 无法启动（同步错误），改用主线程索引：', e instanceof Error ? e.message : String(e));
+      console.warn(
+        '[indexHost] worker 无法启动（同步错误），改用主线程索引：',
+        e instanceof Error ? e.message : String(e)
+      );
     }
   } else if (workerScriptPath) {
     // 已达并发上限：退化主线程，避免极端多开耗尽线程/内存。

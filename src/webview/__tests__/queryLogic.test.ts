@@ -79,7 +79,13 @@ test('defaultFieldLayout: 全可见、按推断顺序', () => {
 test('normalizeFieldLayout: 裁剪脏数据 / 去重 / hidden 优先', () => {
   const known = new Set(FIELDS.map((f) => f.key));
   const l = normalizeFieldLayout(
-    { pinned: ['id', 'id'], order: ['missing', 'name', 'secret'], hidden: ['secret'], maxKeys: 99, bogus: true },
+    {
+      pinned: ['id', 'id'],
+      order: ['missing', 'name', 'secret'],
+      hidden: ['secret'],
+      maxKeys: 99,
+      bogus: true,
+    },
     known
   );
   assert.deepEqual(l.pinned, ['id']);
@@ -92,7 +98,12 @@ test('normalizeFieldLayout: 裁剪脏数据 / 去重 / hidden 优先', () => {
 });
 
 test('visibleFieldKeys: pinned 优先 -> order，隐藏剔除，截断到 maxKeys', () => {
-  const layout = { pinned: ['age'], order: ['name', 'id', 'secret'] as string[], hidden: ['secret'], maxKeys: 2 };
+  const layout = {
+    pinned: ['age'],
+    order: ['name', 'id', 'secret'] as string[],
+    hidden: ['secret'],
+    maxKeys: 2,
+  };
   assert.deepEqual(visibleFieldKeys(FIELDS, layout), ['age', 'name']);
 });
 
@@ -132,8 +143,14 @@ test('nextMatchIndex / prevMatchIndex 循环', () => {
 /* -------------------- 偏好持久化：合并 + 校验 -------------------- */
 
 test('toPersistedState: 序列化当前偏好', () => {
-  const p = toPersistedState({ fieldLayout: { pinned: [], order: ['a'], hidden: [], maxKeys: 4 }, filter: null });
-  assert.deepEqual(p, { fieldLayout: { pinned: [], order: ['a'], hidden: [], maxKeys: 4 }, filter: null });
+  const p = toPersistedState({
+    fieldLayout: { pinned: [], order: ['a'], hidden: [], maxKeys: 4 },
+    filter: null,
+  });
+  assert.deepEqual(p, {
+    fieldLayout: { pinned: [], order: ['a'], hidden: [], maxKeys: 4 },
+    filter: null,
+  });
 });
 
 test('mergePersistedState: 仅接受合法布局与过滤，非法丢弃', () => {

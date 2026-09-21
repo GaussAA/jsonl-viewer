@@ -201,7 +201,10 @@ describe('createQueryActions（T5 #31 抽取回归）', () => {
     const actions = createQueryActions(h.deps);
 
     actions.runSearch('big');
-    h.resolveLast({ matches: Array.from({ length: SEARCH_LIMIT + 1 }, (_, i) => i), total: SEARCH_LIMIT + 1 });
+    h.resolveLast({
+      matches: Array.from({ length: SEARCH_LIMIT + 1 }, (_, i) => i),
+      total: SEARCH_LIMIT + 1,
+    });
     await flush();
 
     assert.strictEqual(h.state.searchMatches.length, SEARCH_LIMIT, '截断到 SEARCH_LIMIT');

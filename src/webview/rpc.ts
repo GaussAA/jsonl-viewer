@@ -8,13 +8,13 @@
  * 协议类型与端点常量复用 ../protocol/rpc.ts（单一来源）。
  */
 
-import {
-  HostEndpoint,
-  HostReply,
-  isRpcMessage,
-  makeRequestId,
+import { HostEndpoint, HostReply, isRpcMessage, makeRequestId } from '../protocol/rpc.ts';
+import type {
+  InitPayload,
+  JumpToSourcePayload,
+  RpcMessage,
+  StaleFilePayload,
 } from '../protocol/rpc.ts';
-import type { InitPayload, JumpToSourcePayload, RpcMessage, StaleFilePayload } from '../protocol/rpc.ts';
 import { RPC_TIMEOUT_MS } from '../constants.ts';
 
 /** webview 侧向宿主发消息 API 的最小接口（即 acquireVsCodeApi 的返回）。 */
@@ -46,9 +46,7 @@ export class CancelledError extends Error {
  * 从全局取出 VS Code 注入的 acquireVsCodeApi 并生成 API。
  * 传入可选的 global 对象以便单测注入假实现；默认读 globalThis。
  */
-export function createVSCodeApi(
-  source?: { acquireVsCodeApi?: ApiFactory }
-): VSCodeApi | null {
+export function createVSCodeApi(source?: { acquireVsCodeApi?: ApiFactory }): VSCodeApi | null {
   const ctx = (source ?? globalThis) as { acquireVsCodeApi?: ApiFactory };
   if (typeof ctx.acquireVsCodeApi !== 'function') return null;
   return ctx.acquireVsCodeApi();

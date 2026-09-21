@@ -2,12 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { LineIndex } from '../../indexer/lineIndex.ts';
 import { MemoryReader } from '../../parser/jsonParser.ts';
-import {
-  inferFields,
-  fieldTypeOf,
-  ARRAY_RECORD_KEY,
-  SCALAR_RECORD_KEY,
-} from '../inferFields.ts';
+import { inferFields, fieldTypeOf, ARRAY_RECORD_KEY, SCALAR_RECORD_KEY } from '../inferFields.ts';
 
 async function inferFromString(
   s: string,
@@ -65,11 +60,7 @@ test('坏行与空行跳过：不计入字段，且出现在 errorLines', async 
 });
 
 test('类型推断：混合类型得到计数、主导类型与恒定型标记', async () => {
-  const s = [
-    '{"m":1}',
-    '{"m":"str"}',
-    '{"m":2}',
-  ].join('\n');
+  const s = ['{"m":1}', '{"m":"str"}', '{"m":2}'].join('\n');
   const res = await inferFromString(s);
   const m = res.fields.find((f) => f.key === 'm')!;
   assert.equal(m.types.number, 2);

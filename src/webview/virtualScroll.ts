@@ -425,7 +425,8 @@ export class VirtualRecordList {
       if (kind === 'object' || kind === 'array') {
         const cnt = document.createElement('span');
         cnt.className = 'jlv-type-badge string';
-        const n = entry.count ?? (kind === 'object' ? countKeys(entry.value) : countItems(entry.value));
+        const n =
+          entry.count ?? (kind === 'object' ? countKeys(entry.value) : countItems(entry.value));
         cnt.textContent = `${n} ${kind === 'object' ? 'keys' : 'items'}`;
         head.appendChild(cnt);
       }
@@ -552,7 +553,12 @@ export class VirtualRecordList {
 
     /* 第一行：首页 « ‹ 页码窗口 › » 末页 */
     this.navEl.textContent = '';
-    const mkBtn = (label: string, title: string, onClick: () => void, nav: boolean): HTMLButtonElement => {
+    const mkBtn = (
+      label: string,
+      title: string,
+      onClick: () => void,
+      nav: boolean
+    ): HTMLButtonElement => {
       const b = document.createElement('button');
       b.type = 'button';
       b.className = 'jlv-pager-btn';

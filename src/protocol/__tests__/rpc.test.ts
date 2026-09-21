@@ -17,9 +17,16 @@ const req = (type: string): unknown => ({ type });
 
 /** 各端点的默认 handler：返回完整 HostResponse（含 reply 类型与 requestId）。 */
 const baseHandlers: HostHandlerMap = {
-  [HostEndpoint.READY]: () => initReply({ uri: 'u', totalLines: 0, totalBytes: 0, buildMs: 0, eof: true }),
+  [HostEndpoint.READY]: () =>
+    initReply({ uri: 'u', totalLines: 0, totalBytes: 0, buildMs: 0, eof: true }),
   [HostEndpoint.GET_OVERVIEW]: (r) =>
-    okReply(HostReply.OVERVIEW, r.requestId, { uri: 'u', totalLines: 0, totalBytes: 0, buildMs: 0, eof: true }),
+    okReply(HostReply.OVERVIEW, r.requestId, {
+      uri: 'u',
+      totalLines: 0,
+      totalBytes: 0,
+      buildMs: 0,
+      eof: true,
+    }),
   [HostEndpoint.GET_SAMPLE_FIELDS]: (r) =>
     okReply(HostReply.SAMPLE_FIELDS, r.requestId, { fields: [], total: 0, scanned: 0 }),
   [HostEndpoint.READ_RECORDS]: (r) =>
@@ -28,11 +35,18 @@ const baseHandlers: HostHandlerMap = {
   [HostEndpoint.JUMP_TO_SOURCE]: (r) => okReply(HostReply.RESULT, r.requestId, { jumped: true }),
   [HostEndpoint.SEARCH]: (r) =>
     okReply(HostReply.SEARCH_RESULTS, r.requestId, { matches: [], total: 0, truncated: false }),
-  [HostEndpoint.FILTER]: (r) => okReply(HostReply.FILTER_RESULTS, r.requestId, { matches: null, total: 0 }),
+  [HostEndpoint.FILTER]: (r) =>
+    okReply(HostReply.FILTER_RESULTS, r.requestId, { matches: null, total: 0 }),
   [HostEndpoint.PERSIST_STATE]: (r) => okReply(HostReply.RESULT, r.requestId, { ok: true }),
   [HostEndpoint.LOAD_STATE]: (r) => okReply(HostReply.RESULT, r.requestId, undefined),
   [HostEndpoint.RELOAD]: (r) =>
-    okReply(HostReply.OVERVIEW, r.requestId, { uri: 'u', totalLines: 0, totalBytes: 0, buildMs: 0, eof: true }),
+    okReply(HostReply.OVERVIEW, r.requestId, {
+      uri: 'u',
+      totalLines: 0,
+      totalBytes: 0,
+      buildMs: 0,
+      eof: true,
+    }),
   [HostEndpoint.CANCEL]: () => undefined,
 };
 
@@ -53,7 +67,13 @@ test('isHostRequest 识别所有 HostEndpoint 值（键大写、值是小写端�
 });
 
 test('READY 握手能返回 init 回执（此前 isHostRequest 误杀导致宿主永不回包）', async () => {
-  const overview: OverviewPayload = { uri: 'file:///x.jsonl', totalLines: 3, totalBytes: 9, buildMs: 1, eof: true };
+  const overview: OverviewPayload = {
+    uri: 'file:///x.jsonl',
+    totalLines: 3,
+    totalBytes: 9,
+    buildMs: 1,
+    eof: true,
+  };
   const { response } = await call(req(HostEndpoint.READY), {
     ...baseHandlers,
     [HostEndpoint.READY]: () => initReply(overview),
@@ -82,8 +102,14 @@ test('READ_RECORDS 分发到 handler 并回 RECORDS', async () => {
     { type: HostEndpoint.READ_RECORDS, requestId: 'r1', startLine: 3, count: 5 },
     {
       ...baseHandlers,
-      [HostEndpoint.READ_RECORDS]: (r) =>
-        ((got = [r.startLine, r.count]), okReply(HostReply.RECORDS, r.requestId, { startLine: r.startLine, items: [], hasMore: false })),
+      [HostEndpoint.READ_RECORDS]: (r) => (
+        (got = [r.startLine, r.count]),
+        okReply(HostReply.RECORDS, r.requestId, {
+          startLine: r.startLine,
+          items: [],
+          hasMore: false,
+        })
+      ),
     }
   );
   assert.deepEqual(got, [3, 5]);
@@ -97,7 +123,10 @@ test('READ_RECORD 分发并回 RESULT', async () => {
     { type: HostEndpoint.READ_RECORD, requestId: 'r2', line: 42 },
     {
       ...baseHandlers,
-      [HostEndpoint.READ_RECORD]: (r) => ((gotLine = r.line), okReply(HostReply.RESULT, r.requestId, { ok: true, value: 1 })),
+      [HostEndpoint.READ_RECORD]: (r) => (
+        (gotLine = r.line),
+        okReply(HostReply.RESULT, r.requestId, { ok: true, value: 1 })
+      ),
     }
   );
   assert.equal(gotLine, 42);
@@ -111,8 +140,10 @@ test('GET_SAMPLE_FIELDS 传 count 并回 SAMPLE_FIELDS', async () => {
     { type: HostEndpoint.GET_SAMPLE_FIELDS, requestId: 'r3', count: 77 },
     {
       ...baseHandlers,
-      [HostEndpoint.GET_SAMPLE_FIELDS]: (r) =>
-        ((gotCount = r.count), okReply(HostReply.SAMPLE_FIELDS, r.requestId, { fields: [], total: 0, scanned: 0 })),
+      [HostEndpoint.GET_SAMPLE_FIELDS]: (r) => (
+        (gotCount = r.count),
+        okReply(HostReply.SAMPLE_FIELDS, r.requestId, { fields: [], total: 0, scanned: 0 })
+      ),
     }
   );
   assert.equal(gotCount, 77);
@@ -125,8 +156,10 @@ test('SEARCH 传 query/field/scope 并回 SEARCH_RESULTS', async () => {
     { type: HostEndpoint.SEARCH, requestId: 'r4', query: 'abc', field: 'name', scope: '0:5' },
     {
       ...baseHandlers,
-      [HostEndpoint.SEARCH]: (r) =>
-        ((got = [r.query, r.field, r.scope]), okReply(HostReply.SEARCH_RESULTS, r.requestId, { matches: [], total: 0, truncated: false })),
+      [HostEndpoint.SEARCH]: (r) => (
+        (got = [r.query, r.field, r.scope]),
+        okReply(HostReply.SEARCH_RESULTS, r.requestId, { matches: [], total: 0, truncated: false })
+      ),
     }
   );
   assert.deepEqual(got, ['abc', 'name', '0:5']);
@@ -139,13 +172,18 @@ test('FILTER 分发并回 FILTER_RESULTS', async () => {
     { type: HostEndpoint.FILTER, requestId: 'r5', field: 'ok', op: 'eq', value: 'true' },
     {
       ...baseHandlers,
-      [HostEndpoint.FILTER]: (r) =>
-        ((got = [r.field, r.op, r.value]), okReply(HostReply.FILTER_RESULTS, r.requestId, { matches: [1, 2], total: 2 })),
+      [HostEndpoint.FILTER]: (r) => (
+        (got = [r.field, r.op, r.value]),
+        okReply(HostReply.FILTER_RESULTS, r.requestId, { matches: [1, 2], total: 2 })
+      ),
     }
   );
   assert.deepEqual(got, ['ok', 'eq', 'true']);
   assert.equal(response?.type, HostReply.FILTER_RESULTS);
-  assert.deepEqual((response as unknown as { payload: { matches: number[] } }).payload.matches, [1, 2]);
+  assert.deepEqual(
+    (response as unknown as { payload: { matches: number[] } }).payload.matches,
+    [1, 2]
+  );
 });
 
 test('JUMP_TO_SOURCE 传行号并回 RESULT', async () => {
@@ -154,7 +192,10 @@ test('JUMP_TO_SOURCE 传行号并回 RESULT', async () => {
     { type: HostEndpoint.JUMP_TO_SOURCE, requestId: 'r6', line: 9 },
     {
       ...baseHandlers,
-      [HostEndpoint.JUMP_TO_SOURCE]: (r) => (void (gotLine = r.line), okReply(HostReply.RESULT, r.requestId, { jumped: true })),
+      [HostEndpoint.JUMP_TO_SOURCE]: (r) => (
+        void (gotLine = r.line),
+        okReply(HostReply.RESULT, r.requestId, { jumped: true })
+      ),
     }
   );
   assert.equal(gotLine, 9);
@@ -167,7 +208,10 @@ test('PERSIST_STATE / LOAD_STATE 转发 key 与 value', async () => {
     { type: HostEndpoint.PERSIST_STATE, requestId: 'r7', key: 'k', value: { a: 1 } },
     {
       ...baseHandlers,
-      [HostEndpoint.PERSIST_STATE]: (r) => (void (persisted = [r.key, r.value]), okReply(HostReply.RESULT, r.requestId, { ok: true })),
+      [HostEndpoint.PERSIST_STATE]: (r) => (
+        void (persisted = [r.key, r.value]),
+        okReply(HostReply.RESULT, r.requestId, { ok: true })
+      ),
     }
   );
   assert.deepEqual(persisted, ['k', { a: 1 }]);
@@ -177,7 +221,8 @@ test('PERSIST_STATE / LOAD_STATE 转发 key 与 value', async () => {
     { type: HostEndpoint.LOAD_STATE, requestId: 'r8', key: 'k2' },
     {
       ...baseHandlers,
-      [HostEndpoint.LOAD_STATE]: (r) => okReply(HostReply.RESULT, r.requestId, r.key === 'k2' ? 'v2' : undefined),
+      [HostEndpoint.LOAD_STATE]: (r) =>
+        okReply(HostReply.RESULT, r.requestId, r.key === 'k2' ? 'v2' : undefined),
     }
   );
   assert.deepEqual((load.response as unknown as { payload: unknown }).payload, 'v2');
@@ -189,11 +234,20 @@ test('RELOAD 回新概览；CANCEL 无回执', async () => {
     {
       ...baseHandlers,
       [HostEndpoint.RELOAD]: (r) =>
-        okReply(HostReply.OVERVIEW, r.requestId, { uri: 'u', totalLines: 5, totalBytes: 50, buildMs: 1, eof: true }),
+        okReply(HostReply.OVERVIEW, r.requestId, {
+          uri: 'u',
+          totalLines: 5,
+          totalBytes: 50,
+          buildMs: 1,
+          eof: true,
+        }),
     }
   );
   assert.equal(reload.response?.type, HostReply.OVERVIEW);
-  assert.equal((reload.response as unknown as { payload: { totalLines: number } }).payload.totalLines, 5);
+  assert.equal(
+    (reload.response as unknown as { payload: { totalLines: number } }).payload.totalLines,
+    5
+  );
 
   let cancelled: string | undefined;
   const cancel = await call(

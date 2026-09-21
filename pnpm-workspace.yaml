@@ -1,6 +1,6 @@
 # pnpm workspace / settings (pnpm 10+ reads settings here, see https://pnpm.io/settings)
 packages:
-  - "."
+  - '.'
 
 # Allow esbuild to run its postinstall (it ships native platform binaries).
 onlyBuiltDependencies:

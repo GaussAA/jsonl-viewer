@@ -63,8 +63,7 @@ function bufferIncludesCI(lineBuf: Buffer, queryBuf: Buffer): boolean {
 }
 
 /** 大小写敏感的 Buffer includes（直接用 Node 原生 Buffer.includes）。 */
-const bufferIncludesCS = (lineBuf: Buffer, queryBuf: Buffer): boolean =>
-  lineBuf.includes(queryBuf);
+const bufferIncludesCS = (lineBuf: Buffer, queryBuf: Buffer): boolean => lineBuf.includes(queryBuf);
 
 /* ------------------------------ 搜索 ------------------------------ */
 
@@ -136,7 +135,8 @@ export async function searchLines(
         caseInsensitive: ci !== false,
       });
     } else {
-      hit = ci !== false ? bufferIncludesCI(r.bytes, queryBuf!) : bufferIncludesCS(r.bytes, queryBuf!);
+      hit =
+        ci !== false ? bufferIncludesCI(r.bytes, queryBuf!) : bufferIncludesCS(r.bytes, queryBuf!);
     }
 
     if (hit) {

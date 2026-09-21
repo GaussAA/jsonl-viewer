@@ -1,9 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import {
-  createServiceRegistry,
-  type AsyncDisposableLike,
-} from '../serviceRegistry.ts';
+import { createServiceRegistry, type AsyncDisposableLike } from '../serviceRegistry.ts';
 
 /**
  * serviceRegistry 单测（T4/A4）。

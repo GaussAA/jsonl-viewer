@@ -131,9 +131,7 @@ export function createQueryActions(deps: QueryActionsDeps): QueryActions {
     if (matches.length === 0) return;
     const current = state.selectedLine;
     const idx =
-      dir === 1
-        ? nextMatchIndex(matches, current ?? -1)
-        : prevMatchIndex(matches, current ?? -1);
+      dir === 1 ? nextMatchIndex(matches, current ?? -1) : prevMatchIndex(matches, current ?? -1);
     if (idx < 0) return;
     deps.getToolbar().setSearchResult(matches.length, idx);
     jumpToMatch(matches[idx]);
@@ -199,5 +197,13 @@ export function createQueryActions(deps: QueryActionsDeps): QueryActions {
     deps.schedulePersist();
   }
 
-  return { supersede, jumpToMatch, runSearch, stepSearch, runFilter, clearFilterForCond, applyLayout };
+  return {
+    supersede,
+    jumpToMatch,
+    runSearch,
+    stepSearch,
+    runFilter,
+    clearFilterForCond,
+    applyLayout,
+  };
 }

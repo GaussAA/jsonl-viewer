@@ -108,7 +108,13 @@ test('TreeState: collapseAll / expandAll / expandToLevel 重置覆盖', () => {
   assert.equal(st.maxDepth, 3);
   assert.equal(st.isExpanded(seg1, 1), true);
   assert.equal(st.isExpanded([...seg1, { kind: 'key' as const, key: 'x' }], 2), true);
-  assert.equal(st.isExpanded([...seg1, { kind: 'key' as const, key: 'x' }, { kind: 'key' as const, key: 'y' }], 3), true);
+  assert.equal(
+    st.isExpanded(
+      [...seg1, { kind: 'key' as const, key: 'x' }, { kind: 'key' as const, key: 'y' }],
+      3
+    ),
+    true
+  );
 
   st.expandAll();
   assert.equal(st.maxDepth > 100, true);
@@ -168,7 +174,7 @@ test('expandContainer: 分段索引正确从 0 开始、段正确', () => {
 });
 
 test('expandContainer: 对象 key 正确映射为 PathSeg', () => {
-  const { items } = expandContainer({ foo: 1, 'bar': 2 }, '$', {});
+  const { items } = expandContainer({ foo: 1, bar: 2 }, '$', {});
   assert.equal(items[0].seg.kind, 'key');
   assert.equal(items[0].seg.key, 'foo');
   assert.equal(items[0].value, 1);

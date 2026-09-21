@@ -44,24 +44,24 @@ pnpm release 1.0.9    # 显式指定版本（须与 package.json 一致）
 
 该脚本依次执行：
 
-| 步骤 | 命令 | 说明 |
-|------|------|------|
-| 类型检查 | `pnpm typecheck` | `tsc --noEmit`，报错即中断 |
-| 构建 | `pnpm build` | `node build.mjs --minify`，产出 `dist/webview.js` 与 `dist/extension.js` |
-| 打包 | `npx vsce package` | 生成 VSIX |
-| 校验 | `node:sha256` | 写入 `<版本>.vsix.sha256` |
-| 版本记录 | — | 更新 `releases/LATEST` |
-| 打 tag | `git tag v<版本>` | 打上 `v1.0.x` 标签 |
+| 步骤     | 命令               | 说明                                                                     |
+| -------- | ------------------ | ------------------------------------------------------------------------ |
+| 类型检查 | `pnpm typecheck`   | `tsc --noEmit`，报错即中断                                               |
+| 构建     | `pnpm build`       | `node build.mjs --minify`，产出 `dist/webview.js` 与 `dist/extension.js` |
+| 打包     | `npx vsce package` | 生成 VSIX                                                                |
+| 校验     | `node:sha256`      | 写入 `<版本>.vsix.sha256`                                                |
+| 版本记录 | —                  | 更新 `releases/LATEST`                                                   |
+| 打 tag   | `git tag v<版本>`  | 打上 `v1.0.x` 标签                                                       |
 
 ### 2.3 产物清单
 
 打包完成后，`releases/` 目录下产出：
 
-| 文件 | 说明 |
-|------|------|
-| `jsonl-viewer-<版本>.vsix` | 可直接安装的 VSIX 安装包 |
+| 文件                              | 说明                               |
+| --------------------------------- | ---------------------------------- |
+| `jsonl-viewer-<版本>.vsix`        | 可直接安装的 VSIX 安装包           |
 | `jsonl-viewer-<版本>.vsix.sha256` | SHA-256 校验和（可追溯产物完整性） |
-| `LATEST` | 最新版本号记录 |
+| `LATEST`                          | 最新版本号记录                     |
 
 > 提示：脚本打包**前**会提示「工作区有未提交改动」并建议先 commit，否则 tag 不会指向本次代码。请先提交代码再打包。
 

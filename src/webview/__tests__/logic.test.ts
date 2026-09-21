@@ -70,8 +70,14 @@ test('computeFetchWindow: 中间一块已缓存 -> 请求左右两段（连续�
 });
 
 test('computeFetchWindow: wantEnd<=wantStart -> null', () => {
-  assert.equal(computeFetchWindow(5, 5, () => false), null);
-  assert.equal(computeFetchWindow(8, 3, () => false), null);
+  assert.equal(
+    computeFetchWindow(5, 5, () => false),
+    null
+  );
+  assert.equal(
+    computeFetchWindow(8, 3, () => false),
+    null
+  );
 });
 
 test('segmentSortedLines: 连续命中 -> 单个连续段', () => {
@@ -145,13 +151,13 @@ test('summarizeRecord: 优先使用字段推断，缺少时回退顶层 key', ()
     { key: 'name', type: 'string' },
   ]);
   // 先取字段推断的 age/name，再用顶层 key 补齐到上限
-  assert.deepEqual(byFields.map((x) => x.key), ['age', 'name', 'tags', 'note']);
+  assert.deepEqual(
+    byFields.map((x) => x.key),
+    ['age', 'name', 'tags', 'note']
+  );
   const fallback = summarizeRecord(rec, null);
   assert.equal(fallback.length, 4); // 顶层 4 个 key
-  assert.deepEqual(
-    fallback.map((x) => x.key).sort(),
-    ['age', 'name', 'note', 'tags']
-  );
+  assert.deepEqual(fallback.map((x) => x.key).sort(), ['age', 'name', 'note', 'tags']);
 });
 
 test('summarizeRecord: 非对象值 / 标量直接展示', () => {

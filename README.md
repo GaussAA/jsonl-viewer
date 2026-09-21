@@ -82,8 +82,8 @@ pnpm test           # node --test "src/**/*.test.ts"
 
 > 数值随功能演进变化，以 `pnpm build` 后 `dist/` 实际体积为准（约 20–90 KB 量级）。
 
-| 产物 | 体积 |
-| --- | --- |
+| 产物                              | 体积        |
+| --------------------------------- | ----------- |
 | `dist/extension.js`（扩展主进程） | ~20 KB 量级 |
 | `dist/webview.js`（webview 前端） | ~80 KB 量级 |
 

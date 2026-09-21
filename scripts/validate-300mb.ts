@@ -16,7 +16,12 @@ import * as nodePath from 'node:path';
 import { tmpdir } from 'node:os';
 import { performance } from 'node:perf_hooks';
 import { LineIndex } from '../src/indexer/lineIndex.ts';
-import { openFileReader, readRecord, readBatch, type ByteReader } from '../src/parser/jsonParser.ts';
+import {
+  openFileReader,
+  readRecord,
+  readBatch,
+  type ByteReader,
+} from '../src/parser/jsonParser.ts';
 import { searchLines } from '../src/host/searchEngine.ts';
 import { DataService } from '../src/host/dataService.ts';
 
@@ -33,7 +38,10 @@ function bufIncludesCI(hay: Buffer, needle: Buffer): boolean {
       const b = needle[j];
       const aF = a >= 65 && a <= 90 ? a + 32 : a;
       const bF = b >= 65 && b <= 90 ? b + 32 : b;
-      if (aF !== bF) { ok = false; break; }
+      if (aF !== bF) {
+        ok = false;
+        break;
+      }
     }
     if (ok) return true;
   }
@@ -42,7 +50,7 @@ function bufIncludesCI(hay: Buffer, needle: Buffer): boolean {
 
 async function main(): Promise<void> {
   const sizeMB = statSync(FILE).size / 1048576;
-  console.log(`[validate] file=${FILE} size=${(sizeMB).toFixed(1)}MB`);
+  console.log(`[validate] file=${FILE} size=${sizeMB.toFixed(1)}MB`);
 
   // ---- 1) 索引构建：耗时 + 内存 ----
   const memBefore = process.memoryUsage().heapUsed;
@@ -65,13 +73,15 @@ async function main(): Promise<void> {
   const whole = readFileSync(FILE);
   let brute = whole.toString('utf8').split('\n');
   if (brute.length && brute[brute.length - 1] === '') brute = brute.slice(0, -1);
-  const bruteBuf = whole; // 用于字节级暴力搜索
   const bruteMs = performance.now() - tB;
   console.log(`[validate] brute split: lines=${brute.length} ms=${bruteMs.toFixed(0)}`);
 
   let failures = 0;
   const check = (cond: boolean, msg: string): void => {
-    if (!cond) { failures++; console.log(`  ✗ ${msg}`); }
+    if (!cond) {
+      failures++;
+      console.log(`  ✗ ${msg}`);
+    }
   };
 
   check(brute.length === li.totalLines, `行数一致 brute=${brute.length} index=${li.totalLines}`);
@@ -87,7 +97,10 @@ async function main(): Promise<void> {
     const got = await readRecord(line, li, reader);
     const expected = JSON.parse(brute[line]);
     if (got.ok && JSON.stringify(got.value) === JSON.stringify(expected)) randomOk++;
-    else { failures++; console.log(`  ✗ random read line ${line}: ok=${got.ok}`); }
+    else {
+      failures++;
+      console.log(`  ✗ random read line ${line}: ok=${got.ok}`);
+    }
   }
   console.log(`[validate] random read: ${randomOk}/${N} 一致`);
 
@@ -105,12 +118,19 @@ async function main(): Promise<void> {
       if (!g.ok || JSON.stringify(g.value) !== JSON.stringify(JSON.parse(exp[k]))) match = false;
     }
     if (match) batchOk++;
-    else { failures++; console.log(`  ✗ batch start=${start}`); }
+    else {
+      failures++;
+      console.log(`  ✗ batch start=${start}`);
+    }
   }
   console.log(`[validate] batch read: ${batchOk}/4 窗口一致`);
 
   // ---- 4) 全文搜索：searchLines 与暴力扫描集合一致 ----
-  const queries = ['"kind":"sample"', `"id":${Math.floor(li.totalLines / 3)}`, 'not-present-token-xyz'];
+  const queries = [
+    '"kind":"sample"',
+    `"id":${Math.floor(li.totalLines / 3)}`,
+    'not-present-token-xyz',
+  ];
   for (const q of queries) {
     const res = await searchLines(reader, li, { query: q });
     const qb = Buffer.from(q.toLowerCase(), 'utf8');
@@ -119,8 +139,12 @@ async function main(): Promise<void> {
       if (bufIncludesCI(Buffer.from(brute[i], 'utf8'), qb)) bruteMatches.push(i);
     }
     const gotSorted = [...res.matches].sort((a, b) => a - b);
-    const eq = gotSorted.length === bruteMatches.length && gotSorted.every((v, i) => v === bruteMatches[i]);
-    check(eq, `search "${q}" 匹配集一致 (index=${res.matches.length} brute=${bruteMatches.length})`);
+    const eq =
+      gotSorted.length === bruteMatches.length && gotSorted.every((v, i) => v === bruteMatches[i]);
+    check(
+      eq,
+      `search "${q}" 匹配集一致 (index=${res.matches.length} brute=${bruteMatches.length})`
+    );
     console.log(
       `[validate] search "${q}": index=${res.matches.length} brute=${bruteMatches.length} ` +
         `${eq ? '一致' : '不一致'} truncated=${res.truncated}`
@@ -145,11 +169,18 @@ async function main(): Promise<void> {
         summaryOk++;
       } else {
         failures++;
-        console.log(`  ✗ 阶段三 readRecords 项异常 line=${it.line} ok=${it.ok} hasSummary=${!!it.summary}`);
+        console.log(
+          `  ✗ 阶段三 readRecords 项异常 line=${it.line} ok=${it.ok} hasSummary=${!!it.summary}`
+        );
       }
     }
-    check(summaryOk === rp.items.length, `阶段三 readRecords 列表摘要契约 (${summaryOk}/${rp.items.length})`);
-    console.log(`[validate/phase3] 300MB 普通行列表摘要: ${summaryOk}/${rp.items.length} 带 summary`);
+    check(
+      summaryOk === rp.items.length,
+      `阶段三 readRecords 列表摘要契约 (${summaryOk}/${rp.items.length})`
+    );
+    console.log(
+      `[validate/phase3] 300MB 普通行列表摘要: ${summaryOk}/${rp.items.length} 带 summary`
+    );
     await ds.dispose();
   }
   {
@@ -175,7 +206,9 @@ async function main(): Promise<void> {
       );
       const full = await ds.readRecord(1);
       check(
-        full.ok === true && full.value !== undefined && (full.value as { data: string }).data.length === 300 * 1024,
+        full.ok === true &&
+          full.value !== undefined &&
+          (full.value as { data: string }).data.length === 300 * 1024,
         '阶段三 详情 readRecord 仍拉全量'
       );
       console.log(
@@ -195,7 +228,10 @@ async function main(): Promise<void> {
     if (existsSync(workerScriptPath)) {
       const ds = new DataService('file://' + FILE, FILE, { sampleLines: 10, workerScriptPath });
       const ov = await ds.getOverview();
-      check(ov.totalLines === brute.length, `worker getOverview 行数一致 (${ov.totalLines} vs ${brute.length})`);
+      check(
+        ov.totalLines === brute.length,
+        `worker getOverview 行数一致 (${ov.totalLines} vs ${brute.length})`
+      );
       for (const q of queries) {
         const res = await ds.search(q);
         const qb = Buffer.from(q.toLowerCase(), 'utf8');
@@ -208,8 +244,13 @@ async function main(): Promise<void> {
         // 与暴力解的前 res.matches.length 个匹配行一致即为正确。
         const expected = bm.slice(0, res.matches.length);
         const eq = got.length === expected.length && got.every((v, i) => v === expected[i]);
-        check(eq, `worker search "${q}" 一致 (${res.matches.length} vs brute=${bm.length}, truncated=${res.truncated})`);
-        console.log(`[validate/worker] search "${q}": ${res.matches.length} 一致=${eq} truncated=${res.truncated}`);
+        check(
+          eq,
+          `worker search "${q}" 一致 (${res.matches.length} vs brute=${bm.length}, truncated=${res.truncated})`
+        );
+        console.log(
+          `[validate/worker] search "${q}": ${res.matches.length} 一致=${eq} truncated=${res.truncated}`
+        );
       }
       await ds.dispose();
       console.log('[validate/worker] 路径通过');

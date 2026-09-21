@@ -21,14 +21,7 @@ import type { LineIndex } from '../indexer/lineIndex.ts';
 import type { ByteReader } from '../parser/jsonParser.ts';
 import { readRecord } from '../parser/jsonParser.ts';
 
-export type FieldType =
-  | 'string'
-  | 'number'
-  | 'boolean'
-  | 'null'
-  | 'object'
-  | 'array'
-  | 'undefined';
+export type FieldType = 'string' | 'number' | 'boolean' | 'null' | 'object' | 'array' | 'undefined';
 
 /** 数组型记录的伪字段键。 */
 export const ARRAY_RECORD_KEY = '$array';
@@ -214,7 +207,7 @@ export async function inferFields(
       alwaysArray: e.allArray,
       types: e.types,
     }))
-    .sort((a, b) => (b.freq - a.freq) || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+    .sort((a, b) => b.freq - a.freq || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
 
   return { fields, total, scanned, errorLines };
 }

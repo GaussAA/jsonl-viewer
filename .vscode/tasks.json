@@ -5,7 +5,10 @@
       "type": "npm",
       "script": "compile",
       "group": { "kind": "build", "isDefault": true },
-      "problemMatcher": { "owner": "typescript", "pattern": { "regexp": "^([^\\s].*)\\((\\d+),(\\d+)\\): (error) (.*)$" } }
+      "problemMatcher": {
+        "owner": "typescript",
+        "pattern": { "regexp": "^([^\\s].*)\\((\\d+),(\\d+)\\): (error) (.*)$" }
+      }
     }
   ]
 }

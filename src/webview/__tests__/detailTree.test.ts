@@ -1,7 +1,11 @@
 import { describe, it, before } from 'node:test';
 import assert from 'node:assert';
 import { setupWebviewDom } from './domHarness.ts';
-import { createDetailTree, type DetailTreeController, type DetailTreeNavHandlers } from '../detailTree.ts';
+import {
+  createDetailTree,
+  type DetailTreeController,
+  type DetailTreeNavHandlers,
+} from '../detailTree.ts';
 
 /**
  * detailTree 组件测试（覆盖率补强：视图层）。
@@ -70,7 +74,11 @@ describe('createDetailTree（视图层覆盖率补强）', () => {
 
     assert.deepStrictEqual(keys(h), ['id', 'name', 'nested', 'arr'], '四个顶层键');
     assert.strictEqual(rows(h).length, 4, '每个键一行');
-    assert.match(h.tree.root.querySelector('.jlv-detail-header')?.textContent ?? '', /Record #8/, '行号按 1 起展示');
+    assert.match(
+      h.tree.root.querySelector('.jlv-detail-header')?.textContent ?? '',
+      /Record #8/,
+      '行号按 1 起展示'
+    );
     assert.ok(h.tree.root.querySelector('.jlv-dh-crumb'), '存在面包屑根段');
   });
 
@@ -172,7 +180,11 @@ describe('createDetailTree（视图层覆盖率补强）', () => {
 
     h.tree.clear();
     assert.strictEqual(rows(h).length, 0, '树体清空');
-    assert.match(h.tree.root.querySelector('.jlv-tree-body')?.textContent ?? '', /点击左侧记录/, '提示未选中');
+    assert.match(
+      h.tree.root.querySelector('.jlv-tree-body')?.textContent ?? '',
+      /点击左侧记录/,
+      '提示未选中'
+    );
   });
 
   it('setNavEnabled：控制上一条/下一条按钮可用态', () => {
