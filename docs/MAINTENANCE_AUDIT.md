@@ -170,6 +170,8 @@
 | `c35731f` | `chore` | 新增 `.gitattributes` 统一 LF 行尾（修复 checkout 后 prettier 误报） |
 | `9a7dc8c` | `docs` | 修正 40 处机器绝对路径链接为相对路径 |
 | `5f8178d` | `refactor` | 6 处改用非变异数组 API（toSorted / toReversed）+ tsconfig lib 提至 ES2023 |
+| `597b430` | `fix(ci)` | 修复 `ci.yml` 的 `cache` 布尔语义与 `release.yml` 的 `secrets` 误用；两处 pnpm 版本改由 `packageManager` 唯一决定；新增 §2.6 |
+| `8afa191` | `chore` | `.gitignore` 增补临时产物命名，固化 `.scratch/` 统一入口 |
 
 > 说明：`package.json` / `pnpm-lock.yaml` 的改动**非人工编辑**，系安装 `jsdom` 与 `@types/jsdom` 时 pnpm 自动重写。清单与锁文件必须一致，否则 CI 以 `--frozen-lockfile` 安装会失败，故予接纳入库。
 
@@ -183,4 +185,7 @@
 4. **本机补跑集成测试**：`pnpm test:integration`（沙箱受限，见 2.5）。
 5. **按需回收磁盘**：`.vscode-test`（1.4 GB，可联网重下）与 `samples` 中可再生大样本（340 MB）——按需执行。
 6. **待确认后再动**：`samples/现网多轮已规整数据.jsonl`（232 MB）与 `query处置全景_...jsonl`（2.6 MB）疑为真实业务数据，删除前请确认是否另有留存。
+7. **启用分支保护 / 必需状态检查**（仓库设置，非代码）：把 `verify`、`lint`、`coverage` 设为必需检查。本次工作流失效潜伏两天而无人察觉，根因正是「红色 CI 不阻断任何操作」。
+8. **可选：把工作流静态校验纳入 lint job**：引入 `actionlint`（Go 单文件）或 `@action-validator/core`（npm），以静态拦截「上下文用错位置」这类**只在运行时暴露、且会静默让整份工作流失效**的错误（本次 `secrets` 误用即属此类，见 2.6）。
+9. **待大帅定夺的行为决策**：`release.yml` 的发布步骤现以 `github.event_name == 'push'` 为闸，故**手动触发不会发布**（仅构建并上传 VSIX）。若希望手动触发也能发布，需改动该行 `if`；因涉及 Marketplace 不可逆发布，本次未擅自更改。
 7. **可选后续**：~~`docs/CODE_WIKI.md` 含机器绝对路径~~ **✅ 已修（`9a7dc8c`）**；余留 2 处 `prefer-set-has` 警告经复核属过度建议，保留不改（判定见 §2.4）。
