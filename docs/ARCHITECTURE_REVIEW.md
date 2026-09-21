@@ -49,10 +49,10 @@ indexer/ parser/ infer/ perf/ constants.ts  ← 共享叶子（被 host/webview 
 
 | # | 位置 | 问题 | 后果 | 等级 | 修复建议 |
 |---|---|---|---|---|---|
-| **T1** | `extension.ts:156-315` `mountViewer` | 上帝函数：webview HTML 注入 + CSP/nonce + 12 个内联 RPC handler + stale 定时器 + 跳源 + 偏好持久化 + 服务注册表调用，单函数 ~160 行 | 改动任何宿主行为必动中心函数；命令/编辑器两路径虽共享（好 DRY）但代价是中心化 | 中（SRP） | A3：拆 `buildWebviewHtml()` / `registerHostHandlers()` / `startStaleWatch()` |
-| **T2** | `protocol/rpc.ts:241-334` `dispatchMessage` | 12 参数位置化签名 + 巨型 switch；注释自承"实际处理器另行实现" → 路由与处理分离却散两处 | 加一个端点须改 3 处（常量 / union 类型 / switch / 调用点内联 handler），易漏改 | 中（OCP/ISP + 抽象泄漏） | A2：handler 注册表 `Map<endpoint, fn>`，dispatch 查表分发 |
-| **T3** | `host/* → webview/queryLogic.ts` | host 反向依赖 webview（见 §二） | 核心层依赖 UI 层；若 webview 引入浏览器专属依赖会污染宿主；层边界失真 | 中（DIP） | A1：抽 `core/` 共享 `FieldCondition` + `matchesFilter` + `recordFieldValue` |
-| **T4** | `extension.ts:46,83-91` | 模块级全局单例 `serviceRegistry` / `openPanels` 未注入；`releaseService` 中 `void hit.svc.dispose()` 无 `.catch` | 隐式全局状态难测；dispose 当前不 reject（所有 await 已 `.catch`）但脆弱 | 低~中 | A4：dispose 补 `.catch`；registry 显式持有/可注入 |
+| **T1** | `extension.ts:156-315` `mountViewer` | 上帝函数：webview HTML 注入 + CSP/nonce + 12 个内联 RPC handler + stale 定时器 + 跳源 + 偏好持久化 + 服务注册表调用，单函数 ~160 行 | 改动任何宿主行为必动中心函数；命令/编辑器两路径虽共享（好 DRY）但代价是中心化 | 中（SRP） | ~~A3：拆 buildWebviewHtml()/registerHostHandlers()/startStaleWatch()~~ **✅ 已修复（A3）** |
+| **T2** | `protocol/rpc.ts:241-334` `dispatchMessage` | 12 参数位置化签名 + 巨型 switch；注释自承"实际处理器另行实现" → 路由与处理分离却散两处 | 加一个端点须改 3 处（常量 / union 类型 / switch / 调用点内联 handler），易漏改 | 中（OCP/ISP + 抽象泄漏） | ~~A2：handler 注册表 Map<endpoint,fn>，dispatch 查表分发~~ **✅ 已修复（A2）** |
+| **T3** | `host/* → webview/queryLogic.ts` | host 反向依赖 webview（见 §二） | 核心层依赖 UI 层；若 webview 引入浏览器专属依赖会污染宿主；层边界失真 | 中（DIP） | ~~A1：抽 core/ 共享 FieldCondition+matchesFilter+recordFieldValue~~ **✅ 已修复（A1）** |
+| **T4** | `extension.ts:46,83-91` | 模块级全局单例 `serviceRegistry` / `openPanels` 未注入；`releaseService` 中 `void hit.svc.dispose()` 无 `.catch` | 隐式全局状态难测；dispose 当前不 reject（所有 await 已 `.catch`）但脆弱 | 低~中 | ~~A4：dispose 补 .catch~~ **✅ 部分修复（A4：dispose 已补 .catch；registry 显式持有/注入待办）** |
 | **T5** | `webviewEntry.ts:200-1100` + `AppState:122-153` | 前端协调层膨胀（样式/横幅/分栏动画/响应式/搜索/过滤/导航/持久化/生命周期）+ 30+ 字段手写状态机 | 认知负担高；一处 state 字段改动波及众多闭包 | 中（前端 God Object） | 暂不拆（logic.ts 已隔离纯逻辑）；若加功能再抽协调器 |
 | **T6** | `extension.ts:164-177,127-140` | 两处 webview HTML 模板内联（mountViewer + notLocalHtml），CSP/nonce 内联 | 轻微重复；模板改动要改两处 | 低 | 抽 `renderWebviewHtml(nonce, csp)` 工厂 |
 | **T7** | `extension.ts:275` | 异常回执 `errReply(undefined, …)`，requestId 丢失 | webview 走全局 error handler 弹横幅，可能把单请求异常升级为全局提示 | 低 | 异常路径带 requestId 或明确走 banner 而非 error 广播 |
@@ -64,14 +64,12 @@ indexer/ parser/ infer/ perf/ constants.ts  ← 共享叶子（被 host/webview 
 
 ## 四、架构问题简述
 
-### 4.1 端点概念的"三处表达"
-同一个 RPC 端点在三处各自声明一次：
-1. `HostEndpoint` / `HostReply` 常量（`protocol/rpc.ts`）
-2. `HostRequest` / `HostResponse` 联合类型（`protocol/rpc.ts`）
-3. `dispatchMessage` 的 switch case（`protocol/rpc.ts`）
-4. `mountViewer` 内联的 12 个 handler（`extension.ts`）
+### 4.1 端点概念的"二处表达"（A2 已收敛）
+同一个 RPC 端点在两处声明：
+1. `HostEndpoint` / `HostReply` 常量 + `HostRequest` / `HostResponse` 联合类型（`protocol/rpc.ts`）
+2. `HostHandlerMap` 的对应字段 + 调用点（`registerHostHandlers`）注册的一个 handler（`extension.ts`）
 
-新增端点 = 改 4 处且需同步。这是扩展性的主要瓶颈，也是 T2 的根源。
+`dispatchMessage` 已无 switch 分支，纯做「类型校验 → 查表 → 调用 → 异常兜底」。新增端点 = 改 2 处（常量/联合类型 + HostHandlerMap 字段与注册），`dispatchMessage` 本体不变（OCP）。这是 A2 对 T2 根源的修复。
 
 ### 4.2 隐式全局状态
 `extension.ts` 模块顶层持有 `serviceRegistry`（uri→DataService 引用计数）、`openPanels`（uri→面板）。它们未被注入、不可在测试中隔离。当前单进程单扩展可接受，但与"显式优于隐式"相悖（T4）。
@@ -90,15 +88,15 @@ indexer/ parser/ infer/ perf/ constants.ts  ← 共享叶子（被 host/webview 
 
 | 原则 | 现状 | 判定 |
 |---|---|---|
-| **S** 单一职责 | 宿主层（`DataService`/`IndexHost`/`LineIndex`）内聚良好；`extension.mountViewer` 多职责；`dispatchMessage` 既路由又依赖外部 handler | **部分违反** |
-| **O** 开闭 | 加端点改多处 | **违反**（但端点已稳定，当前代价低） |
+| **S** 单一职责 | 宿主层内聚良好；`mountViewer` 已拆为 renderViewerHtml/registerHostHandlers/startStaleWatch（A3）；`dispatchMessage` 现为纯路由查表、handler 在调用点注册（A2） | **遵守（A3/A2 已修复）** |
+| **O** 开闭 | 加端点只需扩展 `HostHandlerMap` + 调用点注册一个 handler，`dispatchMessage` 本体不变 | **已修复（A2）** |
 | **L** 里氏替换 | `WorkerIndexHost` / `MainThreadIndexHost` 可互换，`DataService` 依赖 `IndexHost` 接口而非具体类（fallback 依赖此） | **遵守** |
-| **I** 接口隔离 | `dispatchMessage` 12 参数迫使调用者提供全部 handler（有默认兜底，实际不痛） | **轻微违反** |
-| **D** 依赖倒置 | host 依赖 webview 具体层（`queryLogic`） | **违反** |
+| **I** 接口隔离 | `HostHandlerMap` 按端点逐字段声明 typed handler，调用点仅注册所需端点 | **已修复（A2）** |
+| **D** 依赖倒置 | host 与 webview 均依赖 `core/query.ts` 共享纯层，层边界恢复单向 | **已修复（A1）** |
 
 ### DRY
 - **良好**：`searchEngine`（搜索/过滤算法单份）、`logic.ts`（LRUCache/ThrottleQueue/窗口计算单份）、`protocol/rpc.ts`（协议类型单份）、`LineIndex.build`（构建单份）。
-- **局部重复**：端点映射三处表达（T2）、HTML 模板两处（T6）。
+- **局部重复**：端点映射——常量+联合类型在 rpc.ts 单份、handler 注册在调用点（A2 已消除 dispatchMessage 内 switch 分支）；HTML 模板两处（T6，待 A 组外处理）。
 - 总体：**DRY 达标**，T3 的动机恰是 DRY（前后端过滤一致），只是归属错了层；**A1 已将其归位到 `src/core/query.ts`**，两端仍共用单一事实来源，且层边界恢复单向。
 
 ### KISS
@@ -131,7 +129,7 @@ indexer/ parser/ infer/ perf/ constants.ts  ← 共享叶子（被 host/webview 
 | **B4** 抽象"存储后端"多态（本地/远程/对象存储） | 当前仅 `file` + `vscode-remote` 且都走 `fsPath`；抽象过早 | YAGNI |
 
 ### C 组：当前不必做
-- `dispatchMessage` 重构（A2）可暂缓——端点已稳定、测试全绿；但**一旦规划新功能应先做 A2**，避免在三处同步出错。
+- ~~`dispatchMessage` 重构（A2）~~ **✅ 已修复（A2）**：端点映射已收敛为 `HostHandlerMap` 注册表，详见 §4.1；原"可暂缓"项已落地。
 - `webviewEntry` 拆分（T5）暂缓——`logic.ts` 已抽纯逻辑，协调层虽长但稳定；功能增长后再抽"协调器/store"。
 
 ---
@@ -139,5 +137,5 @@ indexer/ parser/ infer/ perf/ constants.ts  ← 共享叶子（被 host/webview 
 ## 七、验收与下一步
 
 - 当前门禁有效：`tsc --noEmit` 零错误；`node --test "src/**/*.test.ts"` **150/150**（实测递归正常）；探针 `scripts/audit-stability.ts` 0 失败；300MB 回归全绿。
-- 若大帅准奏 A 组，建议顺序：**A1（抽 core）→ A3+A4（拆上帝函数+全局兜底）→ A2（handler 注册表，按需）**，每步独立提交 + 全量测试不回归。
+- **A 组已全部落地**（独立提交、每步全量测试不回归）：A1（抽 `core/query.ts` 消除 host→webview 反向依赖）、A3（拆 `mountViewer` 上帝函数）、A4（`releaseService.dispose` 补 `.catch`）、A2（`dispatchMessage` 改为 `HostHandlerMap` 注册表查表分发）。T1–T4 债务状态见 §三表格。
 - 报告与既有 `docs/STABILITY_AUDIT.md` 互补：稳定性审计关注"不崩溃"，本评审关注"结构可维护"。

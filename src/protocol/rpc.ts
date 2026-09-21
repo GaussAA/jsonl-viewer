@@ -227,7 +227,26 @@ export function buildRecordsPayload(
  * handlers 中每个方法返回 `Promise<HostResponse 的 payload>`；方法签名与各端点的
  * requestId 由系统注入。返回该请求的响应回执（含 requestId），供 postMessage。
  */
-export type HostHandlers = { [K: string]: (payload: unknown, requestId: string) => Promise<unknown> };
+/**
+ * 宿主侧处理器注册表：每个端点对应一个 handler，handler **自行构造并返回完整
+ * HostResponse**（含 requestId 与 reply 类型）。新增端点 = 加 HostEndpoint 常量 +
+ * HostRequest/HostResponse 联合成员 + 此处一个字段 + 调用处注册一个 handler；
+ * **dispatchMessage 本体无需改动**（OCP）。
+ */
+export type HostHandlerMap = {
+  [HostEndpoint.READY]: (req: Extract<HostRequest, { type: typeof HostEndpoint.READY }>) => Promise<HostResponse> | HostResponse;
+  [HostEndpoint.GET_OVERVIEW]: (req: Extract<HostRequest, { type: typeof HostEndpoint.GET_OVERVIEW }>) => Promise<HostResponse> | HostResponse;
+  [HostEndpoint.GET_SAMPLE_FIELDS]: (req: Extract<HostRequest, { type: typeof HostEndpoint.GET_SAMPLE_FIELDS }>) => Promise<HostResponse> | HostResponse;
+  [HostEndpoint.READ_RECORDS]: (req: Extract<HostRequest, { type: typeof HostEndpoint.READ_RECORDS }>) => Promise<HostResponse> | HostResponse;
+  [HostEndpoint.READ_RECORD]: (req: Extract<HostRequest, { type: typeof HostEndpoint.READ_RECORD }>) => Promise<HostResponse> | HostResponse;
+  [HostEndpoint.JUMP_TO_SOURCE]: (req: Extract<HostRequest, { type: typeof HostEndpoint.JUMP_TO_SOURCE }>) => Promise<HostResponse | undefined> | HostResponse | undefined;
+  [HostEndpoint.SEARCH]: (req: Extract<HostRequest, { type: typeof HostEndpoint.SEARCH }>) => Promise<HostResponse> | HostResponse;
+  [HostEndpoint.FILTER]: (req: Extract<HostRequest, { type: typeof HostEndpoint.FILTER }>) => Promise<HostResponse> | HostResponse;
+  [HostEndpoint.PERSIST_STATE]: (req: Extract<HostRequest, { type: typeof HostEndpoint.PERSIST_STATE }>) => Promise<HostResponse> | HostResponse;
+  [HostEndpoint.LOAD_STATE]: (req: Extract<HostRequest, { type: typeof HostEndpoint.LOAD_STATE }>) => Promise<HostResponse> | HostResponse;
+  [HostEndpoint.RELOAD]: (req: Extract<HostRequest, { type: typeof HostEndpoint.RELOAD }>) => Promise<HostResponse> | HostResponse;
+  [HostEndpoint.CANCEL]: (req: Extract<HostRequest, { type: typeof HostEndpoint.CANCEL }>) => HostResponse | undefined;
+};
 
 export interface DispatchResult {
   /** 需要回给 webview 的消息；undefined 表示无需回执（如 ready 外的空响应）。 */
@@ -235,101 +254,24 @@ export interface DispatchResult {
 }
 
 /**
- * 分发一条消息。lessTruely：READY/CANCEL 不产生回执。
- * 实际 dataService 的处理器另行实现（见 src/host/dataService.ts）。
+ * 按端点查表分发一条 webview 消息。handler 已在 HostHandlerMap 中自带 reply 构造逻辑，
+ * 本函数只做「类型校验 → 查表 → 调用 → 异常兜底」，不含任何端点专属分支。
+ * 未知端点（非 HostEndpoint）直接被 isHostRequest 过滤，无回执。
  */
-export async function dispatchMessage(
-  msg: unknown,
-  onReady: () => Promise<HostResponse> | HostResponse,
-  onGetOverview: (r: string) => Promise<OverviewPayload>,
-  onReadRecords: (r: string, startLine: number, count: number) => Promise<RecordsPayload>,
-  onReadRecord: (r: string, line: number) => Promise<{ value?: unknown; error?: string; ok: boolean }>,
-  onCancel: (requestId: string) => void,
-  onGetSampleFields: (r: string, count?: number) => Promise<SampleFieldsPayload> | SampleFieldsPayload = async () =>
-    ({
-      fields: [],
-      total: 0,
-      scanned: 0,
-    } satisfies SampleFieldsPayload),
-  onJumpToSource: (line: number, requestId: string) => void | Promise<void> = () => {},
-  onSearch: (r: string, query: string, field?: string, scope?: string) => Promise<SearchResultsPayload> | SearchResultsPayload = async () => ({ matches: [], total: 0, truncated: false }),
-  onFilter: (r: string, field?: string, op?: string, value?: string) => Promise<FilterResultsPayload> | FilterResultsPayload = async () => ({ matches: null, total: 0 }),
-  onPersistState: (r: string, key: string, value: unknown) => void | Promise<void> = () => {},
-  onLoadState: (r: string, key: string) => Promise<unknown> | unknown = async () => undefined,
-  /** 重建索引（文件变更后重新加载）。默认返回 null（未实现）。 */
-  onReload: (r: string) => Promise<OverviewPayload | null> | OverviewPayload | null = async () => null
-): Promise<DispatchResult> {
+export async function dispatchMessage(msg: unknown, handlers: HostHandlerMap): Promise<DispatchResult> {
   if (!isHostRequest(msg)) return { response: undefined };
-
-  switch (msg.type) {
-    case HostEndpoint.READY:
-      return { response: await onReady() };
-    case HostEndpoint.CANCEL:
-      onCancel(msg.requestId);
-      return { response: undefined };
-    case HostEndpoint.GET_OVERVIEW:
-      return { response: okReply(HostReply.OVERVIEW, msg.requestId, await onGetOverview(msg.requestId)) };
-    case HostEndpoint.READ_RECORDS:
-      return {
-        response: okReply(
-          HostReply.RECORDS,
-          msg.requestId,
-          await onReadRecords(msg.requestId, msg.startLine, msg.count)
-        ),
-      };
-    case HostEndpoint.READ_RECORD:
-      return {
-        response: okReply(HostReply.RESULT, msg.requestId, await onReadRecord(msg.requestId, msg.line)),
-      };
-    case HostEndpoint.GET_SAMPLE_FIELDS:
-      return {
-        response: okReply(
-          HostReply.SAMPLE_FIELDS,
-          msg.requestId,
-          await onGetSampleFields(msg.requestId, msg.count)
-        ),
-      };
-    case HostEndpoint.JUMP_TO_SOURCE:
-      await onJumpToSource(msg.line, msg.requestId);
-      return { response: okReply(HostReply.RESULT, msg.requestId, { jumped: true }) };
-    case HostEndpoint.SEARCH:
-      return {
-        response: okReply(
-          HostReply.SEARCH_RESULTS,
-          msg.requestId,
-          await onSearch(msg.requestId, msg.query, msg.field, msg.scope)
-        ),
-      };
-    case HostEndpoint.FILTER:
-      return {
-        response: okReply(
-          HostReply.FILTER_RESULTS,
-          msg.requestId,
-          await onFilter(msg.requestId, msg.field, msg.op, msg.value)
-        ),
-      };
-    case HostEndpoint.PERSIST_STATE:
-      await onPersistState(msg.requestId, msg.key, msg.value);
-      return { response: okReply(HostReply.RESULT, msg.requestId, { ok: true }) };
-    case HostEndpoint.LOAD_STATE:
-      return {
-        response: okReply(HostReply.RESULT, msg.requestId, await onLoadState(msg.requestId, msg.key)),
-      };
-    case HostEndpoint.RELOAD:
-      return {
-        response: okReply(HostReply.OVERVIEW, msg.requestId, await onReload(msg.requestId)),
-      };
-    default: {
-      // 未知端点 → 回执 error/message。
-      const m = msg as { type: string; requestId?: string };
-      return {
-        response: {
-          type: HostReply.ERROR,
-          requestId: m.requestId,
-          message: `endpoint not implemented yet: ${m.type}`,
-        },
-      };
-    }
+  // READY 端点无 requestId 字段，故安全取值（可能 undefined）；errReply 已兼容 undefined 入参。
+  const requestId = (msg as { requestId?: string }).requestId;
+  const registry = handlers as unknown as Record<string, (req: HostRequest) => Promise<HostResponse | undefined>>;
+  const handler = registry[msg.type];
+  if (!handler) {
+    return { response: errReply(requestId, `endpoint not implemented yet: ${msg.type}`) };
+  }
+  try {
+    const response = await handler(msg);
+    return { response: response ?? undefined };
+  } catch (e) {
+    return { response: errReply(requestId, e instanceof Error ? e.message : String(e)) };
   }
 }
 

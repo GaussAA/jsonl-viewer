@@ -6,6 +6,8 @@ import {
   dispatchMessage,
   errReply,
   initReply,
+  okReply,
+  HostEndpoint,
   HostReply,
   RpcMessage,
 } from './protocol/rpc.ts';
@@ -259,54 +261,64 @@ function registerHostHandlers(deps: HostHandlerDeps): vscode.Disposable {
       let response: RpcMessage | undefined;
       try {
         response = (
-          await dispatchMessage(
-            message,
-            async () => {
+          await dispatchMessage(message, {
+            [HostEndpoint.READY]: async () => {
               // 诊断：确认宿主是否收到 webview 的握手消息。
               const st = Date.now();
               const init = initReply(await data.getOverview());
               hostLog(`init 回执构建完成 (${Date.now() - st}ms)`);
               return init;
             },
-            async (_r) => data.getOverview(),
-            async (_r, startLine, count) => {
+            [HostEndpoint.GET_OVERVIEW]: async (req) =>
+              okReply(HostReply.OVERVIEW, req.requestId, await data.getOverview()),
+            [HostEndpoint.READ_RECORDS]: async (req) => {
               // 真正的可中断：读批逐行检测 cancel 集合，被取消即提前返回。
-              const p = await data.readRecords(startLine, count, () => cancel.has(_r));
-              cancel.delete(_r);
-              return p;
+              const p = await data.readRecords(req.startLine, req.count, () => cancel.has(req.requestId));
+              cancel.delete(req.requestId);
+              return okReply(HostReply.RECORDS, req.requestId, p);
             },
-            async (_r, line) => data.readRecord(line),
-            (requestId) => {
-              cancel.add(requestId);
+            [HostEndpoint.READ_RECORD]: async (req) =>
+              okReply(HostReply.RESULT, req.requestId, await data.readRecord(req.line)),
+            [HostEndpoint.CANCEL]: (req) => {
+              cancel.add(req.requestId);
               // 可中断链路：readRecords/search/filter 逐行检查 cancel 集合，
               // 被取消即提前返回；其余轻量请求（抽样/详情/偏好）不响应中断。
+              return undefined;
             },
-            async (_r, count) => data.getSampleFields(count),
-            async (line) => void (await jumpToSource(line)),
+            [HostEndpoint.GET_SAMPLE_FIELDS]: async (req) =>
+              okReply(HostReply.SAMPLE_FIELDS, req.requestId, await data.getSampleFields(req.count)),
+            [HostEndpoint.JUMP_TO_SOURCE]: async (req) => {
+              await jumpToSource(req.line);
+              return okReply(HostReply.RESULT, req.requestId, { jumped: true });
+            },
             // 全文/字段搜索（宿主流式扫描；被 cancel 则中断）。
-            async (_r, query, field, scope) => {
-              const p = await data.search(query, field, scope, () => cancel.has(_r));
-              cancel.delete(_r);
-              return p;
+            [HostEndpoint.SEARCH]: async (req) => {
+              const p = await data.search(req.query, req.field, req.scope, () => cancel.has(req.requestId));
+              cancel.delete(req.requestId);
+              return okReply(HostReply.SEARCH_RESULTS, req.requestId, p);
             },
             // 字段值过滤。
-            async (_r, field, op, value) => {
+            [HostEndpoint.FILTER]: async (req) => {
               const cond =
-                field && (op === 'eq' || op === 'contains' || op === 'exists' || op === 'type')
-                  ? ({ field, op, value: value ?? '' } as FieldCondition)
+                req.field &&
+                (req.op === 'eq' || req.op === 'contains' || req.op === 'exists' || req.op === 'type')
+                  ? ({ field: req.field, op: req.op, value: req.value ?? '' } as FieldCondition)
                   : null;
-              const p = await data.filter(cond, () => cancel.has(_r));
-              cancel.delete(_r);
-              return p;
+              const p = await data.filter(cond, () => cancel.has(req.requestId));
+              cancel.delete(req.requestId);
+              return okReply(HostReply.FILTER_RESULTS, req.requestId, p);
             },
             // 偏好持久化到 workspaceState（按 uri 命名空间键）。
-            async (_k, key, val) => {
-              await context.workspaceState.update(key, val);
+            [HostEndpoint.PERSIST_STATE]: async (req) => {
+              await context.workspaceState.update(req.key, req.value);
+              return okReply(HostReply.RESULT, req.requestId, { ok: true });
             },
-            async (_k, key) => context.workspaceState.get(key),
+            [HostEndpoint.LOAD_STATE]: async (req) =>
+              okReply(HostReply.RESULT, req.requestId, await context.workspaceState.get(req.key)),
             // 文件变更后 webview 点「重新加载」→ 重建索引并返回新概览。
-            async (_r) => data.reload()
-          )
+            [HostEndpoint.RELOAD]: async (req) =>
+              okReply(HostReply.OVERVIEW, req.requestId, await data.reload()),
+          })
         ).response;
       } catch (e) {
         hostErr('处理消息时异常: ' + (e instanceof Error ? (e.stack || e.message) : String(e)));
