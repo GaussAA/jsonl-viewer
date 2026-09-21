@@ -137,7 +137,7 @@ indexer/ parser/ infer/ perf/ constants.ts  ← 共享叶子（被 host/webview 
 
 ## 七、验收与下一步
 
-- 当前门禁有效：`tsc --noEmit` 零错误；`node --experimental-transform-types --test "src/**/*.test.ts"` **205/205**（含 webview jsdom 测试网；Node 22 与 24 双验）；覆盖率门槛 `pnpm test:coverage:gate`（见 §八）；探针 `scripts/audit-stability.ts` **0 失败**；300MB 回归 `scripts/validate-300mb.ts` **全绿**。
+- 当前门禁有效：`tsc --noEmit` 零错误；`node --experimental-transform-types --test "src/**/*.test.ts"` **215/215**（含 webview jsdom 测试网；Node 22 与 24 双验）；覆盖率门槛 `pnpm test:coverage:gate`（见 §八）；探针 `scripts/audit-stability.ts` **0 失败**；300MB 回归 `scripts/validate-300mb.ts` **全绿**。
 - **八笔重构后全量复验（实测取证）**：稳定性探针覆盖 worker 回退 / 空文件 / 纯换行 / BOM / 深嵌套 5000 层 / 越界与 NaN 参数 / 批量上限 / dispose 后调用自愈 / 文件删除陈旧检测 / GBK / 坏路径，**未发现缺陷**；300MB（315.4MB）回归：307200 行索引 **352ms**、检查点 300 个（索引≈5KB）、随机读 300/300 与暴力解一致、分批读 4/4 窗口一致、三组关键词搜索集与全量暴力扫描**完全一致**。
 - **集成测试需本机网络**：`pnpm test:integration` 依赖 `@vscode/test-electron` 下载 VS Code；沙箱无直连外网且 `~/.vscode-test` 无缓存，本地未能执行——请在联网环境跑一次以覆盖 Extension Host 路径。
 - **T5 决策记录（暂不抽 store，附明确触发条件）**：`AppState` 维持「单一可变对象 + 闭包捕获」现状。理由：原评审的触发条件是「**继续膨胀**」，而本轮为收缩（`webviewEntry` 1112→822 行，−26%）；且 store / DI 类抽象已由 B1 判为过度设计（YAGNI）。**满足其一再抽**：① 新增 ≥2 个需跨模块共享的状态字段；② 同一状态字段出现 ≥3 处写入点且定位困难；③ 需要撤销·重放或状态快照。届时先补状态迁移测试网，再动结构。
@@ -153,10 +153,10 @@ indexer/ parser/ infer/ perf/ constants.ts  ← 共享叶子（被 host/webview 
 
 | 指标 | 起始 | 现状 | 变化 |
 |---|---|---|---|
-| 测试用例 | 184 | **205** | +21 |
-| 行覆盖 | 83.37% | **84.93%** | +1.56 |
-| 分支覆盖 | 85.99% | **87.63%** | +1.64 |
-| 函数覆盖 | 72.90% | **75.56%** | +2.66 |
+| 测试用例 | 184 | **215** | +31 |
+| 行覆盖 | 83.37% | **85.53%** | +2.16 |
+| 分支覆盖 | 85.99% | **87.97%** | +1.98 |
+| 函数覆盖 | 72.90% | **77.10%** | +4.20 |
 
 优先补强对象＝**核心引擎**（崩溃即插件彻底不可用，风险最高）：
 
@@ -165,6 +165,7 @@ indexer/ parser/ infer/ perf/ constants.ts  ← 共享叶子（被 host/webview 
 | `host/indexHost.ts` | 76.38 → **99.45** | 94.59 → 95.52 | 68.97 → **89.47** | worker 消息分发 / 退出 / 崩溃结算 / 释放归还 / 取消轮询 |
 | `host/dataService.ts` | 91.93 → 95.96 | **62.00 → 80.30** | 60.87 → **69.57** | 脏参数守卫 / 非法行号 / scope 解析 / getter / 删除陈旧检测 |
 | `parser/jsonParser.ts` | 95.28 → 97.64 | **78.57 → 86.57** | 95.45 | 无效行号 / 批读守卫 / shouldCancel 提前停 / 读取器越界 |
+| `webview/columnLayout.ts` | 80.68 → **98.86** | 80.00 → 87.50 | **57.14 → 100.00** | 收起/展开动画全路径（含 reduce-motion 降级）、拖拽调宽与夹取、双击复位、持久化宽度/折叠恢复、ResizeObserver 跨断点重排 |
 
 ### 8.2 可测性接缝（行为不变，向后兼容）
 - `indexHost.ts`：新增 `WorkerLike` 最小接口与 `WorkerIndexHost(scriptPath, workerFactory?)` 第二参（默认仍为 `new Worker(path)`）。该类原先的「消息分发 / 异常退出 / 崩溃结算 / 释放归还」只能靠真实线程覆盖，现可注入伪 Worker 逐分支驱动 —— 这是把「不可测的稳定性命脉」变为「可回归」的关键一步。
