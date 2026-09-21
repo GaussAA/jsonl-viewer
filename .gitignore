@@ -10,6 +10,9 @@ releases/
 # 大型生成样本（可由 samples/generate_samples.py 重新生成，避免仓库膨胀）
 samples/
 # 本地诊断 / 覆盖率临时输出（由调试命令重定向产生，不入库；避免污染 git status）
+# 注意：**Prettier 会读取 .gitignore**（已实测：被忽略的文件即便显式传入也不检查）。
+# 故未忽略的临时文件会让 `prettier --check .` 误报，进而使 pre-commit 钩子拦下提交。
+# 新增临时产物请务必落到下面某一类，或统一放进 .scratch/。
 .audit_*.txt
 .build_out.txt
 .cov_flag_probe.txt
@@ -17,9 +20,16 @@ samples/
 .diag_*.txt
 .coverage_*.txt
 .coverage_out.txt
+.fetch_*.txt
+.gh_*.json
+.gh_*.txt
 .integration_*.txt
 .pnpm_diag.txt
+.pre_*.txt
+.push_*.txt
 .test_*.txt
 .tsc_out.txt
 .validate_*.txt
 test_out.txt
+# 本地临时产物统一入口（推荐）：调试脚本、命令输出、一次性诊断都放进这里
+.scratch/
