@@ -13,10 +13,21 @@
 # 若确需绕过：git push --no-verify
 set -e
 
-# ── 1. 工作流静态校验（可选：未安装 actionlint 时跳过，避免因缺工具而误拦） ──
+# ── 1. 工作流静态校验（未安装则跳过，避免因缺工具而误拦） ──
+# 探测顺序：PATH 中的 actionlint → 仓库内本地下载的二进制（.scratch/bin/，已 gitignore）
+# 后者便于本机在未全局安装时也能启用该校验；两者皆无则跳过并提示（CI 的 lint job 必会执行）。
+ACTIONLINT_BIN=''
 if command -v actionlint >/dev/null 2>&1; then
+  ACTIONLINT_BIN='actionlint'
+elif [ -x '.scratch/bin/actionlint.exe' ]; then
+  ACTIONLINT_BIN='.scratch/bin/actionlint.exe'
+elif [ -x '.scratch/bin/actionlint' ]; then
+  ACTIONLINT_BIN='.scratch/bin/actionlint'
+fi
+
+if [ -n "$ACTIONLINT_BIN" ]; then
   echo "[pre-push] actionlint：校验 .github/workflows/"
-  actionlint
+  "$ACTIONLINT_BIN" -no-color
 else
   echo "[pre-push] 跳过工作流校验：未找到 actionlint（CI 的 lint job 会执行；本地可另行安装）"
 fi
