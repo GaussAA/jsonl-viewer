@@ -1,8 +1,10 @@
 name: CI
 
-# 代码合并门禁：每次 push / PR 都运行两层检查
-#   Job 1 verify            —— 纯 Node 环境：typecheck → unit test → build（与 release.mjs 预检一致）
-#   Job 2 integration-test  —— 真实 VS Code Extension Host：验证扩展能被宿主发现 + activate 成功
+# 代码合并门禁：每次 push / PR 都运行下述检查
+#   Job verify            —— 纯 Node 环境：typecheck → unit test → build（与 release.mjs 预检一致）
+#   Job lint              —— 静态质量：oxlint（正确性规则）+ prettier 格式检查
+#   Job coverage          —— 单元测试覆盖率门槛（锁定 Node 22，见下方说明）
+#   Job integration-test  —— 真实 VS Code Extension Host：验证扩展能被宿主发现 + activate 成功
 # 任一失败即阻断合并，保证发布产物可追溯、可复现。
 #
 # pnpm 安装策略（职责分离，避免冲突）：
@@ -33,11 +35,11 @@ jobs:
           node-version: ${{ matrix.node-version }}
 
       # pnpm/action-setup 全权负责 pnpm 安装 + 缓存。
-      # 版本与 package.json 的 packageManager 对齐（pnpm@12.4.2）。
+      # 版本与 package.json 的 packageManager 对齐（pnpm@12.5.1）——两处必须同步改。
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 12.4.2
+          version: 12.5.1
           cache: 'pnpm'
 
       - name: Install dependencies
@@ -54,6 +56,39 @@ jobs:
 
       - name: Build
         run: pnpm build
+
+  # ── 层 1.2：静态质量门禁（lint + 格式） ───────────────────────────────────
+  # 为何独立成 job 而非并入 verify：lint 与格式检查极快（oxlint 全仓约 20ms），
+  # 单列可与 verify 的 Node 矩阵并行，且失败时定位清晰、不浪费矩阵重跑。
+  # 为何用 oxlint 而非 ESLint：typescript-eslint 8.x 明确拒绝 TS 7.0
+  # （本项目 devDependencies 用 typescript@7 原生编译器），生态尚未跟上；
+  # oxlint 不依赖 typescript 包，规则集与 ESLint 兼容，待其支持后可平滑回归。
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 12.5.1
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # correctness 类规则为 error（阻断），suspicious/perf 为 warn（提示不阻断）
+      - name: Lint
+        run: pnpm lint
+
+      - name: Format check
+        run: pnpm format:check
 
   # ── 层 1.5：覆盖率门槛（锁定 Node 22） ────────────────────────────────────
   # 为何单独成 job 且锁 Node 22：Node 24 默认**不把测试文件计入**覆盖率，
@@ -75,7 +110,7 @@ jobs:
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 12.4.2
+          version: 12.5.1
           cache: 'pnpm'
 
       - name: Install dependencies
@@ -115,7 +150,7 @@ jobs:
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 12.4.2
+          version: 12.5.1
           cache: 'pnpm'
 
       - name: Install dependencies

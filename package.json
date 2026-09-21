@@ -95,6 +95,10 @@
     "watch": "node build.mjs --watch",
     "build": "node build.mjs --minify",
     "typecheck": "tsc --noEmit",
+    "lint": "oxlint src scripts build.mjs",
+    "lint:ci": "oxlint src scripts build.mjs --deny-warnings",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
     "test": "node --experimental-transform-types --test \"src/**/*.test.ts\"",
     "test:coverage": "node --experimental-transform-types --experimental-test-coverage --test \"src/**/*.test.ts\"",
     "test:coverage:gate": "node --experimental-transform-types --experimental-test-coverage --test-coverage-lines=96 --test-coverage-branches=86 --test-coverage-functions=88 --test \"src/**/*.test.ts\"",
@@ -111,6 +115,8 @@
     "@vscode/vsce": "^4.0.0",
     "esbuild": "^0.28.2",
     "jsdom": "^30.1.0",
+    "oxlint": "^1.83.0",
+    "prettier": "^3.9.8",
     "typescript": "^7.0.2"
   },
   "packageManager": "pnpm@12.5.1"

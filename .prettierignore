@@ -1,0 +1,13 @@
+node_modules
+dist
+releases
+.vscode-test
+samples
+coverage
+docs
+.trae
+pnpm-lock.yaml
+# 设计资产与调试夹具（非源码，不参与格式化以免产生无谓大 diff）
+*.html
+*.vsix
+*.sha256
