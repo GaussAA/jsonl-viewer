@@ -25,11 +25,11 @@ import type { ToolbarInfo } from './toolbar.ts';
 import { createDetailTree, type DetailTreeNavHandlers } from './detailTree.ts';
 import { createColumnLayout, type ColumnLayout } from './columnLayout.ts';
 import { createQueryActions, type QueryActions } from './queryActions.ts';
+import { createPersistence } from './persistence.ts';
 import { createVSCodeApi, RpcBus } from './rpc.ts';
 import {
   mergePersistedState,
   summarizeWithLayout,
-  toPersistedState,
 } from './queryLogic.ts';
 import type { FieldCondition, FieldLayout } from './queryLogic.ts';
 import { HostEndpoint } from '../protocol/rpc.ts';
@@ -235,20 +235,8 @@ export function main(): void {
   // runFilter / clearFilterForCond / applyLayout。动作工厂在下方 schedulePersist 定义之后创建
   // （schedulePersist 作为依赖注入），list/toolbar 则以其后创建的实例经访问器晚绑定。
 
-  /* ---------------- 偏好持久化（防抖写回到 host workspaceState） ---------------- */
-  function schedulePersist(): void {
-    if (!state.persistKey) return;
-    if (state.persistTimer) clearTimeout(state.persistTimer);
-    state.persistTimer = setTimeout(() => {
-      state.persistTimer = undefined;
-      const value = toPersistedState({
-        fieldLayout: state.fieldLayout,
-        filter: state.filterCond,
-        searchQuery: state.searchQuery.trim() || undefined,
-      });
-      bus.request(HostEndpoint.PERSIST_STATE, { key: state.persistKey, value }).promise.catch(() => {});
-    }, 400);
-  }
+  /* ---------------- 偏好持久化（防抖写回到 host workspaceState，persistence，T5 #32） ---------------- */
+  const { schedulePersist } = createPersistence({ bus, state });
 
   /* ---------------- 搜索 / 过滤 / 字段布局动作（queryActions，T5 #31） ---------------- */
   // list / toolbar 晚于此处创建，故经访问器晚绑定（动作仅在用户交互时执行，彼时二者就绪）。
