@@ -3,7 +3,9 @@
     "target": "ES2022",
     "module": "esnext",
     "moduleResolution": "bundler",
-    "lib": ["ES2022", "DOM"],
+    // lib 高于 target：只用到 ES2023 的新增方法（toSorted / toReversed 等），不含新语法。
+    // 运行时基线 —— Node 22.18+（engines.node）与 VS Code 1.100+（Chromium 128）均支持。
+    "lib": ["ES2023", "DOM"],
     "rootDir": "src",
     "outDir": "dist",
     "strict": true,

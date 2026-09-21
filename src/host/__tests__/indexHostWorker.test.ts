@@ -53,7 +53,7 @@ class FakeWorker {
 
   /** 某类请求的最近一条消息。 */
   lastOf(type: WorkerRequest['type']): WorkerRequest | undefined {
-    return [...this.posted].reverse().find((m) => m.type === type);
+    return this.posted.toReversed().find((m) => m.type === type);
   }
   countOf(type: WorkerRequest['type']): number {
     return this.posted.filter((m) => m.type === type).length;

@@ -157,7 +157,7 @@ test('summarizeRecord: 优先使用字段推断，缺少时回退顶层 key', ()
   );
   const fallback = summarizeRecord(rec, null);
   assert.equal(fallback.length, 4); // 顶层 4 个 key
-  assert.deepEqual(fallback.map((x) => x.key).sort(), ['age', 'name', 'note', 'tags']);
+  assert.deepEqual(fallback.map((x) => x.key).toSorted(), ['age', 'name', 'note', 'tags']);
 });
 
 test('summarizeRecord: 非对象值 / 标量直接展示', () => {

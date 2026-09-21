@@ -125,7 +125,7 @@ test('summarizeWithLayout: 定制驱动摘要卡片（顺序 + 隐藏 + 上限 +
   emptyLayout.hidden = [];
   emptyLayout.maxKeys = 20;
   const fallback = summarizeWithLayout(rec, FIELDS, emptyLayout);
-  assert.deepEqual(fallback.map((x) => x.key).sort(), ['age', 'extra', 'id', 'name', 'secret']);
+  assert.deepEqual(fallback.map((x) => x.key).toSorted(), ['age', 'extra', 'id', 'name', 'secret']);
 });
 
 /* ------------------------- 搜索导航 ------------------------- */

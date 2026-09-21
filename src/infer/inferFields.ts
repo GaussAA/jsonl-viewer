@@ -208,7 +208,7 @@ export async function inferFields(
       alwaysArray: e.allArray,
       types: e.types,
     }))
-    .sort((a, b) => b.freq - a.freq || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+    .toSorted((a, b) => b.freq - a.freq || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
 
   return { fields, total, scanned, errorLines };
 }

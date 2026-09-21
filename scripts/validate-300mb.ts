@@ -138,7 +138,7 @@ async function main(): Promise<void> {
     for (let i = 0; i < brute.length; i++) {
       if (bufIncludesCI(Buffer.from(brute[i], 'utf8'), qb)) bruteMatches.push(i);
     }
-    const gotSorted = [...res.matches].sort((a, b) => a - b);
+    const gotSorted = res.matches.toSorted((a, b) => a - b);
     const eq =
       gotSorted.length === bruteMatches.length && gotSorted.every((v, i) => v === bruteMatches[i]);
     check(
@@ -239,7 +239,7 @@ async function main(): Promise<void> {
         for (let i = 0; i < brute.length; i++) {
           if (bufIncludesCI(Buffer.from(brute[i], 'utf8'), qb)) bm.push(i);
         }
-        const got = [...res.matches].sort((a, b) => a - b);
+        const got = res.matches.toSorted((a, b) => a - b);
         // 命中行号数组受 SEARCH_MAX_RESULTS 封顶（truncated）：返回的是按行序的前缀，
         // 与暴力解的前 res.matches.length 个匹配行一致即为正确。
         const expected = bm.slice(0, res.matches.length);
