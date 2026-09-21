@@ -2,8 +2,10 @@
 # Marketplace 自动发布流水线。
 #
 # 触发方式：
-#   1. git tag v1.3.0 && git push origin v1.3.0     → 自动发布
-#   2. GitHub Actions 页面 → Run workflow → 手动触发 → 自动发布
+#   1. git tag v1.3.0 && git push origin v1.3.0     → 构建 + 发布到 Marketplace
+#   2. GitHub Actions 页面 → Run workflow → 手动触发 → 构建 + 上传 VSIX 工件
+#      （发布步骤以 `github.event_name == 'push'` 为闸，故手动触发不会发布；
+#        如需手动也能发布，请先确认后改动那行 if 的条件。）
 #
 # 前置条件（一次性配置）：
 #   a. 创建 Azure DevOps PAT（https://dev.azure.com → User Settings → Personal Access Tokens）
@@ -14,7 +16,8 @@
 #
 # vsce 默认识别 VSCE_PAT 环境变量，不需要额外传参。
 #
-# pnpm 安装策略：setup-node 只管 Node，pnpm/action-setup 全权负责 pnpm + 缓存。
+# pnpm 安装策略：setup-node 只管 Node，pnpm/action-setup 全权负责 pnpm + store 缓存。
+# 版本不在此处写死 —— 由 package.json 的 packageManager 字段唯一决定。
 
 name: Release
 
@@ -27,6 +30,13 @@ on:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    # secrets 上下文**不能**出现在 if 条件里（GitHub 上下文可用性表：jobs.<job_id>.steps.if
+    # 只允许 github/needs/strategy/matrix/job/runner/env/vars/steps/inputs）。原地写
+    # `if: secrets.VSCE_PAT != ''` 会让整份工作流被判无效（Unrecognized named-value: 'secrets'），
+    # 表现为**每次 push 都产生一个没有任何 job 的失败运行**。
+    # 故按官方建议落地：secret 先映射到 job 级 env，if 判 env，run 内由 vsce 直接读该 env。
+    env:
+      VSCE_PAT: ${{ secrets.VSCE_PAT }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -37,12 +47,14 @@ jobs:
         with:
           node-version: 22
 
-      # pnpm/action-setup 全权负责 pnpm 安装 + 缓存
+      # pnpm/action-setup 全权负责 pnpm 安装 + store 缓存。
+      # 不传 version：以 package.json 的 packageManager 为唯一事实源
+      # （此前这里写死 12.4.2，与清单的 12.5.1 漂移，属历史遗留）。
+      # cache 为布尔（v4 语义）；写 `cache: 'pnpm'` 会让 action 在 Setup pnpm 步骤即抛错。
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 12.4.2
-          cache: 'pnpm'
+          cache: true
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -68,8 +80,8 @@ jobs:
           path: '*.vsix'
 
       - name: Publish to Marketplace
-        # VSCE_PAT 由 GitHub Secret 提供，vsce 自动读这个环境变量
-        # 当前阶段（未发布）没有配置 VSCE_PAT 时这步自动跳过，不会报红。
-        # 以后配好 PAT 后直接生效。
-        if: github.event_name == 'push' && secrets.VSCE_PAT != ''
-        run: npx @vscode/vsce publish -p ${{ secrets.VSCE_PAT }}
+        # 判的是 env（非 secrets）；未配置 VSCE_PAT 时这步自动跳过，不会报红。
+        # 配好 PAT 后直接生效；vsce 默认识别 VSCE_PAT 环境变量，无需 -p 传参
+        # （官方亦建议避免把密钥放到命令行，以免进入进程表/审计日志）。
+        if: github.event_name == 'push' && env.VSCE_PAT != ''
+        run: npx @vscode/vsce publish

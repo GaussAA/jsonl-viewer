@@ -131,6 +131,27 @@
   `bad option: --disable-extensions / --no-sandbox / --extensionTestsPath=...`，`Exit code: 9`。
 - → 结论：`pnpm test:integration` 须在**大帅本机（沙箱外）**执行，以覆盖 Extension Host 真实路径。
 
+### 2.6 CI / Release 工作流失效（本次推送时发现并修复）
+
+现象：45 笔提交推送至 `origin/main` 后，远程出现两笔红色运行 —— `CI` 与 `Release`。
+
+| 工作流 | 失败形态 | 根因 | 修正 |
+|---|---|---|---|
+| `ci.yml` | `verify (22)`、`lint` 在 **Setup pnpm** 步骤即失败；`verify (24)` 因 fail-fast 被取消；`coverage`、`integration-test` 因 `needs: verify` 跳过 | `pnpm/action-setup@v4` 的 `cache` 入参是**布尔**（`action.yml` 默认 `'false'`，语义为「是否缓存 pnpm store」）。沿用 v2/v3 时代的 `cache: 'pnpm'` **字符串**，会让 action 内部 `getBooleanInput` 抛 `TypeError: Input does not meet YAML 1.2 "Core Schema" specification: cache` | 四处 `cache: 'pnpm'` → `cache: true` |
+| `release.yml` | **无任何 job**、结论直接为 failure；`gh run view` 提示 "This run likely failed because of a workflow file issue" | 步骤级 `if` 引用了 `secrets.VSCE_PAT` —— GitHub 上下文可用性表中 `jobs.<job_id>.steps.if` **不含 `secrets`**（官方原文：*Secrets cannot be directly referenced in `if:` conditionals*），整份工作流被判无效（`Unrecognized named-value: 'secrets'`）。文件既无效，其 `on:` 声明的 tag 触发条件一并失效，于是**每次 push 都产生一个失败运行** | 按官方建议把 secret 映射到 **job 级 `env`**，`if` 改判 `env.VSCE_PAT` |
+
+附带修正：
+
+- 两处工作流**均不再写死 pnpm 版本**，改由 `package.json` 的 `packageManager`（`pnpm@12.5.1`）唯一决定 —— 消除「清单与工作流两处手工同步」的漂移（`release.yml` 长期停留在 `12.4.2` 即其明证）。
+- `release.yml` 发布步骤改为 `npx @vscode/vsce publish`（去掉 `-p ${{ secrets.VSCE_PAT }}`）：vsce 本就识别 `VSCE_PAT` 环境变量，且官方建议避免把密钥放到命令行（会进入进程表 / 审计日志）。
+- `release.yml` 头部注释原称「手动触发 → 自动发布」，**与实际行为不符**：发布步骤以 `github.event_name == 'push'` 为闸，手动触发只构建并上传 VSIX、不会发布。已按实际行为改写注释。
+  **是否让手动触发也能发布，属行为决策，本次未改，待大帅定夺。**
+- `release.yml` 的 `if` 条件未动语义（仍限 `push` 事件），故**发布行为与修复前一致**，仅从「整份工作流失效」恢复为「按预期工作」。
+
+**为何能潜伏两天而无人察觉**：仓库未启用分支保护 / 必需状态检查，红色 CI **不阻断任何操作**（连 `--frozen-lockfile` 之类的约束都未曾真正执行过）。建议在仓库设置中把 `verify`、`lint`、`coverage` 设为必需检查 —— 属仓库设置，非代码。
+
+**排查手段留档**（可复用）：`gh run list --json` 定位失败运行 → `gh run view <id> --log-failed` 取失败步骤的首条错误 → `gh api .../commits/<sha>/check-runs` 看 job 粒度与注解 → 最后**回官方文档核对**（本次即靠「上下文可用性表」定性 `secrets` 不可用于 `steps.if`），而非凭记忆猜。
+
 ---
 
 ## 三、提交记录（本次）

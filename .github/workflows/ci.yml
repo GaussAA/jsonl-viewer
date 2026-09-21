@@ -11,6 +11,13 @@ name: CI
 #   actions/setup-node@v4  —— 只管 Node 版本，**不**配置任何 pnpm 参数
 #   pnpm/action-setup@v4   —— 全权负责 pnpm 安装 + store 缓存
 #   这样两者零重叠，不会触发 "Multiple versions of pnpm specified" 冲突
+#
+# 两个易踩的坑（2026-09-21 实测修正，此前 CI 自 09-19 起持续失败）：
+#   1. v4 的 `cache` 入参是**布尔**。沿用 v2/v3 时代的 `cache: 'pnpm'` 字符串会让
+#      action 内部的 getBooleanInput 抛 TypeError（"Input does not meet YAML 1.2
+#      Core Schema specification: cache"），job 在 Setup pnpm 步骤即失败。
+#   2. 省略 `version`：由 package.json 的 packageManager 字段单独决定 pnpm 版本，
+#      避免「工作流与清单两处版本须手工同步」的漂移（release.yml 曾因此停留在 12.4.2）。
 
 on:
   push:
@@ -34,13 +41,13 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
 
-      # pnpm/action-setup 全权负责 pnpm 安装 + 缓存。
-      # 版本与 package.json 的 packageManager 对齐（pnpm@12.5.1）——两处必须同步改。
+      # pnpm/action-setup 全权负责 pnpm 安装 + store 缓存。
+      # 不传 version：以 package.json 的 packageManager（pnpm@12.5.1）为唯一事实源。
+      # cache 为布尔（v4 语义），见文件头「两个易踩的坑」。
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 12.5.1
-          cache: 'pnpm'
+          cache: true
 
       - name: Install dependencies
         # frozen-lockfile：pnpm-lock.yaml 必须与 package.json 一致，否则 CI 失败，
@@ -77,8 +84,7 @@ jobs:
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 12.5.1
-          cache: 'pnpm'
+          cache: true
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -110,8 +116,7 @@ jobs:
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 12.5.1
-          cache: 'pnpm'
+          cache: true
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -150,8 +155,7 @@ jobs:
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 12.5.1
-          cache: 'pnpm'
+          cache: true
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
