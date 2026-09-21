@@ -53,7 +53,7 @@ indexer/ parser/ infer/ perf/ constants.ts  ← 共享叶子（被 host/webview 
 | **T2** | `protocol/rpc.ts:241-334` `dispatchMessage` | 12 参数位置化签名 + 巨型 switch；注释自承"实际处理器另行实现" → 路由与处理分离却散两处 | 加一个端点须改 3 处（常量 / union 类型 / switch / 调用点内联 handler），易漏改 | 中（OCP/ISP + 抽象泄漏） | ~~A2：handler 注册表 Map<endpoint,fn>，dispatch 查表分发~~ **✅ 已修复（A2）** |
 | **T3** | `host/* → webview/queryLogic.ts` | host 反向依赖 webview（见 §二） | 核心层依赖 UI 层；若 webview 引入浏览器专属依赖会污染宿主；层边界失真 | 中（DIP） | ~~A1：抽 core/ 共享 FieldCondition+matchesFilter+recordFieldValue~~ **✅ 已修复（A1）** |
 | **T4** | `extension.ts:46,83-91` | 模块级全局单例 `serviceRegistry` / `openPanels` 未注入；`releaseService` 中 `void hit.svc.dispose()` 无 `.catch` | 隐式全局状态难测；dispose 当前不 reject（所有 await 已 `.catch`）但脆弱 | 低~中 | ~~A4：dispose 补 .catch~~ **✅ 部分修复（A4：dispose 已补 .catch；registry 显式持有/注入待办）** |
-| **T5** | `webviewEntry.ts:200-1100` + `AppState:122-153` | 前端协调层膨胀（样式/横幅/分栏动画/响应式/搜索/过滤/导航/持久化/生命周期）+ 30+ 字段手写状态机 | 认知负担高；一处 state 字段改动波及众多闭包 | 中（前端 God Object） | **增量+测试网（2026-09-20 钦定）**：先筑 jsdom 冒烟测试网（✅ #29：domHarness + webviewEntry.test，全量 154/154 全绿）+ `webviewEntry` 导出化（✅ #28：`main` 导出 + 条件挂载，避免 node 单测导入即触发 DOM 挂载）；随后分片抽 `columnLayout`/`queryActions`/`persistence`（#30–#32），每步 tsc/test/build 不回归。依赖注入式拆分，行为不变 |
+| **T5** | `webviewEntry.ts` + `AppState` | 前端协调层膨胀（样式/横幅/分栏动画/响应式/搜索/过滤/导航/持久化/生命周期）+ 30+ 字段手写状态机 | 认知负担高；一处 state 字段改动波及众多闭包 | 中（前端 God Object） | **增量+测试网（2026-09-20 钦定），进行中**：① 测试网基建 ✅ #29（domHarness + webviewEntry.test 冒烟测试）；② `webviewEntry` 导出化 ✅ #28（`main` 导出 + 条件挂载）；③ 抽 `columnLayout` ✅ #30（收起/展开动画 + 拖拽调宽 + 窄容器响应式抽屉 → 独立工厂 `createColumnLayout(deps)`，行为抽取**不搬 DOM 创建顺序**，`webviewEntry.ts` 1112→951 行，新增模块级回归测试 6 项）；④ 抽 `queryActions`（#31）、`persistence`（#32）待办。每步 tsc/test/build 全绿且独立提交 |
 | **T6** | `extension.ts` 两处 webview HTML 模板（viewer 外壳 + notLocal 占位） | 模板结构内联两处，CSP/nonce 重复表达 | 轻微重复；模板改动要改两处 | 低 | ~~抽 renderWebviewHtml 工厂~~ **✅ 已修复（T6）：收敛为单一 `renderWebviewShell` 外壳工厂，`renderViewerHtml` 与 `notLocalHtml` 共用** |
 | **T7** | `extension.ts:275` | 异常回执 `errReply(undefined, …)`，requestId 丢失 | webview 走全局 error handler 弹横幅，可能把单请求异常升级为全局提示 | 低 | 异常路径带 requestId 或明确走 banner 而非 error 广播 |
 | **T8** | `package.json:98` `test` 脚本 | `node --test "src/**/*.test.ts"` 依赖 Node ≥22 的 glob 递归行为 | 实测 OK（收集 154/154）；但 CI 若用老 Node 会静默跑 0 测试 | 低（已核实有效） | CI 锁定 `node>=22.18`；脚本已加 `--experimental-transform-types`（webview 测试网引入 jsdom + 含不可剥离 TS 语法，需 transform 模式）；`engines` 已声明 `node>=22.18` |
@@ -130,12 +130,12 @@ indexer/ parser/ infer/ perf/ constants.ts  ← 共享叶子（被 host/webview 
 
 ### C 组：当前不必做
 - ~~`dispatchMessage` 重构（A2）~~ **✅ 已修复（A2）**：端点映射已收敛为 `HostHandlerMap` 注册表，详见 §4.1；原"可暂缓"项已落地。
-- `webviewEntry` 拆分（T5）暂缓——`logic.ts` 已抽纯逻辑，协调层虽长但稳定；功能增长后再抽"协调器/store"。
+- `webviewEntry` 拆分（T5）**已启动（增量+测试网）**——`logic.ts` 已抽纯逻辑；协调层按"先测试网、后分片抽"推进：✅ #28 导出化 + #29 测试网 + #30 `columnLayout`；#31 `queryActions` / #32 `persistence` 待办。每步行为不变、三道门全绿、独立提交。
 
 ---
 
 ## 七、验收与下一步
 
-- 当前门禁有效：`tsc --noEmit` 零错误；`node --test "src/**/*.test.ts"` **150/150**（实测递归正常）；探针 `scripts/audit-stability.ts` 0 失败；300MB 回归全绿。
+- 当前门禁有效：`tsc --noEmit` 零错误；`node --experimental-transform-types --test "src/**/*.test.ts"` **160/160**（含 webview jsdom 测试网；实测递归正常）；探针 `scripts/audit-stability.ts` 0 失败；300MB 回归全绿。
 - **A 组已全部落地**（独立提交、每步全量测试不回归）：A1（抽 `core/query.ts` 消除 host→webview 反向依赖）、A3（拆 `mountViewer` 上帝函数）、A4（`releaseService.dispose` 补 `.catch`）、A2（`dispatchMessage` 改为 `HostHandlerMap` 注册表查表分发）。T1–T4 债务状态见 §三表格。
 - 报告与既有 `docs/STABILITY_AUDIT.md` 互补：稳定性审计关注"不崩溃"，本评审关注"结构可维护"。

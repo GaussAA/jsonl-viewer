@@ -23,6 +23,7 @@ import { VirtualRecordList } from './virtualScroll.ts';
 import { createToolbar } from './toolbar.ts';
 import type { ToolbarInfo } from './toolbar.ts';
 import { createDetailTree, type DetailTreeNavHandlers } from './detailTree.ts';
+import { createColumnLayout, type ColumnLayout } from './columnLayout.ts';
 import { createVSCodeApi, RpcBus } from './rpc.ts';
 import {
   mergePersistedState,
@@ -158,8 +159,7 @@ const CACHE_MAX_ENTRIES = 600;
 /** 搜索防抖强匹配 / 过滤结果跳过的显示上限（防御性，避免超大数组卡 UI）。 */
 const SEARCH_LIMIT = 5000;
 
-/** 左栏默认宽度与可调宽度持久化键（拖拽分栏用）。 */
-const DEFAULT_LIST_WIDTH = 320;
+/** 左栏可调宽度持久化键（拖拽分栏用）。 */
 const LIST_WIDTH_KEY = 'jsonlViewer.listWidth';
 /** 左栏折叠状态持久化键。 */
 const LIST_COLLAPSED_KEY = 'jsonlViewer.listCollapsed';
@@ -422,152 +422,10 @@ export function main(): void {
   expandBtn.hidden = true;
   rootEl.appendChild(expandBtn);
 
-  let listCollapsed = false;
-  let listAnimTimer: ReturnType<typeof setTimeout> | undefined;
-  /** 窄容器态：布局以 #app 容器宽度为基准（与 CSS @container max-width:699px 对齐），而非视口。
-   *  首次取初始容器宽度；后续由 onContainerResize() 跨断点时更新并触发重排。 */
-  let narrow = rootEl.clientWidth < 700;
-  /** 收起/展开动画时长与缓动（与设计体系 --jlv-dur-slow / --jlv-ease 对齐）。 */
-  const COL_ANIM_MS = 300;
-  const COL_EASE = 'cubic-bezier(0.16, 1, 0.3, 1)';
-  /** 最近一次展开态下的左栏宽度（用于展开动画的初始边距）。 */
-  let expandedWidthPx: number;
-
-  /** 直接设置折叠/展开的最终 UI 状态（按钮显隐 + 持久化）。 */
-  function applyCollapsedUI(collapsed: boolean): void {
-    listCollapsed = collapsed;
-    leftCol.classList.toggle('collapsed', collapsed);
-    // resizer 保持恒定 5px，不随收起变化 → 避免动画结束那一刻右栏因 resizer 宽度跳变产生 5px 抖动
-    collapseBtn.hidden = collapsed;
-    expandBtn.hidden = !collapsed;
-    expandBtn.title = '展开左栏';
-    // 收起/展开不影响当前页数据，无需重建目录 DOM
-    saveListCollapsed(collapsed);
-    updateNavEnabled();
-  }
-
-  /** 清除 JS 注入的过渡/滑移样式；宽度由 .collapsed 或内联 width 决定（保留展开宽度）。
-   *  必须同时清 flexBasis：动画期间写入了内联 flex-basis，而左栏是 flex:0 0 auto，
-   *  flex-basis 优先于 width 决定尺寸；不清除会导致 resizer 拖拽改 width 失效。 */
-  function resetColInline(): void {
-    leftCol.style.transition = '';
-    leftCol.style.transform = '';
-    leftCol.style.marginRight = '';
-    leftCol.style.opacity = '';
-    leftCol.style.flexBasis = '';
-  }
-
-  const reduceMotion = (): boolean =>
-    typeof window.matchMedia === 'function' &&
-    window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-
-  /**
-   * 收起/展开「拉抽屉」动画：
-   *   - 收起：左栏整体 translateX 0 → -W（向外移出）+ margin-right 0 → -W（右栏向右让出的空间收拢、
-   *           实际是右栏顺势左移补位）。不加淡入淡出。
-   *   - 展开：左栏 translateX -W → 0（向内移入）+ margin-right -W → 0（右栏右移归位）。
-   * 因 margin-right 与右栏占据的 slot 宽度保持在动画结束前同步（负边距让右栏提前满幅），
-   * 所以动画结束归零 flex 槽位时右栏宽度已就位 → 无结尾抖动。
-   */
-  function setListCollapsed(collapsed: boolean): void {
-    if (reduceMotion()) {
-      clearTimeout(listAnimTimer);
-      resetColInline();
-      applyCollapsedUI(collapsed);
-      return;
-    }
-    const W = expandedWidthPx;
-    clearTimeout(listAnimTimer);
-    const trans = `transform ${COL_ANIM_MS}ms ${COL_EASE}, margin-right ${COL_ANIM_MS}ms ${COL_EASE}`;
-    // 按钮显隐即时切换，便于反向操作
-    collapseBtn.hidden = collapsed;
-    expandBtn.hidden = !collapsed;
-    expandBtn.title = '展开左栏';
-
-    if (collapsed) {
-      // 收起：抽屉向外移出
-      leftCol.classList.remove('collapsed');
-      leftCol.style.width = `${W}px`;
-      leftCol.style.flexBasis = `${W}px`;
-      leftCol.style.minWidth = '0';
-      leftCol.style.overflow = 'hidden';
-      leftCol.style.transform = 'translateX(0)';
-      leftCol.style.marginRight = '0px';
-      leftCol.style.transition = 'none';
-      void leftCol.offsetWidth; // 强制提交起始帧
-      leftCol.style.transition = trans;
-      leftCol.style.transform = `translateX(-${W}px)`;
-      leftCol.style.marginRight = `-${W}px`;
-    } else {
-      // 展开：抽屉向内移入
-      applyCollapsedUI(false); // 还原占位（宽度回到展开值）
-      leftCol.style.width = `${W}px`;
-      leftCol.style.flexBasis = `${W}px`;
-      leftCol.style.minWidth = '0';
-      leftCol.style.overflow = 'hidden';
-      leftCol.style.transition = 'none';
-      leftCol.style.transform = `translateX(-${W}px)`;
-      leftCol.style.marginRight = `-${W}px`; // 使右栏保持当前满幅，避免先跳位
-      void leftCol.offsetWidth; // 强制提交起始帧
-      leftCol.style.transition = trans;
-      leftCol.style.transform = 'translateX(0)';
-      leftCol.style.marginRight = '0px';
-    }
-
-    // 动画结束后：清掉滑移/过渡，落到静态折叠态（宽度归零由 .collapsed 完成）
-    listAnimTimer = setTimeout(() => {
-      resetColInline();
-      applyCollapsedUI(collapsed);
-    }, COL_ANIM_MS + 40);
-  }
-
-  collapseBtn.addEventListener('click', () => setListCollapsed(true));
-  expandBtn.addEventListener('click', () => setListCollapsed(false));
-
-  function clampListWidth(w: number): number {
-    return Math.max(180, Math.min(w, Math.max(DEFAULT_LIST_WIDTH, window.innerWidth * 0.6)));
-  }
-  function applyListWidth(w: number): void {
-    const cw = clampListWidth(w);
-    leftCol.style.width = `${cw}px`;
-    expandedWidthPx = cw;
-  }
-  // 恢复上次拖拽宽度
-  const savedW = listWidthFromStore();
-  expandedWidthPx = savedW ?? DEFAULT_LIST_WIDTH;
-  if (savedW !== null) applyListWidth(savedW);
-  // 恢复折叠状态（仅宽屏；窄屏由 syncResponsive 的抽屉模式接管，不在此恢复）
-  // 用 applyCollapsedUI（无动画），避免挂载即播收起动画导致首帧闪烁抖动。
-  if (!narrow && listCollapsedFromStore()) applyCollapsedUI(true);
-
-  let dragStartX = 0;
-  let dragStartW = 0;
-  resizer.addEventListener('pointerdown', (e) => {
-    if (listCollapsed) return; // 折叠态不允许拖拽
-    if ((e.target as HTMLElement).closest('.jlv-resizer__toggle')) return; // 折叠按钮不触发拖拽
-    resizer.classList.add('active');
-    dragStartX = e.clientX;
-    dragStartW = leftCol.getBoundingClientRect().width;
-    resizer.setPointerCapture(e.pointerId);
-  });
-  resizer.addEventListener('pointermove', (e) => {
-    if (!resizer.classList.contains('active')) return;
-    applyListWidth(clampListWidth(dragStartW + (e.clientX - dragStartX)));
-  });
-  const endDrag = (e: PointerEvent): void => {
-    if (!resizer.classList.contains('active')) return;
-    resizer.classList.remove('active');
-    const cw = clampListWidth(dragStartW + (e.clientX - dragStartX));
-    saveListWidth(cw);
-    expandedWidthPx = cw;
-  };
-  resizer.addEventListener('pointerup', endDrag);
-  resizer.addEventListener('pointercancel', endDrag);
-  resizer.addEventListener('dblclick', () => {
-    if (listCollapsed) return;
-    applyListWidth(DEFAULT_LIST_WIDTH);
-    saveListWidth(DEFAULT_LIST_WIDTH);
-  });
+  // 左右两栏布局协调逻辑（收起/展开动画、拖拽调宽、窄容器响应式抽屉）已抽至 columnLayout.ts（T5 #30）。
+  // 此处仅持有 DOM 节点（leftCol/resizer/collapseBtn/expandBtn/hamburger/backdrop）；
+  // layout 在底部 hamburger/backdrop 创建后经 createColumnLayout 接线全部逻辑与事件。
+  let layout: ColumnLayout;
 
   /* ---------------- 文件变更 / 错误横幅：右上角浮层提示（不占整行） ---------------- */
   const banner = createBanner();
@@ -602,8 +460,8 @@ export function main(): void {
       list.select(line);
       void showDetailForLine(line);
       updateNavEnabled();
-      // 窄容器抽屉：选中记录后收起目录抽屉，回到详情主视图
-      if (narrow) setDrawer(false);
+      // 窄容器抽屉：选中记录后收起目录抽屉，回到详情主视图（layout 于底部接线后可用）
+      if (layout.isNarrow()) layout.setDrawer(false);
     },
     onRangeChange: (displayFirst, displayLast) => {
       // 分页/翻页已改变当前可视页 → 立即刷新范围文本（不依赖后面是否有实际拉取）。
@@ -661,51 +519,24 @@ export function main(): void {
   backdrop.hidden = true;
   rootEl.appendChild(backdrop);
 
-  /** 开/关窄容器目录抽屉（list-open 类驱动 CSS 滑入滑出）。 */
-  function setDrawer(open: boolean): void {
-    rootEl!.classList.toggle('list-open', open);
-    backdrop!.hidden = !open;
-    hamburger.setAttribute('aria-label', open ? '收起记录目录' : '打开记录目录');
-    hamburger.title = open ? '收起记录目录' : '记录目录';
-  }
-  hamburger.addEventListener('click', () => setDrawer(!rootEl!.classList.contains('list-open')));
-  backdrop.addEventListener('click', () => setDrawer(false));
-
-  /** 依据窄/宽容器收敛布局。 */
-  function syncResponsive(): void {
-    // 跨断点/重建布局时收拢抽屉，避免残留打开态。
-    setDrawer(false);
-    if (narrow) {
-      // 窄容器：清掉桌面折叠态/内联样式；目录抽屉默认收起，详情铺满为主视图。
-      resetColInline();
-      leftCol.classList.remove('collapsed');
-      listCollapsed = false;
-      collapseBtn.hidden = true;
-      expandBtn.hidden = true;
-    } else {
-      // 宽容器：恢复桌面两栏（持久化折叠则保持）
-      if (listCollapsedFromStore()) applyCollapsedUI(true);
-      else applyCollapsedUI(false);
-      list.refresh();
-    }
-  }
-
-/** 容器(面板)宽度跨窄/宽断点 → 更新 narrow 并重排；同侧变化（拖动调整面板）不重排。 */
-let roNarrow: ResizeObserver | null = null;
-function onContainerResize(): void {
-  const n = rootEl!.clientWidth < 700;
-  if (n === narrow) return;
-  narrow = n;
-  syncResponsive();
-}
-if (typeof window.ResizeObserver === 'function') {
-  roNarrow = new ResizeObserver(onContainerResize);
-  roNarrow.observe(rootEl);
-} else {
-  // 回退：不支持容器查询时跟随视口尺寸
-  window.addEventListener('resize', onContainerResize);
-}
-syncResponsive();
+  // 抽屉开关 / 响应式重排 / ResizeObserver 观测（setDrawer / syncResponsive / onContainerResize）
+  // 全部由 columnLayout 接管（T5 #30）。DOM 节点已在上方创建并挂载，此处仅接线行为。
+  layout = createColumnLayout({
+    rootEl,
+    detailRoot: detail.root,
+    leftCol,
+    resizer,
+    collapseBtn,
+    expandBtn,
+    hamburger,
+    backdrop,
+    refreshList: () => list.refresh(),
+    updateNavEnabled,
+    saveListCollapsed,
+    listCollapsedFromStore,
+    listWidthFromStore,
+    saveListWidth,
+  });
 
 /* ---------------- prev / next 导航 ---------------- */
 
@@ -1089,8 +920,7 @@ syncResponsive();
   const cleanup = (): void => {
     if (cleanupCalled) return;
     cleanupCalled = true;
-    if (listAnimTimer) clearTimeout(listAnimTimer);
-    if (roNarrow) roNarrow.disconnect();
+    layout.dispose(); // 释放 ResizeObserver + 收起/展开动画定时器（columnLayout 内部状态）
     bus.dispose();
     scheduleFetch.dispose();
     list.dispose();
