@@ -120,6 +120,9 @@
   该错误曾直接导致「本地无缓存 → 集成测试不可跑」的误判，故更正。
 - **`lint` 首次运行暴露的真问题（4 处，已修）**：`scripts/validate-300mb.ts` 死变量 `bruteBuf`（仅声明、零引用）；`src/host/__tests__/indexHostWorker.test.ts` 三处 `emit*` 多余的 `[...handlers]` 复制；`src/webview/toolbar.ts` 解构变量 `label` 遮蔽；`src/webview/__tests__/{toolbar,virtualScroll}.test.ts` 局部变量 `before` 遮蔽 `node:test` 的 `before` 钩子。
 - **CI pnpm 版本不一致（已修）**：`.github/workflows/ci.yml` 三处写死 `12.4.2`，而 `package.json` 的 `packageManager` 在依赖规范化后已是 `12.5.1` —— 不改会导致 CI 版本不符而失败。两处必须同步修改。
+- **文档机器绝对路径（已修，提交 `9a7dc8c`）**：`docs/CODE_WIKI.md`（15 处）与 `docs/CODE_REVIEW.md`（25 处）使用 `file:///c:/WorkSpace/...` 绝对链接 —— 换机器或他人 clone 后全部失效、无法在 GitHub 点击。统一改为相对路径 `../src/...`（行号锚点保留）；复核残留 0、失效相对链接 0。
+- **数组 API 现代化（提交 `5f8178d`）**：6 处 `[...arr].sort()` / `[...arr].reverse()` → `toSorted()` / `toReversed()`（ES2023 非变异方法，行为等价）；`tsconfig` 的 `lib` 由 ES2022 提至 ES2023（仅新增 API 类型、无新语法；运行时基线 Node 22.18+ 与 VS Code 1.100+ 均支持）。oxlint 警告 8 → 2。
+- **余下 2 处 lint 警告的判定（保留不改）**：`unicorn/prefer-set-has` 的两处属**过度建议** —— 一处是 4 元素数组上的 `includes`，一处是「数组拼接 + 另建 Set 去重」的正常写法。规则保留（不阻断），未来若真出现 O(n²) 场景仍能提示。
 
 ### 2.5 集成测试现状（须本机补跑）
 
@@ -142,6 +145,10 @@
 | `de731ca` | `docs(tooling)` | 维护审计同步 P1 落地；新增 `.git-blame-ignore-revs` |
 | `0c3eec1` | `refactor` | 清理 8 项零引用导出（重复实现 / 语义封装 / 误导常量 / 断点常量 / 协议类型） |
 | `e962291` | `chore(tooling)` | 接入 husky pre-commit 本地门禁 |
+| `2b0d190` | `docs` | 维护审计同步本轮清理与 pre-commit |
+| `c35731f` | `chore` | 新增 `.gitattributes` 统一 LF 行尾（修复 checkout 后 prettier 误报） |
+| `9a7dc8c` | `docs` | 修正 40 处机器绝对路径链接为相对路径 |
+| `5f8178d` | `refactor` | 6 处改用非变异数组 API（toSorted / toReversed）+ tsconfig lib 提至 ES2023 |
 
 > 说明：`package.json` / `pnpm-lock.yaml` 的改动**非人工编辑**，系安装 `jsdom` 与 `@types/jsdom` 时 pnpm 自动重写。清单与锁文件必须一致，否则 CI 以 `--frozen-lockfile` 安装会失败，故予接纳入库。
 
@@ -155,4 +162,4 @@
 4. **本机补跑集成测试**：`pnpm test:integration`（沙箱受限，见 2.5）。
 5. **按需回收磁盘**：`.vscode-test`（1.4 GB，可联网重下）与 `samples` 中可再生大样本（340 MB）——按需执行。
 6. **待确认后再动**：`samples/现网多轮已规整数据.jsonl`（232 MB）与 `query处置全景_...jsonl`（2.6 MB）疑为真实业务数据，删除前请确认是否另有留存。
-7. **可选后续**：`docs/CODE_WIKI.md` 含机器绝对路径（旧评审 P2 遗留）；`detailTree` / `toolbar` 的余留 lint warning（`toSorted` 等风格建议）按需处理。
+7. **可选后续**：~~`docs/CODE_WIKI.md` 含机器绝对路径~~ **✅ 已修（`9a7dc8c`）**；余留 2 处 `prefer-set-has` 警告经复核属过度建议，保留不改（判定见 §2.4）。
