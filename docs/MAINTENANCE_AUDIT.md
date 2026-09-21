@@ -124,12 +124,11 @@
 - **数组 API 现代化（提交 `5f8178d`）**：6 处 `[...arr].sort()` / `[...arr].reverse()` → `toSorted()` / `toReversed()`（ES2023 非变异方法，行为等价）；`tsconfig` 的 `lib` 由 ES2022 提至 ES2023（仅新增 API 类型、无新语法；运行时基线 Node 22.18+ 与 VS Code 1.100+ 均支持）。oxlint 警告 8 → 2。
 - **余下 2 处 lint 警告的判定（保留不改）**：`unicorn/prefer-set-has` 的两处属**过度建议** —— 一处是 4 元素数组上的 `includes`，一处是「数组拼接 + 另建 Set 去重」的正常写法。规则保留（不阻断），未来若真出现 O(n²) 场景仍能提示。
 
-### 2.5 集成测试现状（须本机补跑）
+### 2.5 集成测试：沙箱内不可跑，但 **CI 已覆盖（✅ 已闭环，2026-09-21 修正）**
 
-- `.vscode-test/` **确有两版 VS Code**（1.100.0 与 1.138.0），脚本实测能识别：`Found existing install in ...\vscode-win32-x64-archive-1.100.0`。
-- 但**沙箱内仍跑不通**，原因是沙箱把 `Code.exe` 拦成不识别参数的包装程序：
-  `bad option: --disable-extensions / --no-sandbox / --extensionTestsPath=...`，`Exit code: 9`。
-- → 结论：`pnpm test:integration` 须在**大帅本机（沙箱外）**执行，以覆盖 Extension Host 真实路径。
+- 沙箱内跑不通：`.vscode-test/` 缓存**确有两版 VS Code**（1.100.0 与 1.138.0），脚本也能识别（`Found existing install in ...\vscode-win32-x64-archive-1.100.0`），但沙箱把 `Code.exe` 拦成不识别参数的包装程序：`bad option: --disable-extensions / --no-sandbox / --extensionTestsPath=...`，`Exit code: 9`。
+- **修正结论**：本次工作流修复后，CI 的 9 个 `integration-test` 矩阵组合（Ubuntu / Windows / macOS × VS Code 1.100.0 / stable / insiders）**均已真实执行并通过**（步骤 `Run integration tests (...)` 结论为 success，非 skipped）。
+- → **无需大帅本机补跑**：集成测试本就有 CI 矩阵覆盖，此前只因工作流失效而**从未真正运行过一次**（连 `pnpm install --frozen-lockfile` 都没跑成）。本机运行仍适用于本地调试。
 
 ### 2.6 CI / Release 工作流失效（本次推送时发现并修复）
 
@@ -147,6 +146,11 @@
 - `release.yml` 头部注释原称「手动触发 → 自动发布」，**与实际行为不符**：发布步骤以 `github.event_name == 'push'` 为闸，手动触发只构建并上传 VSIX、不会发布。已按实际行为改写注释。
   **是否让手动触发也能发布，属行为决策，本次未改，待大帅定夺。**
 - `release.yml` 的 `if` 条件未动语义（仍限 `push` 事件），故**发布行为与修复前一致**，仅从「整份工作流失效」恢复为「按预期工作」。
+
+**修复验证（实测）**：修复后推送 `a6602a8`，CI run `35616227491` **13/13 全绿** —— `lint`、`verify (22)`、`verify (24)`、`coverage` 及 9 个 `integration-test` 组合全部 success。两项旁证：
+
+- 该次 push **未再触发 `Release`** —— 直接印证「文件有效后其 `on:` 声明的 tag 触发恢复生效」（此前每次 push 都有一个无 job 的失败运行）；
+- `Install dependencies`（`pnpm install --frozen-lockfile`）**首次真正执行并通过** —— 即清单与锁文件确为一致，此前的「一致性」从未被 CI 真正校验过。
 
 **为何能潜伏两天而无人察觉**：仓库未启用分支保护 / 必需状态检查，红色 CI **不阻断任何操作**（连 `--frozen-lockfile` 之类的约束都未曾真正执行过）。建议在仓库设置中把 `verify`、`lint`、`coverage` 设为必需检查 —— 属仓库设置，非代码。
 
@@ -182,7 +186,7 @@
 1. ~~**补工程化基线**：ESLint + Prettier + EditorConfig + CI lint job + pre-commit~~ **✅ 已完成**（lint 改用 oxlint，原因见 2.3；pre-commit 见同节）。
 2. ~~**清 8 个零引用导出**~~ **✅ 已完成（`0c3eec1`）** —— 核查后确认 8 项全为真问题（非预留 API），处置见表。
 3. ~~**统一断点常量**：JS 侧改用 `NARROW_BREAKPOINT_PX`~~ **✅ 已完成（`0c3eec1`）** —— CSS 侧保留硬编码但已加同步注释。
-4. **本机补跑集成测试**：`pnpm test:integration`（沙箱受限，见 2.5）。
+4. ~~**本机补跑集成测试**：`pnpm test:integration`（沙箱受限，见 2.5）~~ **✅ 已闭环** —— 集成测试本就有 CI 矩阵覆盖，2026-09-21 工作流修复后 9 个组合全部真实跑通并通过（见 2.5）。仅在需本地调试时执行。
 5. **按需回收磁盘**：`.vscode-test`（1.4 GB，可联网重下）与 `samples` 中可再生大样本（340 MB）——按需执行。
 6. **待确认后再动**：`samples/现网多轮已规整数据.jsonl`（232 MB）与 `query处置全景_...jsonl`（2.6 MB）疑为真实业务数据，删除前请确认是否另有留存。
 7. **启用分支保护 / 必需状态检查**（仓库设置，非代码）：把 `verify`、`lint`、`coverage` 设为必需检查。本次工作流失效潜伏两天而无人察觉，根因正是「红色 CI 不阻断任何操作」。
