@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { DataService } from './host/dataService.ts';
+import { createServiceRegistry, type ServiceRegistry } from './host/serviceRegistry.ts';
 import {
   dispatchMessage,
   errReply,
@@ -28,39 +29,37 @@ export const OPEN_COMMAND = 'jsonlViewer.open';
 
 const WEBVIEW_SCRIPT = 'webview.js';
 
-/** 多面板复用：同一 uri 只保留一个面板，重复打开则 reveal 而非新建。 */
-const openPanels = new Map<string, vscode.WebviewPanel>();
-
 /**
- * 按 uri 复用的 DataService 注册表（带引用计数）。
+ * 扩展运行期显式持有的共享状态（T4/A4）。
  *
- * 为何需要：
- *   1. 同一文件可能同时由「默认编辑器」与「命令/右键菜单」两条路径打开，
- *      若各自新建 DataService，会**重复建索引、重复起 worker、重复占文件句柄**；
- *   2. webview 内容在隐藏后重建时（`retainContextWhenHidden:false` 或编辑器重建）
- *      会再次挂载，不复用则要**重新扫描整个文件**——大文件代价极高。
- *
- * 引用计数归零时才真正释放（关 worker / 关联 reader 句柄），保证不做无用功。
+ * 原先 `openPanels` / `serviceRegistry` 是 extension.ts 的**模块级隐式全局单例**——不可注入、
+ * 无法单测。现由 `activate()` 创建唯一实例并通过参数注入到「命令」与「自定义编辑器」两条路径：
+ * 生命周期仍与扩展一致，但来源显式、可替换、可测。
  */
-interface SharedService {
-  svc: DataService;
-  refs: number;
+interface HostRuntime {
+  /** 多面板复用：同一 uri 只保留一个面板，重复打开则 reveal 而非新建。 */
+  panels: Map<string, vscode.WebviewPanel>;
+  /**
+   * 按 uri 复用的 DataService 注册表（带引用计数）。
+   *
+   * 为何需要：
+   *   1. 同一文件可能同时由「默认编辑器」与「命令/右键菜单」两条路径打开，
+   *      若各自新建 DataService，会**重复建索引、重复起 worker、重复占文件句柄**；
+   *   2. webview 内容在隐藏后重建时（`retainContextWhenHidden:false` 或编辑器重建）
+   *      会再次挂载，不复用则要**重新扫描整个文件**——大文件代价极高。
+   *
+   * 引用计数归零时才真正释放（关 worker / 关联 reader 句柄），保证不做无用功。
+   */
+  services: ServiceRegistry<DataService>;
 }
-const serviceRegistry = new Map<string, SharedService>();
 
-/** 取得（或新建）该 uri 的共享 DataService，并增加一次引用。 */
-function acquireService(uri: vscode.Uri, context: vscode.ExtensionContext): DataService {
-  const key = uri.toString();
-  const hit = serviceRegistry.get(key);
-  if (hit) {
-    hit.refs++;
-    return hit.svc;
-  }
+/** 构造该 uri 的 DataService（读取配置 + worker 脚本路径 + 限速进度日志）。 */
+function makeDataService(key: string, uri: vscode.Uri, context: vscode.ExtensionContext): DataService {
   const sampleLines = vscode.workspace
     .getConfiguration('jsonlViewer')
     .get<number>('sampleLines', 200);
   const workerScriptPath = path.join(context.extensionPath, 'dist', 'indexWorker.js');
-  const svc = new DataService(key, uri.fsPath, {
+  return new DataService(key, uri.fsPath, {
     sampleLines,
     workerScriptPath,
     // 构建进度写入输出面板（限速 1 次/秒，避免 GB 级文件刷屏）——仅 debug 开启时可见。
@@ -78,23 +77,6 @@ function acquireService(uri: vscode.Uri, context: vscode.ExtensionContext): Data
       };
     })(),
   });
-  serviceRegistry.set(key, { svc, refs: 1 });
-  return svc;
-}
-
-/** 释放一次引用；归零时才真正 dispose（关 worker / 释放句柄）。 */
-function releaseService(uri: vscode.Uri): void {
-  const key = uri.toString();
-  const hit = serviceRegistry.get(key);
-  if (!hit) return;
-  hit.refs--;
-  if (hit.refs > 0) return;
-  serviceRegistry.delete(key);
-  // 防御：dispose 内部已吞错，但补 .catch 防未来回归——引用计数归零的释放若抛未捕获
-  // rejection，会击穿扩展宿主（所有扩展共享进程）。
-  void hit.svc.dispose().catch((e: unknown) =>
-    hostErr('DataService dispose 失败: ' + (e instanceof Error ? (e.stack || e.message) : String(e)))
-  );
 }
 
 /** 日志输出面板：用户可在"输出 → JSONL Viewer"中查看宿主收发情况，便于排障。 */
@@ -159,7 +141,12 @@ interface ViewerTarget {
  * `TextDocument`、绝不 `getText()` 整个文件。因此 200MB~数 GB 文件也能打开，
  * 且内存与「当前请求的行」成正比，而非与文件大小成正比。
  */
-function mountViewer(target: ViewerTarget, uri: vscode.Uri, context: vscode.ExtensionContext): void {
+function mountViewer(
+  target: ViewerTarget,
+  uri: vscode.Uri,
+  context: vscode.ExtensionContext,
+  runtime: HostRuntime
+): void {
   const webview = target.webview;
   const scriptUri = webview.asWebviewUri(
     vscode.Uri.joinPath(context.extensionUri, 'dist', WEBVIEW_SCRIPT)
@@ -175,7 +162,8 @@ function mountViewer(target: ViewerTarget, uri: vscode.Uri, context: vscode.Exte
   // 2b：把「索引构建 + 搜索 + 过滤」下沉到 worker（dist/indexWorker.js），
   // 大文件扫描时主线程（webview 消息循环 / 其它扩展）不被阻塞；spawn 失败自动回退主线程。
   // 按 uri 复用：同一文件的多个视图（默认编辑器 / 命令面板）共享同一份索引与 worker。
-  const data = acquireService(uri, context);
+  const serviceKey = uri.toString();
+  const data = runtime.services.acquire(serviceKey, () => makeDataService(serviceKey, uri, context));
   /**
    * 向 webview 发送消息。
    *
@@ -193,11 +181,11 @@ function mountViewer(target: ViewerTarget, uri: vscode.Uri, context: vscode.Exte
   const staleTimer = startStaleWatch({ data, post });
 
   // Tear down：停止 stale 检测、注销消息订阅，并**释放一次引用**
-  // （引用计数归零时才真正关 worker / 释放文件句柄——见 releaseService）。
+  // （引用计数归零时才真正关 worker / 释放文件句柄——见 serviceRegistry.release）。
   target.onDispose(() => {
     clearInterval(staleTimer);
     messageSub.dispose();
-    releaseService(uri);
+    runtime.services.release(serviceKey);
   });
 }
 
@@ -408,10 +396,11 @@ function startStaleWatch(deps: StaleWatchDeps): ReturnType<typeof setInterval> {
  */
 export async function openJsonlViewer(
   context: vscode.ExtensionContext,
+  runtime: HostRuntime,
   fileUri?: vscode.Uri
 ): Promise<void> {
   try {
-    await openJsonlViewerUnsafe(context, fileUri);
+    await openJsonlViewerUnsafe(context, runtime, fileUri);
   } catch (e) {
     hostErr('openJsonlViewer 异常: ' + (e instanceof Error ? (e.stack || e.message) : String(e)));
     void vscode.window.showErrorMessage(
@@ -426,6 +415,7 @@ export async function openJsonlViewer(
  */
 async function openJsonlViewerUnsafe(
   context: vscode.ExtensionContext,
+  runtime: HostRuntime,
   fileUri?: vscode.Uri
 ): Promise<void> {
   let uri = fileUri;
@@ -454,7 +444,7 @@ async function openJsonlViewerUnsafe(
   const key = uri.toString();
   // 面板存活时必在 Map 中（onDidDispose 会同步删除），故以存在性判定即可，
   // 无需 isDisposed（WebviewPanel 无此属性）。
-  const existing = openPanels.get(key);
+  const existing = runtime.panels.get(key);
   if (existing) {
     existing.reveal();
     return;
@@ -471,13 +461,18 @@ async function openJsonlViewerUnsafe(
       localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, 'dist')],
     }
   );
-  openPanels.set(key, panel);
+  runtime.panels.set(key, panel);
 
-  mountViewer({ webview: panel.webview, onDispose: (cb) => panel.onDidDispose(cb) }, uri, context);
+  mountViewer(
+    { webview: panel.webview, onDispose: (cb) => panel.onDidDispose(cb) },
+    uri,
+    context,
+    runtime
+  );
 
   panel.onDidDispose(
     () => {
-      openPanels.delete(key);
+      runtime.panels.delete(key);
     },
     undefined,
     context.subscriptions
@@ -498,9 +493,11 @@ async function openJsonlViewerUnsafe(
  */
 class JsonlCustomEditorProvider implements vscode.CustomReadonlyEditorProvider {
   private readonly context: vscode.ExtensionContext;
+  private readonly runtime: HostRuntime;
 
-  constructor(context: vscode.ExtensionContext) {
+  constructor(context: vscode.ExtensionContext, runtime: HostRuntime) {
     this.context = context;
+    this.runtime = runtime;
   }
 
   /** 只持有 URI，不读取文件内容（此即超大文件亦可双击打开的关键）。 */
@@ -522,7 +519,8 @@ class JsonlCustomEditorProvider implements vscode.CustomReadonlyEditorProvider {
       mountViewer(
         { webview: panel.webview, onDispose: (cb) => panel.onDidDispose(cb) },
         document.uri,
-        this.context
+        this.context,
+        this.runtime
       );
     } catch (e) {
       // 挂载失败（webview 配额 / 已销毁竞态）同样不得冒泡到扩展宿主。
@@ -534,6 +532,15 @@ class JsonlCustomEditorProvider implements vscode.CustomReadonlyEditorProvider {
 export function activate(context: vscode.ExtensionContext): void {
   output = vscode.window.createOutputChannel('JSONL Viewer');
   syncDebugFlag();
+
+  // T4/A4：共享状态在此**显式创建**并注入各调用路径（替代此前的模块级隐式全局单例）。
+  const runtime: HostRuntime = {
+    panels: new Map<string, vscode.WebviewPanel>(),
+    services: createServiceRegistry<DataService>((e) =>
+      hostErr('DataService dispose 失败: ' + (e instanceof Error ? (e.stack || e.message) : String(e)))
+    ),
+  };
+
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration('jsonlViewer.debug')) {
@@ -548,7 +555,7 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     vscode.commands.registerCommand(OPEN_COMMAND, (uri?: vscode.Uri) => {
       // 双层防护：openJsonlViewer 自身已收口异常，此处再兜一道，杜绝未处理 rejection。
-      void openJsonlViewer(context, uri).catch((e) => {
+      void openJsonlViewer(context, runtime, uri).catch((e) => {
         hostErr('命令执行失败: ' + (e instanceof Error ? (e.stack || e.message) : String(e)));
       });
     })
@@ -560,7 +567,7 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     vscode.window.registerCustomEditorProvider(
       CUSTOM_EDITOR_VIEW_TYPE,
-      new JsonlCustomEditorProvider(context),
+      new JsonlCustomEditorProvider(context, runtime),
       {
         webviewOptions: { retainContextWhenHidden: true },
         supportsMultipleEditorsPerDocument: true,

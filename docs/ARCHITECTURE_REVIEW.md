@@ -52,7 +52,7 @@ indexer/ parser/ infer/ perf/ constants.ts  ← 共享叶子（被 host/webview 
 | **T1** | `extension.ts:156-315` `mountViewer` | 上帝函数：webview HTML 注入 + CSP/nonce + 12 个内联 RPC handler + stale 定时器 + 跳源 + 偏好持久化 + 服务注册表调用，单函数 ~160 行 | 改动任何宿主行为必动中心函数；命令/编辑器两路径虽共享（好 DRY）但代价是中心化 | 中（SRP） | ~~A3：拆 buildWebviewHtml()/registerHostHandlers()/startStaleWatch()~~ **✅ 已修复（A3）** |
 | **T2** | `protocol/rpc.ts:241-334` `dispatchMessage` | 12 参数位置化签名 + 巨型 switch；注释自承"实际处理器另行实现" → 路由与处理分离却散两处 | 加一个端点须改 3 处（常量 / union 类型 / switch / 调用点内联 handler），易漏改 | 中（OCP/ISP + 抽象泄漏） | ~~A2：handler 注册表 Map<endpoint,fn>，dispatch 查表分发~~ **✅ 已修复（A2）** |
 | **T3** | `host/* → webview/queryLogic.ts` | host 反向依赖 webview（见 §二） | 核心层依赖 UI 层；若 webview 引入浏览器专属依赖会污染宿主；层边界失真 | 中（DIP） | ~~A1：抽 core/ 共享 FieldCondition+matchesFilter+recordFieldValue~~ **✅ 已修复（A1）** |
-| **T4** | `extension.ts:46,83-91` | 模块级全局单例 `serviceRegistry` / `openPanels` 未注入；`releaseService` 中 `void hit.svc.dispose()` 无 `.catch` | 隐式全局状态难测；dispose 当前不 reject（所有 await 已 `.catch`）但脆弱 | 低~中 | ~~A4：dispose 补 .catch~~ **✅ 部分修复（A4：dispose 已补 .catch；registry 显式持有/注入待办）** |
+| **T4** | `extension.ts` 模块级全局与释放路径 | 模块级全局单例 `serviceRegistry` / `openPanels` 未注入；`releaseService` 中 `void hit.svc.dispose()` 无 `.catch` | 隐式全局状态难测；释放异常可能击穿扩展宿主（所有扩展共享进程） | 低~中 | ~~A4：dispose 补 .catch~~ **✅ 已修复（A4）**：① dispose 补 `.catch` 收口；② 引用计数抽为纯模块 `host/serviceRegistry.ts`（可单测，同步抛与异步 reject 均经 `onReleaseError` 上报、**绝不外抛**）；③ `openPanels`/`services` 收敛为 `HostRuntime`，由 `activate()` 显式创建并注入各路径。新增 7 项单测 |
 | **T5** | `webviewEntry.ts` + `AppState` | 前端协调层膨胀（样式/横幅/分栏动画/响应式/搜索/过滤/导航/持久化/生命周期）+ 30+ 字段手写状态机 | 认知负担高；一处 state 字段改动波及众多闭包 | 中（前端 God Object） | **增量+测试网（2026-09-20 钦定），进行中**：① 测试网基建 ✅ #29（domHarness + webviewEntry.test 冒烟测试）；② `webviewEntry` 导出化 ✅ #28（`main` 导出 + 条件挂载）；③ 抽 `columnLayout` ✅ #30（收起/展开动画 + 拖拽调宽 + 窄容器响应式抽屉 → 独立工厂 `createColumnLayout(deps)`，行为抽取**不搬 DOM 创建顺序**，`webviewEntry.ts` 1112→951 行，新增模块级回归测试 6 项）；④ 抽 `queryActions` ✅ #31（supersede/jumpToMatch/runSearch/stepSearch/runFilter/clearFilterForCond/applyLayout → 独立工厂 `createQueryActions(deps)`，list/toolbar 经访问器晚绑定，`webviewEntry.ts` 951→834 行，新增模块级回归测试 10 项）；⑤ 抽 `persistence` ✅ #32（偏好防抖写回 → `createPersistence(deps)`，`webviewEntry.ts` 834→822 行，新增模块级回归测试 3 项）。**T5 收尾：`webviewEntry.ts` 由 1112 → 822 行（−290，−26%），新增 3 模块（columnLayout/queryActions/persistence）+ 19 项模块级测试**。每步 tsc/test/build 全绿且独立提交 |
 | **T6** | `extension.ts` 两处 webview HTML 模板（viewer 外壳 + notLocal 占位） | 模板结构内联两处，CSP/nonce 重复表达 | 轻微重复；模板改动要改两处 | 低 | ~~抽 renderWebviewHtml 工厂~~ **✅ 已修复（T6）：收敛为单一 `renderWebviewShell` 外壳工厂，`renderViewerHtml` 与 `notLocalHtml` 共用** |
 | **T7** | `extension.ts` 消息处理外层 catch | 异常回执 `errReply(undefined, …)`，requestId 丢失 | webview 走全局 error handler 弹横幅，且该在途请求永不 settle（只能等超时） | 低 | ~~异常路径带 requestId~~ **✅ 已修复（T7）**：新增 `protocol/rpc.ts#requestIdOf(msg)` 安全取值；`extension.ts` 外层 catch 与 `dispatchMessage` 均改用它，异常回执保留 requestId → webview 命中 pending 即精确 reject 并早返回（不弹全局横幅）。新增 4 项回归测试 |
@@ -72,7 +72,8 @@ indexer/ parser/ infer/ perf/ constants.ts  ← 共享叶子（被 host/webview 
 `dispatchMessage` 已无 switch 分支，纯做「类型校验 → 查表 → 调用 → 异常兜底」。新增端点 = 改 2 处（常量/联合类型 + HostHandlerMap 字段与注册），`dispatchMessage` 本体不变（OCP）。这是 A2 对 T2 根源的修复。
 
 ### 4.2 隐式全局状态
-`extension.ts` 模块顶层持有 `serviceRegistry`（uri→DataService 引用计数）、`openPanels`（uri→面板）。它们未被注入、不可在测试中隔离。当前单进程单扩展可接受，但与"显式优于隐式"相悖（T4）。
+~~`extension.ts` 模块顶层持有 `serviceRegistry`（uri→DataService 引用计数）、`openPanels`（uri→面板）。它们未被注入、不可在测试中隔离。当前单进程单扩展可接受，但与"显式优于隐式"相悖（T4）。~~
+**✅ 已修复（T4/A4）**：引用计数逻辑抽为纯模块 `host/serviceRegistry.ts`（`createServiceRegistry({ onReleaseError })`，零 VS Code 依赖，可单测）；`openPanels` 与 `serviceRegistry` 实例化收敛为 `HostRuntime`，由 `activate()` **显式创建**并注入「命令」与「自定义编辑器」两条路径（`mountViewer` / `openJsonlViewer` / `JsonlCustomEditorProvider` 均以参数接收）。隐式全局消除，新增 7 项单测。
 
 ### 4.3 前端状态集中
 `AppState` 是 30+ 字段的可变对象，被 `main()` 内所有闭包捕获。无框架、无 reducer，可靠性完全靠编码纪律。功能稳定时可控；继续膨胀则需抽"协调器/store"（T5）。
@@ -112,10 +113,10 @@ indexer/ parser/ infer/ perf/ constants.ts  ← 共享叶子（被 host/webview 
 
 | 项 | 动作 | 解决 | 风险 | 权衡 |
 |---|---|---|---|---|
-| **A1** | 抽 `src/core/`（或并入 `protocol/`）放置 `FieldCondition` + `matchesFilter` + `recordFieldValue`；host 与 webview 均从 core 引用 | T3 反向依赖、DIP | 低（纯移动 + 改 import） | 消除层倒置，且保留"前后端过滤单一事实来源"的 DRY 收益 |
-| **A2** | RPC handler 改为注册表：`type Handler = (payload, rid) => Promise<Response|void>`；`Map<endpoint, Handler>`；`dispatchMessage` 查表分发；新增端点只改 1 处 | T2、OCP、三处表达 | 中（需重构 dispatchMessage + mountViewer 调用点） | 若规划加功能（导出/聚合统计）应先做；端点稳定则可缓 |
-| **A3** | `mountViewer` 拆 `buildWebviewHtml()` / `registerHostHandlers()` / `startStaleWatch()` | T1、SRP | 低 | 降中心函数体积，命令/编辑器共享点保留 |
-| **A4** | `releaseService` 的 `dispose` 补 `.catch`；`serviceRegistry` 改为显式持有（如挂到 context 或闭包注入） | T4 | 低 | 消除隐式全局 + 防御性兜底 |
+| **A1** | ~~抽 `src/core/` 放置 `FieldCondition` + `matchesFilter` + `recordFieldValue`；host 与 webview 均从 core 引用~~ | T3 反向依赖、DIP | 低 | **✅ 已完成（`4d4e3f1`）**：消除层倒置，保留"前后端过滤单一事实来源"的 DRY 收益 |
+| **A2** | ~~RPC handler 改为注册表；`dispatchMessage` 查表分发；新增端点只改 1 处~~ | T2、OCP、三处表达 | 中 | **✅ 已完成（`1af86d3`）**：`HostHandlerMap` 注册表 |
+| **A3** | ~~`mountViewer` 拆 `buildWebviewHtml()` / `registerHostHandlers()` / `startStaleWatch()`~~ | T1、SRP | 低 | **✅ 已完成（`52c09d4`）**：降中心函数体积，命令/编辑器共享点保留 |
+| **A4** | ~~`releaseService` 的 `dispose` 补 `.catch`；`serviceRegistry` 改为显式持有/注入~~ | T4 | 低 | **✅ 已完成**：dispose 补 `.catch`（`52c09d4`）+ 注册表抽纯模块 `host/serviceRegistry.ts` + `HostRuntime` 显式持有并注入各路径 |
 
 > **建议优先级**：A1 > A3 ≈ A4 > A2。A1 是架构卫生且最低风险；A2 仅在"要加端点"时紧迫。
 
@@ -136,6 +137,7 @@ indexer/ parser/ infer/ perf/ constants.ts  ← 共享叶子（被 host/webview 
 
 ## 七、验收与下一步
 
-- 当前门禁有效：`tsc --noEmit` 零错误；`node --experimental-transform-types --test "src/**/*.test.ts"` **177/177**（含 webview jsdom 测试网；实测递归正常）；探针 `scripts/audit-stability.ts` 0 失败；300MB 回归全绿。
-- **A 组已全部落地**（独立提交、每步全量测试不回归）：A1（抽 `core/query.ts` 消除 host→webview 反向依赖）、A3（拆 `mountViewer` 上帝函数）、A4（`releaseService.dispose` 补 `.catch`）、A2（`dispatchMessage` 改为 `HostHandlerMap` 注册表查表分发）。T1–T4 债务状态见 §三表格。
+- 当前门禁有效：`tsc --noEmit` 零错误；`node --experimental-transform-types --test "src/**/*.test.ts"` **184/184**（含 webview jsdom 测试网；实测递归正常）；探针 `scripts/audit-stability.ts` 0 失败；300MB 回归全绿。
+- **A 组已全部落地**（独立提交、每步全量测试不回归）：A1（抽 `core/query.ts` 消除 host→webview 反向依赖）、A3（拆 `mountViewer` 上帝函数）、A4（`releaseService.dispose` 补 `.catch` + 注册表抽纯模块 `host/serviceRegistry.ts` + `HostRuntime` 显式注入）、A2（`dispatchMessage` 改为 `HostHandlerMap` 注册表查表分发）。T1–T4/T7 债务状态见 §三表格。
+- **T7 亦已修复**（`fc0049b`）：异常回执经 `requestIdOf` 保留 requestId，webview 精确 reject 对应请求（不再弹全局横幅、不再挂死到超时）。
 - 报告与既有 `docs/STABILITY_AUDIT.md` 互补：稳定性审计关注"不崩溃"，本评审关注"结构可维护"。
