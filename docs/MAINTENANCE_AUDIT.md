@@ -88,22 +88,26 @@
   `unicorn/consistent-function-scoping`（闭包捕获状态即设计）、`unicorn/require-post-message-target-origin`（VS Code webview 的 `postMessage` 非 `window.postMessage`，属误报）。
   当前余 11 warning（`toSorted`/`toReversed`/`prefer-Set` 等风格建议），不阻断。
 - **格式化范围与代价**：一次性 `prettier --write` 覆盖 59 文件（+888/−357 行）——**因参数按现有风格实测选定**（58 文件全 LF、单引号为主、行长多在 100 内），改动面远小于预期。排除 `docs/`、`.trae/`（编辑器工作流文档）与两个 HTML 设计资产；纯格式化提交已记入 `.git-blame-ignore-revs`（`git config blame.ignoreRevsFile .git-blame-ignore-revs` 后 blame 可跳过）。
-- **仍未做**：pre-commit / husky 本地钩子（当前靠 CI 兜底，属可选增强）。
+- **pre-commit 本地门禁（✅ 已接入，提交 `e962291`）**：`.husky/pre-commit` 在提交前跑 `oxlint` + `prettier --check`（约 2s）。
+  钩子**直调 `node_modules` 下二进制而非 `pnpm lint`** —— 钩子由 git 以独立 shell 调起，`PATH` 中未必有 pnpm，且本仓库对 `pnpm run` 有「冻结安装校验」副作用。
+  范围取舍：`typecheck` 与 290 个单测交由 CI 矩阵与编辑器实时诊断，不放进 pre-commit（避免每次提交等数秒）。
+  已用 `git hook run pre-commit` 与一次真实提交双重验证生效。
+  与 CI 的关系：**CI 保证仓库终态**（Node 22/24 双版本 + 覆盖率门槛），**pre-commit 提供本地秒级反馈**，二者互补而非替代。
 
-**P2 — 死代码：8 个零引用导出**（已计入 src + scripts + 测试的全部引用后复核）
+**P2 — 零引用导出：8 项已全部核实并清理（提交 `0c3eec1`）**
 
-| 文件 | 零引用导出 |
-|---|---|
-| `src/constants.ts` | `FILE_STALE_DEBOUNCE_MS`、`SAMPLE_SCAN_LINES`、`NARROW_BREAKPOINT_PX` |
-| `src/host/recordSummary.ts` | `isOversized` |
-| `src/protocol/rpc.ts` | `ErrorPayload`、`RequestEnvelope` |
-| `src/webview/logic.ts` | `formatBuildMs`、`formatCount` |
+前置核查推翻「死代码」的简单假设 —— **8 项全为真问题，无一属预留 API**，处置如下：
+
+| 类别 | 项 | 处置 |
+|---|---|---|
+| **重复实现** | `logic.ts` 的 `formatBuildMs` / `formatCount` 零引用，而 `toolbar.ts` 自写 `formatMs`（与前者逐字等价）并直接调 `toLocaleString('en-US')`（与后者同一实现） | 删除 toolbar 的本地实现，两处改用 `logic.ts` 的导出（显示行为不变，现有 `/1,000/`、`/12ms/` 断言即回归保护） |
+| **语义封装未启用** | `recordSummary.ts` 的 `isOversized` 零引用，而 `dataService.ts` 直接判 `byteLen > RECORD_INLINE_MAX_BYTES` | 改用 `isOversized(byteLen)`，阈值判断收敛为单处表达 |
+| **误导常量** | `SAMPLE_SCAN_LINES = 1_000` 零引用，而实际抽样行数由 `jsonlViewer.sampleLines`（默认 200）决定 —— 值与实现不符 | 改为 200 并更正注释；`dataService` / `inferFields` 的硬编码 `?? 200` 改用之 |
+| **误导常量** | `FILE_STALE_DEBOUNCE_MS = 1_000` 零引用，且实现中并无 debounce（陈旧检测为 5s 轮询，「只推一次」由 `staleSignaled` 保证） | 删除；新增 `FILE_STALE_POLL_MS = 5_000` 并在 `extension.ts` 使用（行为不变） |
+| **重复事实源** | `NARROW_BREAKPOINT_PX = 700` 零引用，而断点 700 在 `columnLayout.ts` 硬编码两处 | 两处改用该常量；`styles.ts` 的 `@container 699/700` 保留但加注释注明须与其同步（CSS 无法引用 TS 常量，属必要重复） |
+| **未使用协议类型** | `protocol/rpc.ts` 的 `ErrorPayload` / `RequestEnvelope`（实际以内联类型与 `Extract` 表达） | 删除 |
 
 > 说明：`extension.ts` 的 `deactivate` 虽零引用，但属 VS Code 生命周期钩子（由宿主调用），**非死代码**，保留。
-
-**P2 — 重复事实源**
-- `NARROW_BREAKPOINT_PX = 700` 已定义却零引用，而断点 700 在 `columnLayout.ts:69`、`:241` **硬编码两处**；`styles.ts` 另写 `@container (max-width: 699px)` / `(min-width: 700px)`。
-- 建议：JS 侧改用常量；CSS 无法引用 TS 常量，保留但在两侧注释标注「须与 `NARROW_BREAKPOINT_PX` 同步」。
 
 **P3 — 结构性观察（暂不必动）**
 - 4 个视图文件 722–878 行：属组件内聚（渲染 + 交互同源），非上帝对象；`webviewEntry` 已由 T5 分片减负 26%。
@@ -135,6 +139,9 @@
 | `4f27273` | `docs` | 新增本维护审计文档 |
 | `37e6a2a` | `chore(tooling)` | 引入 oxlint + prettier + editorconfig，新增 CI `lint` job；修正 CI pnpm 版本 |
 | `bca004e` | `style` | prettier 全量格式化 59 文件 + 修正 lint 暴露的 4 处问题 |
+| `de731ca` | `docs(tooling)` | 维护审计同步 P1 落地；新增 `.git-blame-ignore-revs` |
+| `0c3eec1` | `refactor` | 清理 8 项零引用导出（重复实现 / 语义封装 / 误导常量 / 断点常量 / 协议类型） |
+| `e962291` | `chore(tooling)` | 接入 husky pre-commit 本地门禁 |
 
 > 说明：`package.json` / `pnpm-lock.yaml` 的改动**非人工编辑**，系安装 `jsdom` 与 `@types/jsdom` 时 pnpm 自动重写。清单与锁文件必须一致，否则 CI 以 `--frozen-lockfile` 安装会失败，故予接纳入库。
 
@@ -142,9 +149,10 @@
 
 ## 四、后续建议（未执行，待定夺）
 
-1. ~~**补工程化基线**：ESLint + Prettier + EditorConfig + CI lint job~~ **✅ 已完成（改用 oxlint，原因见 2.3）**；可选增强为 pre-commit / husky 本地钩子。
-2. **清 8 个零引用导出**：逐个确认后删除（`isOversized`、`formatCount` 等可能为「预留 API」，须先判定意图）。
-3. **统一断点常量**：JS 侧改用 `NARROW_BREAKPOINT_PX`，消除三处硬编码。
+1. ~~**补工程化基线**：ESLint + Prettier + EditorConfig + CI lint job + pre-commit~~ **✅ 已完成**（lint 改用 oxlint，原因见 2.3；pre-commit 见同节）。
+2. ~~**清 8 个零引用导出**~~ **✅ 已完成（`0c3eec1`）** —— 核查后确认 8 项全为真问题（非预留 API），处置见表。
+3. ~~**统一断点常量**：JS 侧改用 `NARROW_BREAKPOINT_PX`~~ **✅ 已完成（`0c3eec1`）** —— CSS 侧保留硬编码但已加同步注释。
 4. **本机补跑集成测试**：`pnpm test:integration`（沙箱受限，见 2.5）。
 5. **按需回收磁盘**：`.vscode-test`（1.4 GB，可联网重下）与 `samples` 中可再生大样本（340 MB）——按需执行。
 6. **待确认后再动**：`samples/现网多轮已规整数据.jsonl`（232 MB）与 `query处置全景_...jsonl`（2.6 MB）疑为真实业务数据，删除前请确认是否另有留存。
+7. **可选后续**：`docs/CODE_WIKI.md` 含机器绝对路径（旧评审 P2 遗留）；`detailTree` / `toolbar` 的余留 lint warning（`toSorted` 等风格建议）按需处理。
