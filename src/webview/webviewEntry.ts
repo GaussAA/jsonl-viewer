@@ -24,17 +24,16 @@ import { createToolbar } from './toolbar.ts';
 import type { ToolbarInfo } from './toolbar.ts';
 import { createDetailTree, type DetailTreeNavHandlers } from './detailTree.ts';
 import { createColumnLayout, type ColumnLayout } from './columnLayout.ts';
+import { createQueryActions, type QueryActions } from './queryActions.ts';
 import { createVSCodeApi, RpcBus } from './rpc.ts';
 import {
   mergePersistedState,
-  nextMatchIndex,
-  prevMatchIndex,
   summarizeWithLayout,
   toPersistedState,
 } from './queryLogic.ts';
 import type { FieldCondition, FieldLayout } from './queryLogic.ts';
 import { HostEndpoint } from '../protocol/rpc.ts';
-import type { InitPayload, OverviewPayload, RecordsPayload, SearchResultsPayload } from '../protocol/rpc.ts';
+import type { InitPayload, OverviewPayload, RecordsPayload } from '../protocol/rpc.ts';
 import { CSS_TEXT } from './styles.ts';
 import { INIT_TIMEOUT_MS, RPC_HEAVY_TIMEOUT_MS } from '../constants.ts';
 
@@ -156,8 +155,6 @@ interface AppState {
 
 /** 记录缓存容量上限（可视区 + overscan 的常数倍；逐出即释放内存）。 */
 const CACHE_MAX_ENTRIES = 600;
-/** 搜索防抖强匹配 / 过滤结果跳过的显示上限（防御性，避免超大数组卡 UI）。 */
-const SEARCH_LIMIT = 5000;
 
 /** 左栏可调宽度持久化键（拖拽分栏用）。 */
 const LIST_WIDTH_KEY = 'jsonlViewer.listWidth';
@@ -234,135 +231,9 @@ export function main(): void {
   };
 
   /* ---------------- 搜索 / 过滤 / 字段定制动作 ---------------- */
-
-  function supersede(runState: { rid: string; superseded: boolean } | null): void {
-    if (runState && !runState.superseded) {
-      runState.superseded = true;
-      bus.supersede(runState.rid);
-    }
-  }
-
-  function jumpToMatch(line: number): void {
-    list.select(line);
-    list.scrollToLine(line);
-    state.selectedLine = line;
-    void showDetailForLine(line);
-    updateNavEnabled();
-  }
-
-  function runSearch(query: string): void {
-    state.searchQuery = query;
-    // 取消在途搜索（supersede），丢弃迟到结果。
-    supersede(state.searchInFlight);
-    state.searchInFlight = null;
-
-    const q = query.trim();
-    if (!q) {
-      state.searchMatches = [];
-      state.searchTruncated = false;
-      toolbar.setSearchResult(0, 0);
-      schedulePersist();
-      return;
-    }
-
-    const { requestId, promise } = bus.request<SearchResultsPayload>(
-      HostEndpoint.SEARCH,
-      {
-        query: q,
-        field: undefined,
-        scope: 'all',
-      },
-      { timeoutMs: RPC_HEAVY_TIMEOUT_MS }
-    );
-    state.searchInFlight = { rid: requestId, superseded: false };
-
-    void promise
-      .then((res) => {
-        if (state.searchInFlight?.rid !== requestId) return;
-        state.searchInFlight = null;
-        state.searchMatches = (res?.matches ?? []).slice(0, SEARCH_LIMIT);
-        state.searchTruncated = !!res?.truncated || (res?.total ?? 0) > state.searchMatches.length;
-        if (state.searchMatches.length > 0) {
-          toolbar.setSearchResult(state.searchMatches.length, 0);
-          jumpToMatch(state.searchMatches[0]);
-        } else {
-          toolbar.setSearchResult(0, 0);
-        }
-      })
-      .catch(() => {
-        if (state.searchInFlight?.rid === requestId) state.searchInFlight = null;
-        toolbar.setSearchResult(0, 0);
-      });
-  }
-
-  function stepSearch(dir: 1 | -1): void {
-    const matches = state.searchMatches;
-    if (matches.length === 0) return;
-    const current = state.selectedLine;
-    const idx =
-      dir === 1
-        ? nextMatchIndex(matches, current ?? -1)
-        : prevMatchIndex(matches, current ?? -1);
-    if (idx < 0) return;
-    toolbar.setSearchResult(matches.length, idx);
-    jumpToMatch(matches[idx]);
-  }
-
-  function runFilter(cond: FieldCondition | null): void {
-    supersede(state.filterInFlight);
-    state.filterInFlight = null;
-
-    if (!cond || !cond.field || !cond.op) {
-      clearFilterForCond();
-      return;
-    }
-    state.filterCond = cond;
-    const { requestId, promise } = bus.request<{ matches: number[] | null; truncated?: boolean }>(
-      HostEndpoint.FILTER,
-      {
-        field: cond.field,
-        op: cond.op,
-        value: cond.value,
-      },
-      { timeoutMs: RPC_HEAVY_TIMEOUT_MS }
-    );
-    state.filterInFlight = { rid: requestId, superseded: false };
-
-    void promise
-      .then((res) => {
-        if (state.filterInFlight?.rid !== requestId) return;
-        state.filterInFlight = null;
-        const matches = res?.matches;
-        state.filterMap = matches && matches.length > 0 ? matches : [];
-        // M7：宿主结果被截断时不再静默显示不全的匹配集。
-        toolbar.setFilterTruncated(!!res?.truncated);
-        // 保留滚动位置尽力：不清 scrollTop，直接重建翻译。
-        list.setTranslation(state.filterMap);
-        list.refresh();
-        schedulePersist();
-        updateNavEnabled();
-      })
-      .catch(() => {
-        if (state.filterInFlight?.rid === requestId) state.filterInFlight = null;
-        toolbar.setFilterTruncated(false);
-      });
-  }
-
-  function clearFilterForCond(): void {
-    state.filterCond = null;
-    state.filterMap = null;
-    toolbar.setFilterTruncated(false);
-    list.setTranslation(null);
-    schedulePersist();
-    updateNavEnabled();
-  }
-
-  function applyLayout(layout: FieldLayout): void {
-    state.fieldLayout = layout;
-    list.refresh();
-    toolbar.setLayout(layout);
-    schedulePersist();
-  }
+  // 已抽至 queryActions.ts（T5 #31）：supersede / jumpToMatch / runSearch / stepSearch /
+  // runFilter / clearFilterForCond / applyLayout。动作工厂在下方 schedulePersist 定义之后创建
+  // （schedulePersist 作为依赖注入），list/toolbar 则以其后创建的实例经访问器晚绑定。
 
   /* ---------------- 偏好持久化（防抖写回到 host workspaceState） ---------------- */
   function schedulePersist(): void {
@@ -379,13 +250,25 @@ export function main(): void {
     }, 400);
   }
 
+  /* ---------------- 搜索 / 过滤 / 字段布局动作（queryActions，T5 #31） ---------------- */
+  // list / toolbar 晚于此处创建，故经访问器晚绑定（动作仅在用户交互时执行，彼时二者就绪）。
+  const actions: QueryActions = createQueryActions({
+    bus,
+    state,
+    getList: () => list,
+    getToolbar: () => toolbar,
+    showDetailForLine: (line) => void showDetailForLine(line),
+    updateNavEnabled,
+    schedulePersist,
+  });
+
   /* ---------------- 概要栏 ---------------- */
   const toolbar = createToolbar(rootEl, {
-    onSearch: (query) => runSearch(query),
-    onSearchPrev: () => stepSearch(-1),
-    onSearchNext: () => stepSearch(1),
-    onApplyFilter: (cond) => runFilter(cond),
-    onApplyLayout: (layout) => applyLayout(layout),
+    onSearch: (query) => actions.runSearch(query),
+    onSearchPrev: () => actions.stepSearch(-1),
+    onSearchNext: () => actions.stepSearch(1),
+    onApplyFilter: (cond) => actions.runFilter(cond),
+    onApplyLayout: (layout) => actions.applyLayout(layout),
   });
   toolbar.update({ fileName: '', status: 'connecting', statusText: '连接中…' });
 
@@ -482,7 +365,7 @@ export function main(): void {
       // 右键「定位到源码行」：请宿主打开源文件并定位到该行（坏行定位同通道）。
       void bus.request(HostEndpoint.JUMP_TO_SOURCE, { line }).promise.catch(() => {});
     },
-    onClearFilter: () => clearFilterForCond(),
+    onClearFilter: () => actions.clearFilterForCond(),
     // 截断态「复制该行 JSON」：按需拉完整值（列表缓存不持有超大对象）。
     onRequestRecord: (line) =>
       bus.request<{ value?: unknown; error?: string; ok: boolean }>(
@@ -752,7 +635,7 @@ export function main(): void {
       toolbar.setLayout(state.fieldLayout);
       list.refresh();
     }
-    if (merged.filter) runFilter(merged.filter);
+    if (merged.filter) actions.runFilter(merged.filter);
     if (merged.searchQuery) {
       // 恢复搜索词（不自动触发搜索，避免打开即扫全文件；用户可按回车/触发）。
       const input = toolbar.searchInput();
@@ -839,11 +722,11 @@ export function main(): void {
   async function reloadFile(): Promise<void> {
     banner.hide();
     // 取消所有在途请求，避免新旧数据交错或残留响应污染 UI。
-    supersede(state.inFlight);
+    actions.supersede(state.inFlight);
     state.inFlight = null;
-    supersede(state.searchInFlight);
+    actions.supersede(state.searchInFlight);
     state.searchInFlight = null;
-    supersede(state.filterInFlight);
+    actions.supersede(state.filterInFlight);
     state.filterInFlight = null;
     cancelDetailRequest();
     detail.showLoading();
