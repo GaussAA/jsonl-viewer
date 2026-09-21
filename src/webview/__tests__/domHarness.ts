@@ -76,6 +76,12 @@ export function setupWebviewDom(): FakeHost {
   g.removeEventListener = window.removeEventListener.bind(window);
   g.dispatchEvent = window.dispatchEvent.bind(window);
 
+  // 动画帧 API：生产代码用**裸** requestAnimationFrame（非 window.rAF），
+  // jsdom 只在 window 上提供，须显式桥接到 globalThis，否则视图层动画回调会抛
+  // "requestAnimationFrame is not defined"。
+  setGlobal('requestAnimationFrame', window.requestAnimationFrame.bind(window));
+  setGlobal('cancelAnimationFrame', window.cancelAnimationFrame.bind(window));
+
   // 伪 acquireVsCodeApi：仅记录 webview→宿主消息
   const posted: unknown[] = [];
   g.acquireVsCodeApi = () => ({
