@@ -9,6 +9,7 @@ import { openFileReader } from '../../parser/jsonParser.ts';
 import { TAIL_BACKUP_SUFFIX } from '../../constants.ts';
 import {
   replaceLine,
+  replaceRange,
   detectLineEnding,
   lineEndingBytes,
   WriteCancelledError,
@@ -275,6 +276,53 @@ test('replaceLine：目标文件不存在时抛友好错误', async () => {
       () => replaceLine(join(dir, 'missing.jsonl'), { start: 0, end: 1 }, Buffer.from('x'), 'lf'),
       /文件不存在/
     );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+/* ------------------ replaceRange：行插入 / 行删除的公用原语 ------------------ */
+
+test('replaceRange：空区间插入 —— 新内容写入且其后数据整体后移', async () => {
+  const { dir, path } = await scaffold('aa\nbb\ncc\n');
+  try {
+    const loc = await locate(path, 1); // 'bb\n' = [3,6)
+    const at = loc.range.start;
+    const res = await replaceRange(path, { start: at, end: at }, Buffer.from('NEW\n'));
+
+    assert.equal(res.inPlace, false);
+    assert.equal(res.bytesDelta, 4);
+    assert.equal(res.movedBytes, 6, "尾部 'bb\\ncc\\n' 整体后移");
+    assert.equal(await readFile(path, 'utf8'), 'aa\nNEW\nbb\ncc\n');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('replaceRange：空 replacement 删除区间 —— 其后数据整体前移并截断', async () => {
+  const { dir, path } = await scaffold('aa\nbb\ncc\n');
+  try {
+    const loc = await locate(path, 1); // 'bb\n' = [3,6)
+    const res = await replaceRange(path, loc.range, Buffer.alloc(0));
+
+    assert.equal(res.bytesDelta, -3);
+    assert.equal(res.movedBytes, 3, "尾部 'cc\\n' 整体前移");
+    assert.equal(await readFile(path, 'utf8'), 'aa\ncc\n');
+    assert.equal((await stat(path)).size, 6);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('replaceRange：追加到文件末尾（空区间 + 末尾偏移）无需搬移', async () => {
+  const { dir, path } = await scaffold('aa\nbb\n');
+  try {
+    const size = (await stat(path)).size;
+    const res = await replaceRange(path, { start: size, end: size }, Buffer.from('cc\n'));
+
+    assert.equal(res.bytesDelta, 3);
+    assert.equal(res.movedBytes, 0);
+    assert.equal(await readFile(path, 'utf8'), 'aa\nbb\ncc\n');
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

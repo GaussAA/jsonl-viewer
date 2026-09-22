@@ -113,15 +113,19 @@ function composeLine(content: Buffer, ending: LineEnding): Buffer {
 /* ---------------------------- 主入口 ---------------------------- */
 
 /**
- * 把文件中 `range` 指定的字节区间（一条完整行，含其行尾）替换为 `newLineBytes`。
+ * 用 `replacement` 替换文件中的 `range` 区间（`start === end` 即纯插入）。
  *
- * 等长走原位覆写；变长走尾部搬移（先备份）。失败时异常信息含恢复提示。
+ * 这是写入层的**唯一原语** —— 行替换 / 行插入 / 行删除都归结到它：
+ *   · 行替换：replacement = 新行 + 行尾
+ *   · 行插入：range 为**空区间**（start === end）
+ *   · 行删除：replacement 为**空**
+ * 三者共享同一套「等长原位覆写 / 变长尾部搬移 / sidecar 崩溃备份 / errno 翻译」，
+ * 避免为每种操作各写一份搬移逻辑（那是 bug 的温床）。
  */
-export async function replaceLine(
+export async function replaceRange(
   path: string,
   range: ByteRange,
-  newLineBytes: Buffer,
-  lineEnding: LineEnding,
+  replacement: Buffer,
   opts: ReplaceLineOpts = {}
 ): Promise<LineReplaceResult> {
   let fh: FileHandle;
@@ -132,31 +136,43 @@ export async function replaceLine(
     throw friendlyWriteError(e, path);
   }
   try {
-    return await replaceLineWithHandle(fh, path, range, newLineBytes, lineEnding, opts);
+    return await writeRangeWithHandle(fh, path, range, replacement, opts);
   } finally {
     await fh.close().catch(() => {});
   }
 }
 
-/** 持有已打开句柄的实现体（便于入口处统一收口 close）。 */
-async function replaceLineWithHandle(
-  fh: FileHandle,
+/**
+ * 把文件中 `range` 指定的字节区间（一条完整行，含其行尾）替换为 `newLineBytes`。
+ * 行尾按 `lineEnding` 重建；等长走原位覆写，变长走尾部搬移（先备份）。
+ */
+export async function replaceLine(
   path: string,
   range: ByteRange,
   newLineBytes: Buffer,
   lineEnding: LineEnding,
+  opts: ReplaceLineOpts = {}
+): Promise<LineReplaceResult> {
+  return replaceRange(path, range, composeLine(newLineBytes, lineEnding), opts);
+}
+
+/** 持有已打开句柄的实现体（便于入口处统一收口 close）。 */
+async function writeRangeWithHandle(
+  fh: FileHandle,
+  path: string,
+  range: ByteRange,
+  replacement: Buffer,
   opts: ReplaceLineOpts
 ): Promise<LineReplaceResult> {
   const started = performance.now();
   const fileSize = (await fh.stat()).size;
   assertRange(range, fileSize);
 
-  const replacement = composeLine(newLineBytes, lineEnding);
   const delta = replacement.length - (range.end - range.start);
 
-  // ── 等长替换：原位覆写，零搬移、无中间态
+  // ── 等长替换：原位覆写，零搬移、无中间态（空 replacement 时无需写入）
   if (delta === 0) {
-    await writeAll(fh, replacement, range.start);
+    if (replacement.length > 0) await writeAll(fh, replacement, range.start);
     return {
       bytesDelta: 0,
       inPlace: true,
@@ -166,7 +182,7 @@ async function replaceLineWithHandle(
     };
   }
 
-  // ── 变长替换：尾部搬移（先备份尾部）
+  // ── 变长替换（含插入 / 删除）：尾部搬移（先备份尾部）
   const result = await applyVariableLength(fh, path, range, replacement, fileSize, delta, opts);
   return { ...result, costMs: performance.now() - started };
 }
