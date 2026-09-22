@@ -450,9 +450,24 @@ function registerHostHandlers(deps: HostHandlerDeps): vscode.Disposable {
             // 仅当本批替换具备撤销能力时才上报 —— 超限时如实告知（undoable=false），
             // 而不是静默地让用户以为 Ctrl+Z 能救回来。
             [HostEndpoint.REPLACE_TEXT]: async (req) => {
-              const result = await data.replaceText(req.query, req.replacement, {
-                caseInsensitive: req.caseInsensitive,
-              });
+              const result = await (async () => {
+                try {
+                  return await data.replaceText(req.query, req.replacement, {
+                    caseInsensitive: req.caseInsensitive,
+                    // 全文件重写可能持续数秒，把节流后的进度推给 webview 显示可取消的进度条。
+                    onProgress: (info) =>
+                      post({
+                        type: HostReply.EDIT_PROGRESS,
+                        payload: { kind: 'replace', ...info },
+                      }),
+                    // 取消走既有 cancel 集合（webview 发 CANCEL 端点置位）。
+                    shouldCancel: () => cancel.has(req.requestId),
+                  });
+                } finally {
+                  // 无论成败都必须摘除取消标记，否则 cancel 集合会随编辑次数无界增长。
+                  cancel.delete(req.requestId);
+                }
+              })();
               if (result.ok && result.undoable && reportEdit && result.changes?.length) {
                 reportEdit({ kind: 'replaceAll', changes: result.changes }, data);
               }

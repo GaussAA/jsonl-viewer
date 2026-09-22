@@ -29,6 +29,7 @@ import {
   replaceLine,
   replaceRange,
   rewriteWithEdits,
+  WriteCancelledError,
 } from './fileWriter.ts';
 import type { ByteEdit, LineEnding } from './fileWriter.ts';
 import { planLineReplace } from '../core/replaceLogic.ts';
@@ -41,6 +42,7 @@ import {
   FILTER_MAX_RESULTS,
   MAX_REPLACE_UNDO_LINES,
   MAX_REPLACE_UNDO_BYTES,
+  PROGRESS_THROTTLE_MS,
 } from '../constants.ts';
 import { buildIndexWithFallback, type IndexHost } from './indexHost.ts';
 import { buildRecordsPayload } from '../protocol/rpc.ts';
@@ -84,6 +86,26 @@ async function probeLine(
   return undefined;
 }
 
+/**
+ * 把底层按分块触发的进度**节流**为「≥`PROGRESS_THROTTLE_MS` 一次 + 终态必发」。
+ *
+ * 终态刻意不节流：否则进度条会永远停在 96% 之类的位置，用户以为卡住了 ——
+ * 一个停在 96% 的进度条比没有进度条更糟。
+ */
+function throttleProgress(
+  cb?: (info: { processedBytes: number; totalBytes: number }) => void
+): ((info: { processedBytes: number; totalBytes: number }) => void) | undefined {
+  if (!cb) return undefined;
+  let last = 0;
+  return (info) => {
+    const now = performance.now();
+    const done = info.totalBytes > 0 && info.processedBytes >= info.totalBytes;
+    if (!done && now - last < PROGRESS_THROTTLE_MS) return;
+    last = now;
+    cb(info);
+  };
+}
+
 /** 检测文件是否已变更（size/mtime）的最小快照。 */
 export interface FileSnapshot {
   size: number;
@@ -104,6 +126,24 @@ export interface DataServiceOptions {
    * 传入则「索引构建 + 搜索 + 过滤」下沉 worker；省略或 spawn 失败则回退主线程。
    */
   workerScriptPath?: string;
+}
+
+/** 批量改写（查找替换 / 撤销 / 重做）的可选行为。 */
+export interface ReplaceOpts {
+  /** 是否大小写不敏感（与搜索保持一致；默认 true）。 */
+  caseInsensitive?: boolean;
+  /**
+   * 全文件重写阶段的进度回调（已按 `PROGRESS_THROTTLE_MS` 节流，终态必发）。
+   * 1GB 文件底层会按 4MB 分块回调 250 次，全量上报只是无意义的 IPC 压力。
+   */
+  onProgress?: (info: { processedBytes: number; totalBytes: number }) => void;
+  /**
+   * 取消回调：返回 true 则中止本次改写。
+   *
+   * 批量重写在 `rename` **之前**中止是**零风险**的 —— 临时文件被清理，目标文件从未被触碰。
+   * 这正是选择「全量重写 + 原子 rename」而非逐处搬移换来的额外红利：可取消且不留残迹。
+   */
+  shouldCancel?: () => boolean;
 }
 
 export class DataService {
@@ -580,7 +620,7 @@ export class DataService {
   async replaceText(
     query: string,
     replacement: string,
-    opts: { caseInsensitive?: boolean } = {}
+    opts: ReplaceOpts = {}
   ): Promise<ReplaceResultPayload> {
     if (!query) return DataService.replaceFailure('查找内容不能为空');
 
@@ -644,7 +684,7 @@ export class DataService {
     if (edits.length === 0) {
       return DataService.replaceOk(0, skippedInvalid, unchanged, total, 0, false);
     }
-    return this.applyEdits(li, edits, deltas, changes, total, skippedInvalid, unchanged);
+    return this.applyEdits(li, edits, deltas, changes, total, skippedInvalid, unchanged, opts);
   }
 
   /**
@@ -655,7 +695,8 @@ export class DataService {
    * 撤销一次 5000 行的替换可能要几分钟；批量重写恒为 O(文件大小)。
    */
   async applyLineTexts(
-    entries: readonly { line: number; text: string }[]
+    entries: readonly { line: number; text: string }[],
+    opts: ReplaceOpts = {}
   ): Promise<ReplaceResultPayload> {
     const li = await this.ensureIndex();
     const reader = this.reader!;
@@ -709,7 +750,16 @@ export class DataService {
     if (edits.length === 0) {
       return DataService.replaceOk(0, skippedInvalid, unchanged, wanted.size, 0, false);
     }
-    return this.applyEdits(li, edits, deltas, changes, wanted.size, skippedInvalid, unchanged);
+    return this.applyEdits(
+      li,
+      edits,
+      deltas,
+      changes,
+      wanted.size,
+      skippedInvalid,
+      unchanged,
+      opts
+    );
   }
 
   /**
@@ -725,14 +775,19 @@ export class DataService {
     changes: ReplaceChange[],
     total: number,
     skippedInvalid: number,
-    unchanged: number
+    unchanged: number,
+    opts: ReplaceOpts
   ): Promise<ReplaceResultPayload> {
     this.editing = true;
     try {
       await this.releaseFileHandles();
       let res;
       try {
-        res = await rewriteWithEdits(this.path, edits);
+        res = await rewriteWithEdits(this.path, edits, {
+          // 节流后的进度：1GB 文件底层会回调 250 次，全量上报只是无意义的 IPC 压力。
+          onProgress: throttleProgress(opts.onProgress),
+          ...(opts.shouldCancel ? { shouldCancel: opts.shouldCancel } : {}),
+        });
       } finally {
         // 无论成败都必须把句柄拿回来，否则后续所有读取都会失败。
         await this.acquireFileHandles();
@@ -760,6 +815,11 @@ export class DataService {
         undoable,
       };
     } catch (e) {
+      // 取消与失败必须分开报：批量重写在 rename 之前中止是**零风险**的，
+      // 把它报成「失败」会让用户以为文件可能损坏 —— 那与事实相反。
+      if (e instanceof WriteCancelledError) {
+        return { ...DataService.replaceFailure('已取消'), cancelled: true };
+      }
       return DataService.replaceFailure(e instanceof Error ? e.message : String(e));
     } finally {
       this.editing = false;

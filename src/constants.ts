@@ -54,6 +54,18 @@ export const MAX_BATCH_REWRITE_BYTES = 1024 * 1024 * 1024;
 export const REWRITE_TEMP_SUFFIX = '.jlv-rewrite-tmp';
 
 /**
+ * 写操作进度上报的节流间隔（毫秒）。
+ *
+ * 底层按 4MB 分块回调，1GB 文件会产生 250 次 —— 每次都 postMessage 是没有意义的
+ * IPC 压力（webview 渲染不过来，用户也看不出差别）。终态（processed === total）不节流，
+ * 保证进度条能走到 100%。
+ */
+export const PROGRESS_THROTTLE_MS = 100;
+
+/** 批量重写的估算有效吞吐（字节/毫秒），用于给用户预估耗时。100MB/s。 */
+export const REWRITE_THROUGHPUT_BYTES_PER_MS = (100 * 1024 * 1024) / 1000;
+
+/**
  * 「全部替换」纳入撤销栈的上限：2000 行 / 8MB。
  *
  * 撤销栈要保存每一行的前后文本，超大替换会把宿主内存与 webview 消息通道一起撑爆。

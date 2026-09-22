@@ -9,7 +9,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createWriteStream } from 'node:fs';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DataService } from '../dataService.ts';
@@ -784,6 +784,58 @@ test('replaceText：大小写不敏感命中时只改命中片段，不污染其
     assert.equal(res.replaced, 1);
     // 键名 Name 被替换为 title；值 "bob" 与另一个键 TAG 不受影响。
     assert.equal(await readFile(file, 'utf8'), '{"title":"bob","TAG":"bob"}\n');
+
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+/* --------------------- 大文件：进度与取消（M3） --------------------- */
+
+test('replaceText：进度回调终态必达 100%（否则进度条会永远停在中途）', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const file = await makeFile(dir, ['{"n":"x"}', '{"n":"x"}', '{"n":"x"}']);
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    const seen: { processedBytes: number; totalBytes: number }[] = [];
+    const res = await ds.replaceText('x', 'y', { onProgress: (i) => seen.push(i) });
+
+    assert.equal(res.ok, true);
+    assert.ok(seen.length > 0, '至少有回调');
+    const last = seen[seen.length - 1];
+    assert.equal(last.totalBytes, 30, '总分母为原文件字节数（3 × 9 字节 + 3 个换行）');
+    assert.equal(last.processedBytes, last.totalBytes, '终态 processed === total');
+
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('replaceText：取消 → cancelled 标记、文件分毫未动、不留临时文件、句柄已恢复', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const original = '{"a":1}\n{"n":"x"}\n{"n":"x"}\n';
+    const file = join(dir, 'data.jsonl');
+    await writeFile(file, original);
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    // 第一个命中行不在文件开头，故重写会在「复制前导区」时命中取消检查点。
+    const res = await ds.replaceText('x', 'y', { shouldCancel: () => true });
+
+    assert.equal(res.ok, false);
+    assert.equal(res.cancelled, true, '取消必须可识别，不能混同为失败');
+    assert.equal(await readFile(file, 'utf8'), original, '取消发生在 rename 之前：文件必须原样');
+    assert.deepEqual(await readdir(dir), ['data.jsonl'], '临时文件已清理');
+
+    // 句柄在 finally 中拿回 —— 取消后读取仍须可用（否则用户一取消就「文件读不了」）。
+    const rec = await ds.readRecord(2);
+    assert.equal(rec.ok, true);
+    assert.deepEqual(rec.value, { n: 'x' });
 
     await ds.dispose();
   } finally {

@@ -70,6 +70,13 @@ export const HostReply = {
   DOCUMENT_RESET: 'documentReset',
   /** 查找替换结果（成功与业务失败均走此回执）。 */
   REPLACE_RESULT: 'replaceResult',
+  /**
+   * host 主动推送：耗时写操作的进度（批量重写的全文件重写阶段）。
+   *
+   * 为何必须走主动推送：RPC 是请求/响应模型，而重写 1GB 文件要数秒，期间 webview
+   * 需要一个可取消的进度条 —— 只能由 host 单向推送。
+   */
+  EDIT_PROGRESS: 'editProgress',
 } as const;
 
 /* ------------------------------ 类型 ------------------------------ */
@@ -200,10 +207,28 @@ export interface ReplaceResultPayload {
   changes?: ReplaceChange[];
   /** 本批替换是否已具备撤销能力。 */
   undoable: boolean;
+  /**
+   * 是否被用户主动取消。
+   *
+   * 与「失败」严格区分：批量重写走「写临时文件 + 原子 rename」，取消发生在 rename 之前，
+   * 故**目标文件从未被触碰**。把它报成普通失败会让用户以为文件可能损坏，
+   * 那是与事实相反的恐慌。
+   */
+  cancelled?: boolean;
   /** 失败原因（ok=false 时给出，可直接展示给用户）。 */
   error?: string;
   /** 是否为「文件已被外部修改」冲突（需重新加载后再操作）。 */
   conflict?: boolean;
+}
+
+/** 耗时写操作的进度（host → webview 主动推送）。 */
+export interface EditProgressPayload {
+  /** 操作类型；目前仅批量替换会推送。 */
+  kind: 'replace';
+  /** 已处理的原始文件字节数（不含被替换区间，它们无需逐字节复制）。 */
+  processedBytes: number;
+  /** 原始文件总字节数（进度分母）。 */
+  totalBytes: number;
 }
 
 /** 一次被改写的行：行号 + 前后文本（撤销时按行号升序写回 before）。 */
@@ -296,7 +321,8 @@ export type HostResponse =
   | { type: typeof HostReply.FILE_STALE; payload: StaleFilePayload }
   | { type: typeof HostReply.EDIT_RESULT; requestId: string; payload: EditResultPayload }
   | { type: typeof HostReply.DOCUMENT_RESET; payload: DocumentResetPayload }
-  | { type: typeof HostReply.REPLACE_RESULT; requestId: string; payload: ReplaceResultPayload };
+  | { type: typeof HostReply.REPLACE_RESULT; requestId: string; payload: ReplaceResultPayload }
+  | { type: typeof HostReply.EDIT_PROGRESS; payload: EditProgressPayload };
 
 export type RpcMessage = HostRequest | HostResponse;
 
