@@ -40,6 +40,8 @@ export interface ListCallbacks {
   onRangeChange(first: number, lastExclusive: number): void;
   /** 可选：跳转到源文件对应行（右键「定位到源码行」）。 */
   onJumpToSource?(line: number): void;
+  /** 可选：编辑该行（右键「编辑第 N 行」打开编辑浮层）。 */
+  onEditRecord?(line: number): void;
   /** 可选：清空过滤条件（空态「清除过滤」按钮）。 */
   onClearFilter?(): void;
   /** 可选：按需拉取某行完整值（截断态「复制该行 JSON」用）。 */
@@ -480,10 +482,17 @@ export class VirtualRecordList {
     }
     card.appendChild(preview);
 
-    // 右键菜单：定位到源码行 / 复制行号 / 复制该行 JSON
+    // 右键菜单：编辑此行 / 定位到源码行 / 复制行号 / 复制该行 JSON
     card.addEventListener('contextmenu', (e) => {
       e.preventDefault();
       const items: CtxItem[] = [];
+      if (this.cb.onEditRecord) {
+        items.push({
+          label: `编辑第 ${real + 1} 行`,
+          run: () => this.cb.onEditRecord?.(real),
+        });
+        items.push({ sep: true });
+      }
       if (this.cb.onJumpToSource) {
         items.push({
           label: `定位到源码行 L${real + 1}`,

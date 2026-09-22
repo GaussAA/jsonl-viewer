@@ -10,6 +10,7 @@
 
 import { HostEndpoint, HostReply, isRpcMessage, makeRequestId } from '../protocol/rpc.ts';
 import type {
+  DocumentResetPayload,
   InitPayload,
   JumpToSourcePayload,
   RpcMessage,
@@ -55,6 +56,7 @@ export function createVSCodeApi(source?: { acquireVsCodeApi?: ApiFactory }): VSC
 export type InitHandler = (payload: InitPayload) => void;
 export type JumpHandler = (payload: JumpToSourcePayload) => void;
 export type StaleHandler = (payload: StaleFilePayload) => void;
+export type ResetHandler = (payload: DocumentResetPayload) => void;
 export type ErrorHandler = (e: { requestId?: string; message: string }) => void;
 
 export interface RequestOptions {
@@ -71,6 +73,7 @@ export class RpcBus {
   private readonly initHandlers = new Set<InitHandler>();
   private readonly jumpHandlers = new Set<JumpHandler>();
   private readonly staleHandlers = new Set<StaleHandler>();
+  private readonly resetHandlers = new Set<ResetHandler>();
   private readonly errorHandlers = new Set<ErrorHandler>();
   private readonly api: VSCodeApi;
 
@@ -94,6 +97,7 @@ export class RpcBus {
     this.initHandlers.clear();
     this.jumpHandlers.clear();
     this.staleHandlers.clear();
+    this.resetHandlers.clear();
     this.errorHandlers.clear();
   }
 
@@ -105,6 +109,10 @@ export class RpcBus {
   }
   onStale(cb: StaleHandler): void {
     this.staleHandlers.add(cb);
+  }
+  /** 订阅「文档已从磁盘复位」推送（放弃改动 / revert 后，应清缓存并重拉）。 */
+  onDocumentReset(cb: ResetHandler): void {
+    this.resetHandlers.add(cb);
   }
   onError(cb: ErrorHandler): void {
     this.errorHandlers.add(cb);
@@ -178,6 +186,10 @@ export class RpcBus {
     }
     if (msg.type === HostReply.FILE_STALE) {
       for (const h of this.staleHandlers) h((msg as { payload: StaleFilePayload }).payload);
+      return;
+    }
+    if (msg.type === HostReply.DOCUMENT_RESET) {
+      for (const h of this.resetHandlers) h((msg as { payload: DocumentResetPayload }).payload);
       return;
     }
     if (msg.type === HostReply.ERROR) {

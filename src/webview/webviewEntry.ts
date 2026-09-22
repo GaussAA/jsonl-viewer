@@ -18,6 +18,7 @@ import { VirtualRecordList } from './virtualScroll.ts';
 import { createToolbar } from './toolbar.ts';
 import type { ToolbarInfo } from './toolbar.ts';
 import { createDetailTree, type DetailTreeNavHandlers } from './detailTree.ts';
+import { createEditPanel } from './editPanel.ts';
 import { createColumnLayout, type ColumnLayout } from './columnLayout.ts';
 import { createQueryActions, type QueryActions } from './queryActions.ts';
 import { createPersistence } from './persistence.ts';
@@ -25,6 +26,7 @@ import { createVSCodeApi, RpcBus } from './rpc.ts';
 import { mergePersistedState, summarizeWithLayout } from './queryLogic.ts';
 import type { FieldCondition, FieldLayout } from './queryLogic.ts';
 import { HostEndpoint } from '../protocol/rpc.ts';
+import type { EditResultPayload } from '../protocol/rpc.ts';
 import type { InitPayload, OverviewPayload, RecordsPayload } from '../protocol/rpc.ts';
 import { CSS_TEXT } from './styles.ts';
 import { INIT_TIMEOUT_MS, RPC_HEAVY_TIMEOUT_MS } from '../constants.ts';
@@ -345,6 +347,8 @@ export function main(): void {
       // 右键「定位到源码行」：请宿主打开源文件并定位到该行（坏行定位同通道）。
       void bus.request(HostEndpoint.JUMP_TO_SOURCE, { line }).promise.catch(() => {});
     },
+    // 右键「编辑第 N 行」：打开编辑浮层（初始文本取磁盘原文）。
+    onEditRecord: (line) => void openEditForLine(line),
     onClearFilter: () => actions.clearFilterForCond(),
     // 截断态「复制该行 JSON」：按需拉完整值（列表缓存不持有超大对象）。
     onRequestRecord: (line) =>
@@ -354,6 +358,55 @@ export function main(): void {
         { timeoutMs: RPC_HEAVY_TIMEOUT_MS }
       ).promise,
   });
+  /* ---------------- 行编辑浮层（编辑能力） ----------------
+   * 初始文本一律取**磁盘原文**（readRecord 的 rawText），而非用 value 重新序列化的结果：
+   * 后者会把用户原有的键序与空白重排掉，字节长度随之变化、放大变长编辑的搬移成本。 */
+  /** 编辑前记下的旧行字节长度：作为乐观锁断言（磁盘上该行若已变化则拒绝写入）。 */
+  let editExpectedBytes: number | undefined;
+
+  const editPanel = createEditPanel({
+    getOverview: () =>
+      state.overview
+        ? { totalBytes: state.overview.totalBytes, totalLines: state.overview.totalLines }
+        : undefined,
+    submit: (line, text) =>
+      bus.request<EditResultPayload>(
+        HostEndpoint.EDIT_RECORD,
+        { line, text, expectedBytes: editExpectedBytes },
+        { timeoutMs: RPC_HEAVY_TIMEOUT_MS }
+      ).promise,
+    onCommitted: ({ line }) => {
+      // 该行的列表缓存已过期：丢弃后重绘卡片；若详情树正显示它，则重新拉取。
+      state.cache.delete(line);
+      list.refresh();
+      if (state.selectedLine === line) void showDetailForLine(line);
+    },
+  });
+  rootEl.appendChild(editPanel.root);
+
+  /**
+   * 打开编辑浮层：先按需拉取该行的磁盘原文（列表缓存里只有解析后的 value，不能当原文用），
+   * 拿到后再打开，避免把「重新序列化」的结果冒充用户原文。
+   */
+  async function openEditForLine(line: number): Promise<void> {
+    try {
+      const res = await bus.request<{
+        ok: boolean;
+        error?: string;
+        rawText?: string;
+        rawBytes?: number;
+      }>(HostEndpoint.READ_RECORD, { line }, { timeoutMs: RPC_HEAVY_TIMEOUT_MS }).promise;
+      if (res?.rawText === undefined) {
+        banner.show(res?.error ?? '无法读取该行内容', undefined);
+        return;
+      }
+      editExpectedBytes = res.rawBytes;
+      editPanel.open(line, res.rawText);
+    } catch (e) {
+      banner.show(e instanceof Error ? e.message : String(e), undefined);
+    }
+  }
+
   // 组装两栏：左栏放入列头(toolbar) + 目录列表(分页)；右栏为详情面板；横幅浮层最后挂载。
   leftCol.appendChild(toolbar.root);
   leftCol.appendChild(list.scrollEl);
@@ -463,6 +516,12 @@ export function main(): void {
     state.selectedLine = real;
     void showDetailForLine(real);
     updateNavEnabled();
+  };
+
+  // 详情工具「编辑」：编辑当前显示的那一行。
+  navHandlers.onEdit = () => {
+    if (state.selectedLine === undefined) return;
+    void openEditForLine(state.selectedLine);
   };
 
   /* ---------------- 详情面板：按需请求完整 JSON ---------------- */
@@ -707,9 +766,8 @@ export function main(): void {
   });
 
   /* ---------------- Task 7：文件变更检测 + 重新加载 ---------------- */
-  async function reloadFile(): Promise<void> {
-    banner.hide();
-    // 取消所有在途请求，避免新旧数据交错或残留响应污染 UI。
+  /** 取消全部在途请求（读批 / 搜索 / 过滤 / 详情），避免新旧数据交错污染 UI。 */
+  function cancelAllInFlight(): void {
     actions.supersede(state.inFlight);
     state.inFlight = null;
     actions.supersede(state.searchInFlight);
@@ -717,6 +775,59 @@ export function main(): void {
     actions.supersede(state.filterInFlight);
     state.filterInFlight = null;
     cancelDetailRequest();
+  }
+
+  /**
+   * 索引已变更后的**本地状态复位**。
+   *
+   * 抽成独立函数供两条路径共用（手动「重新加载」与宿主推送的文档复位）——复位清单一旦
+   * 在两处各写一遍，迟早会漂移，届时表现为「某条路径漏清了过滤/搜索」这类难查的脏状态。
+   */
+  function resetLocalState(totalLines: number): void {
+    state.cache.clear();
+    state.pending.clear();
+    state.maxLoaded = 0;
+    state.fields = null;
+    state.searchMatches = [];
+    state.searchTruncated = false;
+    state.filterMap = null;
+    state.filterCond = null;
+    // M14：搜索词与持久化定时器一并复位，避免重载后旧过滤被写回持久化。
+    state.searchQuery = '';
+    if (state.persistTimer) {
+      clearTimeout(state.persistTimer);
+      state.persistTimer = undefined;
+    }
+    toolbar.setSearchResult(0, 0);
+    toolbar.setFilterTruncated(false);
+    list.setTranslation(null);
+    list.setTotalRows(totalLines);
+    updateToolbar();
+    updateNavEnabled();
+  }
+
+  /** 重新拉字段推断（摘要卡片 / 过滤下拉的数据源）。 */
+  function fetchFields(): void {
+    void bus
+      .request<{ fields: FieldLike[] }>(
+        HostEndpoint.GET_SAMPLE_FIELDS,
+        {},
+        { timeoutMs: RPC_HEAVY_TIMEOUT_MS }
+      )
+      .promise.then((res) => {
+        if (res && Array.isArray(res.fields)) {
+          state.fields = res.fields;
+          toolbar.setFields(res.fields);
+          toolbar.setLayout(state.fieldLayout);
+          list.refresh();
+        }
+      })
+      .catch(() => {});
+  }
+
+  async function reloadFile(): Promise<void> {
+    banner.hide();
+    cancelAllInFlight();
     detail.showLoading();
 
     try {
@@ -730,43 +841,9 @@ export function main(): void {
       if (!ov) return;
       state.overview = ov;
       // 索引重建后，旧的缓存 / 搜索 / 过滤结果全部失效，整体复位。
-      state.cache.clear();
-      state.pending.clear();
-      state.maxLoaded = 0;
-      state.fields = null;
-      state.searchMatches = [];
-      state.searchTruncated = false;
-      state.filterMap = null;
-      state.filterCond = null;
-      // M14：搜索词与持久化定时器一并复位，避免重载后旧过滤被写回持久化。
-      state.searchQuery = '';
-      if (state.persistTimer) {
-        clearTimeout(state.persistTimer);
-        state.persistTimer = undefined;
-      }
-      toolbar.setSearchResult(0, 0);
-      toolbar.setFilterTruncated(false);
-      list.setTranslation(null);
-      list.setTotalRows(ov.totalLines);
-      updateToolbar();
+      resetLocalState(ov.totalLines);
       detail.clear();
-      updateNavEnabled();
-      // 重新拉字段推断（供摘要卡片 / 过滤下拉）。
-      void bus
-        .request<{ fields: FieldLike[] }>(
-          HostEndpoint.GET_SAMPLE_FIELDS,
-          {},
-          { timeoutMs: RPC_HEAVY_TIMEOUT_MS }
-        )
-        .promise.then((res) => {
-          if (res && Array.isArray(res.fields)) {
-            state.fields = res.fields;
-            toolbar.setFields(res.fields);
-            toolbar.setLayout(state.fieldLayout);
-            list.refresh();
-          }
-        })
-        .catch(() => {});
+      fetchFields();
     } catch (e) {
       banner.show(e instanceof Error ? e.message : String(e), '重试', () => void reloadFile());
     }
@@ -778,6 +855,21 @@ export function main(): void {
       '重新加载',
       () => void reloadFile()
     );
+  });
+
+  /**
+   * 文档复位推送（放弃改动 / revert 触发）。
+   *
+   * 宿主已完成「从磁盘重载 + 重建索引」，故此处**只复位本地派生状态、不再发 RELOAD**
+   * —— 再发一次会让宿主对大文件白扫一遍（GB 级要数秒）。
+   */
+  bus.onDocumentReset((payload) => {
+    cancelAllInFlight();
+    state.selectedLine = undefined;
+    resetLocalState(state.overview?.totalLines ?? 0);
+    detail.clear();
+    fetchFields();
+    banner.show(payload.message ?? '已从磁盘重新加载。');
   });
 
   // 初始：向宿主报告就绪，等待 init 回执。
@@ -804,6 +896,7 @@ export function main(): void {
     scheduleFetch.dispose();
     list.dispose();
     detail.dispose();
+    editPanel.dispose();
     toolbar.destroy();
   };
   window.addEventListener('beforeunload', cleanup);

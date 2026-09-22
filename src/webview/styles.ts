@@ -753,6 +753,106 @@ body {
   border-color: color-mix(in srgb, var(--jlv-focus) 35%, transparent);
   color: var(--jlv-info);
 }
+
+/* ---------------- 行编辑浮层（editPanel.ts） ----------------
+ * 全屏遮罩 + 居中卡片。弹出沿用设计体系 §3.6 浮层语义（缩放 + 上浮 180ms），
+ * 关闭走快速淡出 120ms；编辑区用等宽字体，聚焦蓝色描边与搜索框一致。
+ * [hidden] 由全局规则处理，此处不再重复声明。 */
+.jlv-edit-backdrop {
+  position: fixed; inset: 0; z-index: 80;
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, .45);
+  opacity: 0;
+  transition: opacity var(--jlv-dur-fast) ease-in;
+}
+.jlv-edit-backdrop.open { opacity: 1; }
+
+.jlv-edit-panel {
+  display: flex; flex-direction: column; gap: 10px;
+  width: min(680px, 100%); max-height: 100%;
+  padding: 16px;
+  background: var(--jlv-panel-bg);
+  border: 1px solid rgba(255, 255, 255, .1);
+  border-radius: var(--jlv-radius-4);
+  box-shadow: var(--jlv-shadow-2);
+  color: var(--jlv-fg); font-size: var(--jlv-font-size-sm);
+  transform: scale(.96) translateY(6px);
+  opacity: 0;
+  transition: transform var(--jlv-dur-base) var(--jlv-ease), opacity var(--jlv-dur-base) var(--jlv-ease);
+}
+.jlv-edit-panel.open { transform: none; opacity: 1; }
+
+.jlv-edit-head { display: flex; align-items: center; gap: 8px; }
+.jlv-edit-title { font-size: var(--jlv-font-size-md); font-weight: 600; }
+.jlv-edit-close {
+  margin-left: auto; width: 22px; height: 22px; border-radius: 5px;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(255, 255, 255, .04); border: none; cursor: pointer;
+  color: var(--jlv-dim); font-size: 14px;
+}
+.jlv-edit-close:hover { background: rgba(255, 255, 255, .1); color: var(--jlv-fg); }
+
+.jlv-edit-hint {
+  padding: 8px 10px; border-radius: var(--jlv-radius-2); line-height: 1.5;
+  background: rgba(255, 255, 255, .03);
+  border: 1px solid rgba(255, 255, 255, .07);
+  color: var(--jlv-dim);
+}
+.jlv-edit-hint.warn {
+  background: color-mix(in srgb, var(--jlv-warn) 12%, transparent);
+  border-color: color-mix(in srgb, var(--jlv-warn) 35%, transparent);
+  color: var(--jlv-warn);
+}
+
+.jlv-edit-input {
+  flex: 1; min-height: 160px; resize: vertical;
+  padding: 10px;
+  background: rgba(0, 0, 0, .35);
+  border: 1px solid rgba(255, 255, 255, .1);
+  border-radius: var(--jlv-radius-2);
+  color: var(--jlv-fg);
+  font-family: var(--vscode-editor-font-family, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  font-size: var(--jlv-font-size-sm); line-height: 1.6; tab-size: 2;
+  transition: border-color .12s, box-shadow .12s;
+}
+.jlv-edit-input:focus {
+  outline: none;
+  border-color: color-mix(in srgb, var(--jlv-focus) 50%, transparent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--jlv-focus) 15%, transparent);
+}
+
+.jlv-edit-error {
+  padding: 8px 10px; border-radius: var(--jlv-radius-2);
+  white-space: pre-wrap; line-height: 1.5;
+  background: color-mix(in srgb, var(--vscode-errorForeground, #f48771) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--vscode-errorForeground, #f48771) 35%, transparent);
+  color: var(--vscode-errorForeground, #f48771);
+}
+
+.jlv-edit-foot { display: flex; align-items: center; gap: 8px; }
+.jlv-edit-spacer { flex: 1; }
+.jlv-edit-btn {
+  padding: 7px 14px; border-radius: var(--jlv-radius-2);
+  border: 1px solid rgba(255, 255, 255, .1);
+  background: rgba(255, 255, 255, .04); color: var(--jlv-fg);
+  font-size: var(--jlv-font-size-sm); font-family: inherit; cursor: pointer;
+  transition: background .12s, transform .12s var(--jlv-ease);
+}
+.jlv-edit-btn:hover:not(:disabled) { background: rgba(255, 255, 255, .08); }
+.jlv-edit-btn:active:not(:disabled) { transform: translateY(1px); }
+.jlv-edit-btn:disabled { opacity: .55; cursor: default; }
+.jlv-edit-btn.jlv-edit-primary {
+  background: color-mix(in srgb, var(--jlv-focus) 20%, transparent);
+  border-color: color-mix(in srgb, var(--jlv-focus) 35%, transparent);
+  color: var(--jlv-info);
+}
+
+/* 窄容器（与其余响应式规则一致，以 #app 容器宽度为基准） */
+@container (max-width: 700px) {
+  .jlv-edit-backdrop { padding: 12px; }
+  .jlv-edit-input { min-height: 120px; }
+}
 .jlv-btn-panel.primary:hover { background: color-mix(in srgb, var(--jlv-focus) 30%, transparent); }
 
 /* 字段定制列表 */

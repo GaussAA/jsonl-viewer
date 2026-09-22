@@ -53,6 +53,8 @@ export interface DetailTreeNavHandlers {
   onPrevRecord?(): void;
   /** 切换到下一条 JSON 条目。 */
   onNextRecord?(): void;
+  /** 编辑当前显示的记录（打开编辑浮层）。 */
+  onEdit?(): void;
 }
 
 export interface DetailTreeController {
@@ -174,7 +176,16 @@ export function createDetailTree(
   btnCopy.setAttribute('aria-label', '复制 JSON');
   btnCopy.appendChild(icon('', ICON_COPY));
 
-  tools.append(btnExpandAll, btnPrevRecord, btnNextRecord, btnCopy);
+  const btnEdit = document.createElement('button');
+  btnEdit.type = 'button';
+  btnEdit.className = 'jlv-dh-tool';
+  btnEdit.title = '编辑当前记录的 JSON';
+  btnEdit.setAttribute('aria-label', '编辑当前记录的 JSON');
+  btnEdit.disabled = true; // 未选中记录前不可用（由 setRecordHeader 同步）
+  btnEdit.appendChild(icon('', ICON_EDIT));
+  btnEdit.addEventListener('click', () => navHandlers.onEdit?.());
+
+  tools.append(btnExpandAll, btnPrevRecord, btnNextRecord, btnEdit, btnCopy);
   header.append(dhLeft, tools);
 
   /* 树体 */
@@ -210,6 +221,8 @@ export function createDetailTree(
 
   /** 更新头部：Record # 徽标 + 源行（切换记录时轻弹）。 */
   function setRecordHeader(line: number | undefined): void {
+    // 无记录时不提供编辑入口（避免对不存在的行发起编辑）。
+    btnEdit.disabled = line === undefined;
     if (line === undefined) {
       dhLine.textContent = 'Record #—';
       dhSrc.textContent = '';
@@ -782,6 +795,8 @@ const ICON_NEXT =
   '<svg width="12" height="12" viewBox="0 0 16 16"><path d="M6 3l5 5-5 5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 const ICON_COPY =
   '<svg width="12" height="12" viewBox="0 0 16 16"><rect x="5" y="5" width="8" height="9" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M11 2.5H4.5A1.5 1.5 0 0 0 3 4v7.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>';
+const ICON_EDIT =
+  '<svg width="12" height="12" viewBox="0 0 16 16"><path d="M11.2 2.3a1.6 1.6 0 0 1 2.3 2.3L5.9 12.2l-3 .8.8-3z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>';
 
 /** 把任意 JSON 值格式化为多行文本。 */
 function formatJsonValue(value: unknown): string {

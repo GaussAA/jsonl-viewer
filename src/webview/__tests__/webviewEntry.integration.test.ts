@@ -675,6 +675,25 @@ describe('webviewEntry 装配层（集成）', () => {
       const jump = lastReq(host, HostEndpoint.JUMP_TO_SOURCE);
       assert.ok(jump, '已发起跳转');
       assert.strictEqual(jump!.line, 0);
+
+      // 编辑入口：右键「编辑第 N 行」→ 先拉该行原文，回执后才打开编辑浮层
+      // （不能用解析后的 value 当初始文本，否则一保存就把用户原有格式重排掉）。
+      const menu3 = openMenu(app, 0);
+      menuItem(menu3, /编辑第 1 行/).click();
+      await sleep(20);
+      const rawReq = lastReq(host, HostEndpoint.READ_RECORD);
+      assert.ok(rawReq, '已请求该行原文');
+      reply(host, rawReq!, { ok: true, rawText: '{"a":1}', rawBytes: 7 });
+      await sleep(20);
+
+      const panel = globalThis.document.querySelector<HTMLElement>('.jlv-edit-backdrop');
+      assert.ok(panel, '编辑浮层已打开');
+      assert.strictEqual(text(panel!.querySelector('.jlv-edit-title')), '编辑第 1 行');
+      assert.strictEqual(
+        (panel!.querySelector('.jlv-edit-input') as HTMLTextAreaElement).value,
+        '{"a":1}',
+        '初始文本必须是磁盘原文'
+      );
     });
 
     it('beforeunload 触发清理，重复派发安全', async () => {
@@ -685,6 +704,88 @@ describe('webviewEntry 装配层（集成）', () => {
         globalThis.dispatchEvent(new (win().Event)('beforeunload'));
       });
       assert.ok(app.querySelector('.jlv-toolbar'), '清理后 DOM 仍在（仅解绑监听）');
+    });
+
+    it('编辑浮层：详情工具打开 → 保存发 EDIT_RECORD（含乐观锁）', async () => {
+      const { host, app } = await bootWithRecords();
+      reply(host, lastReq(host, HostEndpoint.READ_RECORDS)!, {
+        startLine: 0,
+        items: makeItems(0, 20),
+        hasMore: true,
+      });
+      await sleep(20);
+
+      // 选中第 0 行 → 详情树就绪
+      const target = card(app, 0);
+      assert.ok(target, '卡片存在');
+      target!.click();
+      await sleep(20);
+      reply(host, lastReq(host, HostEndpoint.READ_RECORD)!, {
+        ok: true,
+        value: { a: 1 },
+        rawText: '{"a":1}',
+        rawBytes: 7,
+      });
+      await sleep(20);
+
+      // 详情工具「编辑」→ 打开面板
+      const btn = detailBtn(app, '编辑当前记录的 JSON');
+      assert.ok(btn, '详情工具含编辑按钮');
+      btn!.click();
+      await sleep(20);
+      reply(host, lastReq(host, HostEndpoint.READ_RECORD)!, {
+        ok: true,
+        value: { a: 1 },
+        rawText: '{"a":1}',
+        rawBytes: 7,
+      });
+      await sleep(20);
+
+      const panel = globalThis.document.querySelector<HTMLElement>('.jlv-edit-backdrop');
+      assert.ok(panel, '编辑浮层已打开');
+      const input = panel!.querySelector<HTMLTextAreaElement>('.jlv-edit-input')!;
+      assert.strictEqual(input.value, '{"a":1}', '初始文本为磁盘原文');
+
+      input.value = '{"a":22222}';
+      const save = Array.from(panel!.querySelectorAll<HTMLButtonElement>('.jlv-edit-btn')).find(
+        (b) => b.textContent === '保存'
+      );
+      assert.ok(save, '保存按钮存在');
+      save!.click();
+      await sleep(20);
+
+      const editReq = lastReq(host, HostEndpoint.EDIT_RECORD);
+      assert.ok(editReq, '已发起编辑请求');
+      assert.strictEqual(editReq!.line, 0);
+      assert.strictEqual(editReq!.text, '{"a":22222}');
+      assert.strictEqual(editReq!.expectedBytes, 7, '必须带乐观锁（旧行字节长度）');
+    });
+
+    it('文档复位推送：复位本地状态并重拉字段，且不再向宿主发 RELOAD', async () => {
+      const { host } = await bootWithRecords();
+      reply(host, lastReq(host, HostEndpoint.READ_RECORDS)!, {
+        startLine: 0,
+        items: makeItems(0, 20),
+        hasMore: true,
+      });
+      await sleep(20);
+      const fieldsBefore = reqs(host, HostEndpoint.GET_SAMPLE_FIELDS).length;
+
+      host.receive({
+        type: HostReply.DOCUMENT_RESET,
+        payload: { message: '已放弃更改并从磁盘重新加载。' },
+      });
+      await sleep(20);
+
+      assert.ok(
+        reqs(host, HostEndpoint.GET_SAMPLE_FIELDS).length > fieldsBefore,
+        '复位后应重拉字段推断'
+      );
+      assert.strictEqual(
+        reqs(host, HostEndpoint.RELOAD).length,
+        0,
+        '宿主已完成重载，webview 不得再发 RELOAD（否则大文件白扫一遍）'
+      );
     });
   });
 

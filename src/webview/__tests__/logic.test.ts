@@ -173,3 +173,21 @@ test('formatValue: 对象/数组/长字符串折叠展示', () => {
   assert.equal(formatValue('a'.repeat(200)).length <= 130, true);
   assert.equal(formatValue(true), 'true');
 });
+
+test('LRUCache.delete：返回值并释放容量；未命中返回 undefined 且不改动容量', () => {
+  const c = new LRUCache<string, number>(2);
+  c.set('a', 1);
+  c.set('b', 2);
+
+  assert.equal(c.delete('a'), 1);
+  assert.equal(c.has('a'), false);
+  assert.equal(c.size, 1);
+  assert.equal(c.delete('missing'), undefined);
+  assert.equal(c.size, 1, '未命中不得改动容量');
+
+  // 删除空出的容量可继续使用（此时不应触发逐出）
+  assert.equal(c.set('c', 3), undefined);
+  assert.equal(c.size, 2);
+  assert.equal(c.has('b'), true);
+  assert.equal(c.has('c'), true);
+});

@@ -51,6 +51,14 @@ export class LRUCache<K, V> {
     return evicted;
   }
 
+  /** 删除一个键（未命中则无操作）。返回被删除的值，供调用方释放其持有的大对象。 */
+  delete(key: K): V | undefined {
+    const v = this.map.get(key);
+    if (v === undefined) return undefined;
+    this.map.delete(key);
+    return v;
+  }
+
   peek(key: K): V | undefined {
     return this.map.get(key);
   }
