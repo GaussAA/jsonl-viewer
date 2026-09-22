@@ -36,6 +36,10 @@ export const HostEndpoint = {
   RELOAD: 'fileReload',
   /** 就地替换某一行（编辑能力；行数不变，行尾按原样保留）。 */
   EDIT_RECORD: 'editRecord',
+  /** 在第 at 行之前插入一行（编辑能力 M2；at === 总行数表示追加到末尾）。 */
+  INSERT_RECORD: 'insertRecord',
+  /** 删除第 line 行（编辑能力 M2；行数减一，其后行号前移）。 */
+  DELETE_RECORD: 'deleteRecord',
 } as const;
 
 /** O(1) 查找表：把 HostEndpoint 所有值预编译成 Set，isHostEndpoint 每次调用不再 O(n) 遍历。 */
@@ -213,6 +217,20 @@ export type HostRequest =
        * 用于发现「会话期间文件被外部程序改过」，避免基于过期视图覆写。
        */
       expectedBytes?: number;
+    }
+  | {
+      type: typeof HostEndpoint.INSERT_RECORD;
+      requestId: string;
+      /** 插入位置：新行将成为第 at 行（at === 总行数即追加到末尾）。 */
+      at: number;
+      /** 新行的整行文本（不含行尾；行尾风格由宿主参考相邻行决定）。 */
+      text: string;
+    }
+  | {
+      type: typeof HostEndpoint.DELETE_RECORD;
+      requestId: string;
+      /** 要删除的行号（0 基）。 */
+      line: number;
     };
 
 /* host -> webview 的具体响应消息。 */
@@ -332,6 +350,12 @@ export type HostHandlerMap = {
   ) => Promise<HostResponse> | HostResponse;
   [HostEndpoint.EDIT_RECORD]: (
     req: Extract<HostRequest, { type: typeof HostEndpoint.EDIT_RECORD }>
+  ) => Promise<HostResponse> | HostResponse;
+  [HostEndpoint.INSERT_RECORD]: (
+    req: Extract<HostRequest, { type: typeof HostEndpoint.INSERT_RECORD }>
+  ) => Promise<HostResponse> | HostResponse;
+  [HostEndpoint.DELETE_RECORD]: (
+    req: Extract<HostRequest, { type: typeof HostEndpoint.DELETE_RECORD }>
   ) => Promise<HostResponse> | HostResponse;
   [HostEndpoint.CANCEL]: (
     req: Extract<HostRequest, { type: typeof HostEndpoint.CANCEL }>

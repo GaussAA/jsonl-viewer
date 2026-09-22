@@ -458,3 +458,142 @@ test('readRecord：回传该行磁盘原文与字节长度（编辑初始文本 
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+/* --------------------- deleteRecord / insertRecord（增删行） --------------------- */
+
+test('deleteRecord：删中间行 → 行数减一、其后行号前移，且回传被删原文', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const file = await makeFile(dir, ['{"a":1}', '{"b":2}', '{"c":3}']);
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    const res = await ds.deleteRecord(1);
+    assert.equal(res.ok, true);
+    assert.equal(res.beforeText, '{"b":2}', '被删原文须回传（撤销的逆操作要用）');
+    assert.equal(await readFile(file, 'utf8'), '{"a":1}\n{"c":3}\n');
+
+    // 索引已同步：原第 2 行现在是第 1 行，越界行不存在
+    assert.deepEqual((await ds.readRecord(0)).value, { a: 1 });
+    assert.deepEqual((await ds.readRecord(1)).value, { c: 3 });
+    assert.equal((await ds.readRecord(2)).ok, false);
+
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('deleteRecord：删最后一行 → 文件正确收尾，总字节数同步', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const file = await makeFile(dir, ['{"a":1}', '{"b":2}']);
+    const ds = makeService(file);
+    const before = await ds.getOverview();
+
+    const res = await ds.deleteRecord(1);
+    assert.equal(res.ok, true);
+    assert.equal(await readFile(file, 'utf8'), '{"a":1}\n');
+
+    const after = await ds.getOverview();
+    assert.equal(after.totalLines, 1);
+    assert.equal(after.totalBytes, before.totalBytes - Buffer.byteLength('{"b":2}\n'));
+
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('insertRecord：在指定行之前插入，其后行号后移；追加到末尾亦可用', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const file = await makeFile(dir, ['{"a":1}', '{"c":3}']);
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    const res = await ds.insertRecord(1, '{"b":2}');
+    assert.equal(res.ok, true);
+    assert.equal(await readFile(file, 'utf8'), '{"a":1}\n{"b":2}\n{"c":3}\n');
+    assert.deepEqual((await ds.readRecord(1)).value, { b: 2 });
+    assert.deepEqual((await ds.readRecord(2)).value, { c: 3 });
+
+    // at === totalLines → 追加到末尾
+    const appended = await ds.insertRecord(3, '{"d":4}');
+    assert.equal(appended.ok, true);
+    assert.equal(await readFile(file, 'utf8'), '{"a":1}\n{"b":2}\n{"c":3}\n{"d":4}\n');
+    assert.deepEqual((await ds.readRecord(3)).value, { d: 4 });
+
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('insertRecord：CRLF 文件中插入的新行沿用 CRLF（不搅乱行尾风格）', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const file = join(dir, 'crlf.jsonl');
+    await writeFile(file, '{"a":1}\r\n{"c":3}\r\n');
+    const ds = new DataService('file:///crlf.jsonl', file, { sampleLines: 10 });
+    await ds.getOverview();
+
+    const res = await ds.insertRecord(1, '{"b":2}');
+    assert.equal(res.ok, true);
+    assert.equal(await readFile(file, 'utf8'), '{"a":1}\r\n{"b":2}\r\n{"c":3}\r\n');
+
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('insertRecord / deleteRecord：非法 JSON、越界、外部冲突一律拒绝且不写盘', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const file = await makeFile(dir, ['{"a":1}', '{"b":2}']);
+    const ds = makeService(file);
+    await ds.getOverview();
+    const original = await readFile(file, 'utf8');
+
+    const badJson = await ds.insertRecord(0, '{"x":1,,}');
+    assert.equal(badJson.ok, false);
+    assert.equal(badJson.invalid, true);
+    assert.equal(await readFile(file, 'utf8'), original);
+
+    assert.equal((await ds.insertRecord(99, '{"x":1}')).ok, false, '插入位置越界');
+    assert.equal((await ds.deleteRecord(99)).ok, false, '删除行号越界');
+    assert.equal(await readFile(file, 'utf8'), original);
+
+    // 外部改动后再删 → 冲突
+    const external = '{"a":1}\n{"b":2}\n{"c":3}\n';
+    await writeFile(file, external);
+    const conflict = await ds.deleteRecord(0);
+    assert.equal(conflict.ok, false);
+    assert.equal(conflict.conflict, true);
+    assert.equal(await readFile(file, 'utf8'), external, '冲突时绝不写盘');
+
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('insertRecord / deleteRecord：写后同步基线 —— checkStale 不误报自写', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const file = await makeFile(dir, ['{"a":1}', '{"b":2}', '{"c":3}']);
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    await ds.deleteRecord(1);
+    assert.equal((await ds.checkStale())?.changed, false, '删除后不得报告外部变更');
+
+    await ds.insertRecord(1, '{"b2":22}');
+    assert.equal((await ds.checkStale())?.changed, false, '插入后不得报告外部变更');
+
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

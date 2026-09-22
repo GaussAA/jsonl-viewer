@@ -133,12 +133,15 @@ function notLocalHtml(rawScheme: string): string {
   });
 }
 
-/** 一次成功行替换的编辑记录（供自定义编辑器上报撤销/重做）。 */
+/** 一次成功编辑的记录（供自定义编辑器上报撤销/重做）。 */
 interface JsonlEditRecord {
+  /** 操作类型 —— 决定撤销与重做各自该做什么（三者互为不同的逆操作）。 */
+  kind: 'replace' | 'insert' | 'delete';
+  /** 操作所在的行号（insert 为「插入位置」，delete 为「被删行」）。 */
   line: number;
-  /** 被替换掉的旧行文本。 */
+  /** 被移除的旧行文本（替换 / 删除时提供；插入为空串）。 */
   beforeText: string;
-  /** 写入的新行文本。 */
+  /** 写入的新行文本（替换 / 插入时提供；删除为空串）。 */
   afterText: string;
 }
 
@@ -337,6 +340,33 @@ function registerHostHandlers(deps: HostHandlerDeps): vscode.Disposable {
             },
             [HostEndpoint.READ_RECORD]: async (req) =>
               okReply(HostReply.RESULT, req.requestId, await data.readRecord(req.line)),
+            // 在第 at 行之前插入一行（编辑能力 M2）。
+            [HostEndpoint.INSERT_RECORD]: async (req) => {
+              const result = await data.insertRecord(req.at, req.text);
+              if (result.ok && reportEdit) {
+                reportEdit(
+                  { kind: 'insert', line: req.at, beforeText: '', afterText: req.text },
+                  data
+                );
+              }
+              return okReply(HostReply.EDIT_RESULT, req.requestId, result);
+            },
+            // 删除第 line 行（编辑能力 M2）。
+            [HostEndpoint.DELETE_RECORD]: async (req) => {
+              const result = await data.deleteRecord(req.line);
+              if (result.ok && reportEdit) {
+                reportEdit(
+                  {
+                    kind: 'delete',
+                    line: req.line,
+                    beforeText: result.beforeText ?? '',
+                    afterText: '',
+                  },
+                  data
+                );
+              }
+              return okReply(HostReply.EDIT_RESULT, req.requestId, result);
+            },
             [HostEndpoint.CANCEL]: (req) => {
               cancel.add(req.requestId);
               // 可中断链路：readRecords/search/filter 逐行检查 cancel 集合，
@@ -394,6 +424,7 @@ function registerHostHandlers(deps: HostHandlerDeps): vscode.Disposable {
               if (result.ok && reportEdit) {
                 reportEdit(
                   {
+                    kind: 'replace',
                     line: req.line,
                     beforeText: result.beforeText ?? '',
                     afterText: req.text,
@@ -671,21 +702,51 @@ class JsonlCustomEditorProvider
   /**
    * 把一次成功编辑包装成可撤销的 document 编辑事件。
    *
-   * 撤销/重做即「反向/再次写回同一行」：行级编辑下**行号是不变量**（行数不变），
-   * 故不必记录字节偏移，undo/redo 天然安全；VS Code 以 LIFO 调用它们，
-   * 同一行的连续多次编辑也能正确回退。
+   * 三种操作互为不同的逆操作，故按 kind 分派：
+   *   · replace —— 撤销写回旧文本，重做写回新文本；
+   *   · insert  —— 撤销删除该行，重做再次插入；
+   *   · delete  —— 撤销把被删文本插回原行号，重做再次删除。
+   *
+   * 行号在增删下**并非不变量**，但 VS Code 以 LIFO 调用 undo/redo，且每次撤销/重做
+   * 都紧接其对应的正向操作，故操作时的行号语义始终成立，无需额外记录字节偏移。
    */
   private reportEdit(document: JsonlDocument, data: DataService, edit: JsonlEditRecord): void {
-    const write = async (text: string): Promise<void> => {
-      const res = await data.editRecord(edit.line, text);
-      if (!res.ok) throw new Error(res.error ?? '编辑失败');
+    const insert = async (): Promise<void> => {
+      const r = await data.insertRecord(edit.line, edit.afterText);
+      if (!r.ok) throw new Error(r.error ?? '插入失败');
     };
-    this.editEmitter.fire({
-      document,
-      label: `编辑第 ${edit.line + 1} 行`,
-      undo: () => write(edit.beforeText),
-      redo: () => write(edit.afterText),
-    });
+    const remove = async (): Promise<void> => {
+      const r = await data.deleteRecord(edit.line);
+      if (!r.ok) throw new Error(r.error ?? '删除失败');
+    };
+    const replace = async (text: string): Promise<void> => {
+      const r = await data.editRecord(edit.line, text);
+      if (!r.ok) throw new Error(r.error ?? '编辑失败');
+    };
+
+    const label =
+      edit.kind === 'insert'
+        ? `在第 ${edit.line + 1} 行前插入`
+        : edit.kind === 'delete'
+          ? `删除第 ${edit.line + 1} 行`
+          : `编辑第 ${edit.line + 1} 行`;
+
+    const apply = async (): Promise<void> => {
+      if (edit.kind === 'insert') return insert();
+      if (edit.kind === 'delete') return remove();
+      return replace(edit.afterText);
+    };
+    const revert = async (): Promise<void> => {
+      if (edit.kind === 'insert') return remove();
+      if (edit.kind === 'delete') {
+        const r = await data.insertRecord(edit.line, edit.beforeText);
+        if (!r.ok) throw new Error(r.error ?? '撤销删除失败');
+        return;
+      }
+      return replace(edit.beforeText);
+    };
+
+    this.editEmitter.fire({ document, label, undo: revert, redo: apply });
   }
 
   dispose(): void {

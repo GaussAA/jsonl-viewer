@@ -16,9 +16,15 @@
 import { stat } from 'node:fs/promises';
 import { LineIndex } from '../indexer/lineIndex.ts';
 import type { ByteReader, ReadRecordOpts } from '../parser/jsonParser.ts';
-import { openFileReader, parseJsonLine, readRecord as readRecordAt } from '../parser/jsonParser.ts';
+import {
+  openFileReader,
+  parseJsonLine,
+  readLineAt,
+  readRecord as readRecordAt,
+} from '../parser/jsonParser.ts';
 import { inferFields } from '../infer/inferFields.ts';
-import { detectLineEnding, replaceLine } from './fileWriter.ts';
+import { detectLineEnding, lineEndingBytes, replaceLine, replaceRange } from './fileWriter.ts';
+import type { LineEnding } from './fileWriter.ts';
 import type { FieldCondition } from '../core/query.ts';
 import type { FilterLinesResult, SearchLinesResult } from './searchEngine.ts';
 import {
@@ -43,6 +49,29 @@ import {
   makeSummary,
   summarizeRawLine,
 } from './recordSummary.ts';
+
+/**
+ * 探测某行的字节区间与行尾风格。
+ *
+ * 越界、或该行是超长行（scan 以 error 标记）时返回 undefined —— 调用方据此给出
+ * 「无法定位」而**不是**拿一个错误的区间去改文件。
+ */
+async function probeLine(
+  li: LineIndex,
+  reader: ByteReader,
+  line: number
+): Promise<{ start: number; end: number; ending: LineEnding } | undefined> {
+  if (!Number.isInteger(line) || line < 0 || line >= li.totalLines) return undefined;
+  for await (const r of li.scan(reader, line, line + 1)) {
+    if (r.error) return undefined;
+    return {
+      start: r.start,
+      end: r.end,
+      ending: detectLineEnding({ start: r.start, end: r.end }, r.bytes.length),
+    };
+  }
+  return undefined;
+}
 
 /** 检测文件是否已变更（size/mtime）的最小快照。 */
 export interface FileSnapshot {
@@ -318,16 +347,8 @@ export class DataService {
     }
 
     // ① 写前冲突检测
-    const before = await this.currentSnapshot();
-    if (!before) return DataService.editFailure(line, '文件不存在或无法访问', { conflict: true });
-    if (
-      this.snapshot &&
-      (before.size !== this.snapshot.size || before.mtimeMs !== this.snapshot.mtimeMs)
-    ) {
-      return DataService.editFailure(line, '文件已被外部修改，请先重新加载再编辑。', {
-        conflict: true,
-      });
-    }
+    const conflict = await this.detectWriteConflict(line);
+    if (conflict) return conflict;
 
     // ② 定位该行区间、旧内容长度与旧文本（旧文本供撤销/重做使用）
     let range: { start: number; end: number } | undefined;
@@ -365,8 +386,7 @@ export class DataService {
         detectLineEnding(range, oldContentBytes)
       );
       this.index = li.applyLineReplace(line, res.bytesDelta);
-      const after = await this.currentSnapshot();
-      if (after) this.snapshot = after;
+      await this.refreshSnapshot();
       this.knownBadLines.delete(line);
       return {
         ok: true,
@@ -379,6 +399,152 @@ export class DataService {
       };
     } catch (e) {
       return DataService.editFailure(line, e instanceof Error ? e.message : String(e));
+    } finally {
+      this.editing = false;
+    }
+  }
+
+  /** 写前冲突检测：文件被外部改动过则返回失败回执，否则返回 undefined。 */
+  private async detectWriteConflict(line: number): Promise<EditResultPayload | undefined> {
+    const before = await this.currentSnapshot();
+    if (!before) return DataService.editFailure(line, '文件不存在或无法访问', { conflict: true });
+    if (
+      this.snapshot &&
+      (before.size !== this.snapshot.size || before.mtimeMs !== this.snapshot.mtimeMs)
+    ) {
+      return DataService.editFailure(line, '文件已被外部修改，请先重新加载再编辑。', {
+        conflict: true,
+      });
+    }
+    return undefined;
+  }
+
+  /** 写后刷新基线快照 —— 不做这一步，5s 轮询会把「自写」误判成外部变更。 */
+  private async refreshSnapshot(): Promise<void> {
+    const after = await this.currentSnapshot();
+    if (after) this.snapshot = after;
+  }
+
+  /** 删除行之后：行号整体前移，坏行集合里的行号必须同步位移，否则红标会错位。 */
+  private shiftKnownBadLinesAfterDelete(removedLine: number): void {
+    const next = new Set<number>();
+    for (const l of this.knownBadLines) {
+      if (l < removedLine) next.add(l);
+      else if (l > removedLine) next.add(l - 1);
+      // l === removedLine：该行已不存在，丢弃
+    }
+    this.knownBadLines.clear();
+    for (const l of next) this.knownBadLines.add(l);
+  }
+
+  /** 插入行之后：行号整体后移（同上）。 */
+  private shiftKnownBadLinesAfterInsert(at: number): void {
+    const next = new Set<number>();
+    for (const l of this.knownBadLines) next.add(l >= at ? l + 1 : l);
+    this.knownBadLines.clear();
+    for (const l of next) this.knownBadLines.add(l);
+  }
+
+  /**
+   * 删除第 `line` 行（含行尾）。行数减一，其后所有行的行号**前移一位**。
+   *
+   * 前置保护与 `editRecord` 一致（写前冲突检测）；落盘复用写入层同一原语
+   * `replaceRange`（空 replacement 即区间删除），随后同步索引与基线快照。
+   */
+  async deleteRecord(line: number): Promise<EditResultPayload> {
+    const li = await this.ensureIndex();
+    const reader = this.reader!;
+
+    if (!Number.isInteger(line) || line < 0 || line >= li.totalLines) {
+      return DataService.editFailure(line, `无效行号：${line}`);
+    }
+    const conflict = await this.detectWriteConflict(line);
+    if (conflict) return conflict;
+
+    const probed = await probeLine(li, reader, line);
+    if (!probed) return DataService.editFailure(line, `无法定位该行（可能过大）：${line}`);
+    const removedBytes = probed.end - probed.start;
+    // 旧原文用于撤销：删除的逆操作就是把这段文本插回去。
+    const removedText = await readLineAt(reader, probed.start, probed.end).catch(() => '');
+
+    this.editing = true;
+    try {
+      const res = await replaceRange(
+        this.path,
+        { start: probed.start, end: probed.end },
+        Buffer.alloc(0)
+      );
+      this.index = li.applyLineDelete(line, removedBytes);
+      await this.refreshSnapshot();
+      this.shiftKnownBadLinesAfterDelete(line);
+      return {
+        ok: true,
+        line,
+        bytesDelta: res.bytesDelta,
+        inPlace: res.inPlace,
+        movedBytes: res.movedBytes,
+        costMs: Math.round(res.costMs * 100) / 100,
+        beforeText: removedText,
+      };
+    } catch (e) {
+      return DataService.editFailure(line, e instanceof Error ? e.message : String(e));
+    } finally {
+      this.editing = false;
+    }
+  }
+
+  /**
+   * 在第 `at` 行**之前**插入一行（`at === totalLines` 表示追加到文件末尾）。
+   *
+   * 新行的行尾风格取「参考行」——优先前一行，其次插入点所在行；二者皆无（空文件）用 LF。
+   * 这样在 CRLF 文件里插入的行同样是 CRLF，不会把行尾风格搅乱。
+   */
+  async insertRecord(at: number, text: string): Promise<EditResultPayload> {
+    const li = await this.ensureIndex();
+    const reader = this.reader!;
+
+    if (!Number.isInteger(at) || at < 0 || at > li.totalLines) {
+      return DataService.editFailure(at, `无效插入位置：${at}`);
+    }
+    const conflict = await this.detectWriteConflict(at);
+    if (conflict) return conflict;
+
+    const parsed = parseJsonLine(text);
+    if (!parsed.ok) {
+      return DataService.editFailure(at, `JSON 校验未通过：${parsed.error}`, { invalid: true });
+    }
+
+    // 插入点 = 第 at 行的起始偏移；追加到末尾则用文件末尾。
+    let insertAt = li.totalBytes;
+    let nextEnding: LineEnding | undefined;
+    if (at < li.totalLines) {
+      const p = await probeLine(li, reader, at);
+      if (!p) return DataService.editFailure(at, `无法定位插入位置：${at}`);
+      insertAt = p.start;
+      nextEnding = p.ending;
+    }
+    const prev = at > 0 ? await probeLine(li, reader, at - 1) : undefined;
+    const refEnding = prev?.ending ?? nextEnding ?? 'lf';
+    // 参考行若位于文件末尾且原本无换行，插入的新行仍须自带行尾（否则会与下一行粘连）。
+    const ending: LineEnding = refEnding === 'none' ? 'lf' : refEnding;
+    const newLineBytes = Buffer.concat([Buffer.from(text, 'utf8'), lineEndingBytes(ending)]);
+
+    this.editing = true;
+    try {
+      const res = await replaceRange(this.path, { start: insertAt, end: insertAt }, newLineBytes);
+      this.index = li.applyLineInsert(at, newLineBytes.length);
+      await this.refreshSnapshot();
+      this.shiftKnownBadLinesAfterInsert(at);
+      return {
+        ok: true,
+        line: at,
+        bytesDelta: res.bytesDelta,
+        inPlace: res.inPlace,
+        movedBytes: res.movedBytes,
+        costMs: Math.round(res.costMs * 100) / 100,
+      };
+    } catch (e) {
+      return DataService.editFailure(at, e instanceof Error ? e.message : String(e));
     } finally {
       this.editing = false;
     }

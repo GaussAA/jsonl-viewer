@@ -56,6 +56,24 @@ const baseHandlers: HostHandlerMap = {
       movedBytes: 0,
       costMs: 0,
     }),
+  [HostEndpoint.INSERT_RECORD]: (r) =>
+    okReply(HostReply.EDIT_RESULT, r.requestId, {
+      line: r.at,
+      ok: true,
+      bytesDelta: 0,
+      inPlace: false,
+      movedBytes: 0,
+      costMs: 0,
+    }),
+  [HostEndpoint.DELETE_RECORD]: (r) =>
+    okReply(HostReply.EDIT_RESULT, r.requestId, {
+      line: r.line,
+      ok: true,
+      bytesDelta: 0,
+      inPlace: false,
+      movedBytes: 0,
+      costMs: 0,
+    }),
   [HostEndpoint.CANCEL]: () => undefined,
 };
 
