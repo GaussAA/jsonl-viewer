@@ -40,6 +40,8 @@ export const HostEndpoint = {
   INSERT_RECORD: 'insertRecord',
   /** 删除第 line 行（编辑能力 M2；行数减一，其后行号前移）。 */
   DELETE_RECORD: 'deleteRecord',
+  /** 全文查找替换（编辑能力 M2；批量改写命中行，走「重写 + 原子替换」）。 */
+  REPLACE_TEXT: 'replaceText',
 } as const;
 
 /** O(1) 查找表：把 HostEndpoint 所有值预编译成 Set，isHostEndpoint 每次调用不再 O(n) 遍历。 */
@@ -66,6 +68,8 @@ export const HostReply = {
   EDIT_RESULT: 'editResult',
   /** host 主动推送：文档已从磁盘整体复位（放弃改动 / revert），webview 应清缓存并重拉。 */
   DOCUMENT_RESET: 'documentReset',
+  /** 查找替换结果（成功与业务失败均走此回执）。 */
+  REPLACE_RESULT: 'replaceResult',
 } as const;
 
 /* ------------------------------ 类型 ------------------------------ */
@@ -174,6 +178,41 @@ export interface EditResultPayload {
   beforeText?: string;
 }
 
+/** 查找替换的结果。业务失败（冲突 / 命中过多 / 空间不足）也走此载荷。 */
+export interface ReplaceResultPayload {
+  ok: boolean;
+  /** 实际改写的行数。 */
+  replaced: number;
+  /** 因替换后 JSON 非法而跳过的行数（必须如实展示，否则用户会以为全改完了）。 */
+  skippedInvalid: number;
+  /** 命中查询但内容无变化的行数。 */
+  unchanged: number;
+  /** 本次扫描到的命中行总数（含跳过）。 */
+  total: number;
+  /** 新文件相对旧文件的字节增量。 */
+  bytesDelta: number;
+  /** 磁盘动作耗时（毫秒）。 */
+  costMs: number;
+  /**
+   * 被改写行的前后文本，供**一次性撤销**整批替换。
+   * 仅当规模在上限内时提供；未提供时 `undoable` 为 false，调用方须如实告知用户。
+   */
+  changes?: ReplaceChange[];
+  /** 本批替换是否已具备撤销能力。 */
+  undoable: boolean;
+  /** 失败原因（ok=false 时给出，可直接展示给用户）。 */
+  error?: string;
+  /** 是否为「文件已被外部修改」冲突（需重新加载后再操作）。 */
+  conflict?: boolean;
+}
+
+/** 一次被改写的行：行号 + 前后文本（撤销时按行号升序写回 before）。 */
+export interface ReplaceChange {
+  line: number;
+  before: string;
+  after: string;
+}
+
 /** 文档复位通告：宿主已从磁盘重新加载，webview 应清空缓存/搜索/过滤并重拉概览与字段。 */
 export interface DocumentResetPayload {
   /** 人类可读的原因（如「已放弃更改并从磁盘重新加载」）。 */
@@ -231,6 +270,16 @@ export type HostRequest =
       requestId: string;
       /** 要删除的行号（0 基）。 */
       line: number;
+    }
+  | {
+      type: typeof HostEndpoint.REPLACE_TEXT;
+      requestId: string;
+      /** 要查找的文本（**字面量**，绝不当正则对待）。 */
+      query: string;
+      /** 替换为的文本（可为空串，即删除匹配片段）。 */
+      replacement: string;
+      /** 是否大小写不敏感；默认与搜索一致（true）。 */
+      caseInsensitive?: boolean;
     };
 
 /* host -> webview 的具体响应消息。 */
@@ -246,7 +295,8 @@ export type HostResponse =
   | { type: typeof HostReply.JUMP_TO_SOURCE; payload: JumpToSourcePayload }
   | { type: typeof HostReply.FILE_STALE; payload: StaleFilePayload }
   | { type: typeof HostReply.EDIT_RESULT; requestId: string; payload: EditResultPayload }
-  | { type: typeof HostReply.DOCUMENT_RESET; payload: DocumentResetPayload };
+  | { type: typeof HostReply.DOCUMENT_RESET; payload: DocumentResetPayload }
+  | { type: typeof HostReply.REPLACE_RESULT; requestId: string; payload: ReplaceResultPayload };
 
 export type RpcMessage = HostRequest | HostResponse;
 
@@ -356,6 +406,9 @@ export type HostHandlerMap = {
   ) => Promise<HostResponse> | HostResponse;
   [HostEndpoint.DELETE_RECORD]: (
     req: Extract<HostRequest, { type: typeof HostEndpoint.DELETE_RECORD }>
+  ) => Promise<HostResponse> | HostResponse;
+  [HostEndpoint.REPLACE_TEXT]: (
+    req: Extract<HostRequest, { type: typeof HostEndpoint.REPLACE_TEXT }>
   ) => Promise<HostResponse> | HostResponse;
   [HostEndpoint.CANCEL]: (
     req: Extract<HostRequest, { type: typeof HostEndpoint.CANCEL }>

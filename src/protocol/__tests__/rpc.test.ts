@@ -74,6 +74,17 @@ const baseHandlers: HostHandlerMap = {
       movedBytes: 0,
       costMs: 0,
     }),
+  [HostEndpoint.REPLACE_TEXT]: (r) =>
+    okReply(HostReply.REPLACE_RESULT, r.requestId, {
+      ok: true,
+      replaced: 0,
+      skippedInvalid: 0,
+      unchanged: 0,
+      total: 0,
+      bytesDelta: 0,
+      costMs: 0,
+      undoable: false,
+    }),
   [HostEndpoint.CANCEL]: () => undefined,
 };
 

@@ -597,3 +597,196 @@ test('insertRecord / deleteRecord：写后同步基线 —— checkStale 不误�
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+/* ------------------------- 查找替换（M2） ------------------------- */
+
+test('replaceText：多行命中一次改写，行数不变且后续行仍可正确读回', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const file = await makeFile(dir, ['{"name":"bob"}', '{"name":"alice"}', '{"name":"bob"}']);
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    const res = await ds.replaceText('bob', 'carol');
+    assert.equal(res.ok, true);
+    assert.equal(res.replaced, 2);
+    assert.equal(res.total, 2);
+    assert.equal(res.skippedInvalid, 0);
+    assert.equal(
+      await readFile(file, 'utf8'),
+      '{"name":"carol"}\n{"name":"alice"}\n{"name":"carol"}\n'
+    );
+
+    // 索引增量更新（逐行 applyLineReplace 累加）后每一行仍能被正确读回 ——
+    // 若平移算错，这里会读到错位的内容或直接扫描失败。
+    assert.equal(ds.totalLines, 3);
+    assert.deepEqual((await ds.readRecord(0)).value, { name: 'carol' });
+    assert.deepEqual((await ds.readRecord(1)).value, { name: 'alice' });
+    assert.deepEqual((await ds.readRecord(2)).value, { name: 'carol' });
+
+    assert.equal((await ds.checkStale())?.changed, false, '替换不得被误报为外部变更');
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('replaceText：替换后 JSON 非法的行跳过，其余行照常改', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const original = '{"a":1}\n{"b":"1"}\n';
+    const file = join(dir, 'data.jsonl');
+    await writeFile(file, original);
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    // 第一行 '1' → 'x' 得到 {"a":x} 非法；第二行得 {"b":"x"} 合法。
+    const res = await ds.replaceText('1', 'x');
+    assert.equal(res.ok, true);
+    assert.equal(res.replaced, 1, '合法的那一行照常改');
+    assert.equal(res.skippedInvalid, 1, '非法的那一行被跳过并如实计数');
+    assert.equal(res.total, 2);
+    assert.equal(await readFile(file, 'utf8'), '{"a":1}\n{"b":"x"}\n', '跳过的行必须原样保留');
+
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('replaceText：无命中 / 空查询', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const original = '{"a":1}\n{"b":2}\n';
+    const file = join(dir, 'data.jsonl');
+    await writeFile(file, original);
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    const miss = await ds.replaceText('zzz', 'y');
+    assert.equal(miss.ok, true);
+    assert.equal(miss.replaced, 0);
+    assert.equal(miss.total, 0);
+
+    // 空查询会匹配每一行的每个位置 —— 那不是替换而是毁文件，必须拒绝。
+    const empty = await ds.replaceText('', 'y');
+    assert.equal(empty.ok, false);
+    assert.match(empty.error ?? '', /不能为空/);
+
+    assert.equal(await readFile(file, 'utf8'), original, '两种情形都不得写盘');
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('replaceText：外部改动后拒绝替换（冲突时绝不写盘）', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const file = await makeFile(dir, ['{"a":"x"}', '{"b":"x"}']);
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    const external = '{"a":"x"}\n{"b":"x"}\n{"c":"x"}\n';
+    await writeFile(file, external);
+
+    const res = await ds.replaceText('x', 'y');
+    assert.equal(res.ok, false);
+    assert.equal(res.conflict, true);
+    assert.equal(await readFile(file, 'utf8'), external, '冲突时文件必须原样保留');
+
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('replaceText：changes 可用于一次性还原整批（撤销往返）', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const original = '{"n":"x"}\n{"n":"y"}\n{"n":"x"}\n';
+    const file = join(dir, 'data.jsonl');
+    await writeFile(file, original);
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    const res = await ds.replaceText('x', 'X');
+    assert.equal(res.undoable, true);
+    assert.equal(res.changes?.length, 2);
+
+    const back = await ds.applyLineTexts(
+      res.changes!.map((c) => ({ line: c.line, text: c.before }))
+    );
+    assert.equal(back.ok, true);
+    assert.equal(await readFile(file, 'utf8'), original, '撤销后必须逐字节还原');
+
+    // 重做：写回 after 应再次得到替换后的内容
+    const again = await ds.applyLineTexts(
+      res.changes!.map((c) => ({ line: c.line, text: c.after }))
+    );
+    assert.equal(again.ok, true);
+    assert.equal(await readFile(file, 'utf8'), '{"n":"X"}\n{"n":"y"}\n{"n":"X"}\n');
+
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('replaceText：CRLF 文件的替换保留 CRLF 行尾', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const file = join(dir, 'crlf.jsonl');
+    await writeFile(file, '{"n":"x"}\r\n{"n":"x"}\r\n');
+    const ds = new DataService('file:///crlf.jsonl', file, { sampleLines: 10 });
+    await ds.getOverview();
+
+    const res = await ds.replaceText('x', 'y');
+    assert.equal(res.replaced, 2);
+    assert.equal(await readFile(file, 'utf8'), '{"n":"y"}\r\n{"n":"y"}\r\n');
+
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('replaceText：命中但不发生变化时如实归类为 unchanged', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const original = '{"n":"x"}\n';
+    const file = join(dir, 'data.jsonl');
+    await writeFile(file, original);
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    const res = await ds.replaceText('x', 'x');
+    assert.equal(res.ok, true);
+    assert.equal(res.replaced, 0, '内容没变就不该写入');
+    assert.equal(res.unchanged, 1);
+    assert.equal(res.undoable, false, '没有变更就不该声称可撤销');
+    assert.equal(await readFile(file, 'utf8'), original);
+
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('replaceText：大小写不敏感命中时只改命中片段，不污染其余大小写', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const file = await makeFile(dir, ['{"Name":"bob","TAG":"bob"}']);
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    const res = await ds.replaceText('name', 'title');
+    assert.equal(res.replaced, 1);
+    // 键名 Name 被替换为 title；值 "bob" 与另一个键 TAG 不受影响。
+    assert.equal(await readFile(file, 'utf8'), '{"title":"bob","TAG":"bob"}\n');
+
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

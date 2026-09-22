@@ -23,8 +23,15 @@ import {
   readRecord as readRecordAt,
 } from '../parser/jsonParser.ts';
 import { inferFields } from '../infer/inferFields.ts';
-import { detectLineEnding, lineEndingBytes, replaceLine, replaceRange } from './fileWriter.ts';
-import type { LineEnding } from './fileWriter.ts';
+import {
+  detectLineEnding,
+  lineEndingBytes,
+  replaceLine,
+  replaceRange,
+  rewriteWithEdits,
+} from './fileWriter.ts';
+import type { ByteEdit, LineEnding } from './fileWriter.ts';
+import { planLineReplace } from '../core/replaceLogic.ts';
 import type { FieldCondition } from '../core/query.ts';
 import type { FilterLinesResult, SearchLinesResult } from './searchEngine.ts';
 import {
@@ -32,6 +39,8 @@ import {
   RECORDS_MAX_COUNT,
   SEARCH_MAX_RESULTS,
   FILTER_MAX_RESULTS,
+  MAX_REPLACE_UNDO_LINES,
+  MAX_REPLACE_UNDO_BYTES,
 } from '../constants.ts';
 import { buildIndexWithFallback, type IndexHost } from './indexHost.ts';
 import { buildRecordsPayload } from '../protocol/rpc.ts';
@@ -40,6 +49,8 @@ import type {
   OverviewPayload,
   RecordsPayload,
   RecordsPayloadItem,
+  ReplaceChange,
+  ReplaceResultPayload,
   SampleFieldsPayload,
 } from '../protocol/rpc.ts';
 import {
@@ -548,6 +559,275 @@ export class DataService {
     } finally {
       this.editing = false;
     }
+  }
+
+  /* ------------------------- 查找替换（批量改写） ------------------------- */
+
+  /**
+   * 全文查找替换：把每一命中行中的 `query` 字面量替换为 `replacement`，一次性落盘。
+   *
+   * 流程即正确性：
+   *   1. **复用搜索定位命中行** —— 搜索即预览，不另造一套预览机制（用户在工具栏已看到命中数）；
+   *   2. **一次顺序扫过命中区间取原文** —— 成本 O(命中区间)，与整体重写同阶，不做逐行随机读；
+   *   3. **逐行校验替换后的 JSON** —— 非法则该行跳过（个别行失败不该拖垮整批，但必须如实统计）；
+   *   4. **原子重写** —— 写同目录临时文件再 rename，失败时用户拿到的仍是完整旧文件；
+   *   5. **索引增量 + 基线快照** —— 行数不变，逐行平移其后检查点即可，无需重建。
+   *
+   * 查询为空直接拒绝：空串会匹配每一行的每个位置，那不是「替换」而是毁文件。
+   * 命中数达到搜索上限（truncated）时同样拒绝 —— 我们无法确认待改行的全集，
+   * 在此基础上的「批量替换」是不可控的。
+   */
+  async replaceText(
+    query: string,
+    replacement: string,
+    opts: { caseInsensitive?: boolean } = {}
+  ): Promise<ReplaceResultPayload> {
+    if (!query) return DataService.replaceFailure('查找内容不能为空');
+
+    const li = await this.ensureIndex();
+    const reader = this.reader!;
+
+    const conflict = await this.detectWriteConflict(-1);
+    if (conflict) {
+      return DataService.replaceFailure(conflict.error ?? '文件已被外部修改', { conflict: true });
+    }
+
+    // ① 搜索定位（走 host：worker 或主线程兜底）
+    const found = await this.search(query, undefined, 'all');
+    if (found.truncated) {
+      return DataService.replaceFailure(
+        `命中行超过 ${SEARCH_MAX_RESULTS} 行，无法确认待改行的全集，已拒绝批量替换；请缩小查找范围。`
+      );
+    }
+    if (found.matches.length === 0) {
+      return DataService.replaceOk(0, 0, 0, 0, 0, false);
+    }
+
+    // ② 一次顺序扫过命中行区间，取出原文并规划替换
+    const hitSet = new Set(found.matches);
+    const first = found.matches[0];
+    const last = found.matches[found.matches.length - 1];
+    const edits: ByteEdit[] = [];
+    const deltas: { line: number; delta: number }[] = [];
+    const changes: ReplaceChange[] = [];
+    let skippedInvalid = 0;
+    let unchanged = 0;
+
+    const validate = (t: string): boolean => parseJsonLine(t).ok;
+
+    for await (const r of li.scan(reader, first, last + 1)) {
+      if (!hitSet.has(r.line)) continue;
+      // 超长行（scan 以 error 标记）无法安全取出与改回，计入跳过而非静默略过。
+      if (r.error) {
+        skippedInvalid++;
+        continue;
+      }
+      const raw = r.bytes.toString('utf8');
+      const plan = planLineReplace(raw, query, replacement, {
+        caseInsensitive: opts.caseInsensitive,
+        validate,
+      });
+      if (!plan.text) {
+        if (plan.skip === 'invalid-json') skippedInvalid++;
+        else unchanged++;
+        continue;
+      }
+      // 行尾按磁盘原样保留：替换只动行内容，不擅自把 CRLF 规范化成 LF。
+      const ending = detectLineEnding({ start: r.start, end: r.end }, r.bytes.length);
+      const next = Buffer.concat([Buffer.from(plan.text, 'utf8'), lineEndingBytes(ending)]);
+      edits.push({ start: r.start, end: r.end, replacement: next });
+      deltas.push({ line: r.line, delta: next.length - (r.end - r.start) });
+      changes.push({ line: r.line, before: raw, after: plan.text });
+    }
+
+    const total = found.matches.length;
+    if (edits.length === 0) {
+      return DataService.replaceOk(0, skippedInvalid, unchanged, total, 0, false);
+    }
+    return this.applyEdits(li, edits, deltas, changes, total, skippedInvalid, unchanged);
+  }
+
+  /**
+   * 按行号批量写回指定文本（批量替换的撤销 / 重做走这条路）。
+   *
+   * 与 `replaceText` 的区别只在「规划」阶段：这里不做查询匹配，直接接受「这些行该是什么」。
+   * 撤销必须走批量重写而非逐行 `editRecord` —— 后者是 N 次尾部搬移（成本 Σ(改动点距 EOF)），
+   * 撤销一次 5000 行的替换可能要几分钟；批量重写恒为 O(文件大小)。
+   */
+  async applyLineTexts(
+    entries: readonly { line: number; text: string }[]
+  ): Promise<ReplaceResultPayload> {
+    const li = await this.ensureIndex();
+    const reader = this.reader!;
+
+    // 目标行 → 期望文本（重复行号后者覆盖前者，避免同一区间被规划两次）
+    const wanted = new Map<number, string>();
+    for (const e of entries) {
+      if (Number.isInteger(e.line) && e.line >= 0 && e.line < li.totalLines) {
+        wanted.set(e.line, e.text);
+      }
+    }
+    if (wanted.size === 0) return DataService.replaceFailure('没有可写回的行');
+
+    const conflict = await this.detectWriteConflict(-1);
+    if (conflict) {
+      return DataService.replaceFailure(conflict.error ?? '文件已被外部修改', { conflict: true });
+    }
+
+    const lines = [...wanted.keys()].toSorted((a, b) => a - b);
+    const edits: ByteEdit[] = [];
+    const deltas: { line: number; delta: number }[] = [];
+    const changes: ReplaceChange[] = [];
+    let skippedInvalid = 0;
+    let unchanged = 0;
+
+    for await (const r of li.scan(reader, lines[0], lines[lines.length - 1] + 1)) {
+      const text = wanted.get(r.line);
+      if (text === undefined) continue;
+      if (r.error) {
+        skippedInvalid++;
+        continue;
+      }
+      const raw = r.bytes.toString('utf8');
+      if (raw === text) {
+        unchanged++;
+        continue;
+      }
+      // 写回的内容同样要过 JSON 校验：撤销的是「曾经合法的内容」，但磁盘可能已被
+      // 外部改过，此处不能假设它一定还合法。
+      if (!parseJsonLine(text).ok) {
+        skippedInvalid++;
+        continue;
+      }
+      const ending = detectLineEnding({ start: r.start, end: r.end }, r.bytes.length);
+      const next = Buffer.concat([Buffer.from(text, 'utf8'), lineEndingBytes(ending)]);
+      edits.push({ start: r.start, end: r.end, replacement: next });
+      deltas.push({ line: r.line, delta: next.length - (r.end - r.start) });
+      changes.push({ line: r.line, before: raw, after: text });
+    }
+
+    if (edits.length === 0) {
+      return DataService.replaceOk(0, skippedInvalid, unchanged, wanted.size, 0, false);
+    }
+    return this.applyEdits(li, edits, deltas, changes, wanted.size, skippedInvalid, unchanged);
+  }
+
+  /**
+   * 把规划好的编辑一次落盘，并同步索引与基线快照。
+   *
+   * 这是批量改写的**唯一落盘路径**：查找替换、撤销、重做都走它，避免各写一份
+   * 「释放句柄 → 原子重写 → 拿回句柄 → 更新索引 → 刷新基线」的时序（那是最易漏步的地方）。
+   */
+  private async applyEdits(
+    li: LineIndex,
+    edits: ByteEdit[],
+    deltas: { line: number; delta: number }[],
+    changes: ReplaceChange[],
+    total: number,
+    skippedInvalid: number,
+    unchanged: number
+  ): Promise<ReplaceResultPayload> {
+    this.editing = true;
+    try {
+      await this.releaseFileHandles();
+      let res;
+      try {
+        res = await rewriteWithEdits(this.path, edits);
+      } finally {
+        // 无论成败都必须把句柄拿回来，否则后续所有读取都会失败。
+        await this.acquireFileHandles();
+      }
+      // 索引增量更新：行数不变，逐行平移其后检查点（各 delta 相互独立，顺序无关）
+      let idx = li;
+      for (const { line, delta } of deltas) idx = idx.applyLineReplace(line, delta);
+      this.index = idx;
+      for (const { line } of deltas) this.knownBadLines.delete(line);
+      await this.refreshSnapshot();
+
+      const undoBytes = changes.reduce((a, c) => a + c.before.length + c.after.length, 0);
+      const undoable =
+        changes.length <= MAX_REPLACE_UNDO_LINES && undoBytes <= MAX_REPLACE_UNDO_BYTES;
+
+      return {
+        ok: true,
+        replaced: edits.length,
+        skippedInvalid,
+        unchanged,
+        total,
+        bytesDelta: res.bytesDelta,
+        costMs: Math.round(res.costMs * 100) / 100,
+        changes: undoable ? changes : undefined,
+        undoable,
+      };
+    } catch (e) {
+      return DataService.replaceFailure(e instanceof Error ? e.message : String(e));
+    } finally {
+      this.editing = false;
+    }
+  }
+
+  /**
+   * 重写文件前释放**两侧**的文件句柄。
+   *
+   * 主线程 reader 与索引宿主的 reader 都要松手：Windows 下 rename 覆盖一个仍被打开的
+   * 文件会 EPERM（worker 是独立线程但同进程，句柄一样拦人）。
+   */
+  private async releaseFileHandles(): Promise<void> {
+    const r = this.reader;
+    this.reader = undefined;
+    if (r?.close) await r.close().catch(() => {});
+    await this.host?.releaseFile().catch(() => {});
+  }
+
+  /** 重新获取文件句柄 —— 与 releaseFileHandles 严格配对（放在 finally 里）。 */
+  private async acquireFileHandles(): Promise<void> {
+    if (!this.reader) {
+      try {
+        this.reader = await openFileReader(this.path);
+      } catch {
+        // 拿不回来就只能让后续读取显式报错，不在此处遮蔽真实原因。
+      }
+    }
+    await this.host?.reacquireFile(this.path).catch(() => {});
+  }
+
+  /** 查找替换的失败回执（统一填充字段，避免多处重复）。 */
+  private static replaceFailure(
+    error: string,
+    extra?: Partial<ReplaceResultPayload>
+  ): ReplaceResultPayload {
+    return {
+      ok: false,
+      replaced: 0,
+      skippedInvalid: 0,
+      unchanged: 0,
+      total: 0,
+      bytesDelta: 0,
+      costMs: 0,
+      undoable: false,
+      error,
+      ...extra,
+    };
+  }
+
+  private static replaceOk(
+    replaced: number,
+    skippedInvalid: number,
+    unchanged: number,
+    total: number,
+    bytesDelta: number,
+    undoable: boolean
+  ): ReplaceResultPayload {
+    return {
+      ok: true,
+      replaced,
+      skippedInvalid,
+      unchanged,
+      total,
+      bytesDelta,
+      costMs: 0,
+      undoable,
+    };
   }
 
   /** 抽样前 N 行推断字段（只扫前 sampleLines/count 行，绝不全文件）。 */

@@ -14,6 +14,7 @@ import {
   RpcMessage,
 } from './protocol/rpc.ts';
 import type { FieldCondition } from './core/query.ts';
+import type { ReplaceChange } from './protocol/rpc.ts';
 import { FILE_STALE_POLL_MS } from './constants.ts';
 
 /** The `viewType` used by the standalone webview panel (命令 / 资源管理器右键菜单路径). */
@@ -133,17 +134,28 @@ function notLocalHtml(rawScheme: string): string {
   });
 }
 
-/** 一次成功编辑的记录（供自定义编辑器上报撤销/重做）。 */
-interface JsonlEditRecord {
-  /** 操作类型 —— 决定撤销与重做各自该做什么（三者互为不同的逆操作）。 */
-  kind: 'replace' | 'insert' | 'delete';
-  /** 操作所在的行号（insert 为「插入位置」，delete 为「被删行」）。 */
-  line: number;
-  /** 被移除的旧行文本（替换 / 删除时提供；插入为空串）。 */
-  beforeText: string;
-  /** 写入的新行文本（替换 / 插入时提供；删除为空串）。 */
-  afterText: string;
-}
+/**
+ * 一次成功编辑的记录（供自定义编辑器上报撤销/重做）。
+ *
+ * 用联合类型而非「一堆可选字段」：`replaceAll` 根本没有单一行号语义，
+ * 强行塞进 `line/beforeText/afterText` 只会制造「字段存不存在看 kind」的隐式约定。
+ */
+type JsonlEditRecord =
+  | {
+      /** 单行操作 —— 三者互为不同的逆操作。 */
+      kind: 'replace' | 'insert' | 'delete';
+      /** 操作所在的行号（insert 为「插入位置」，delete 为「被删行」）。 */
+      line: number;
+      /** 被移除的旧行文本（替换 / 删除时提供；插入为空串）。 */
+      beforeText: string;
+      /** 写入的新行文本（替换 / 插入时提供；删除为空串）。 */
+      afterText: string;
+    }
+  | {
+      /** 批量查找替换：一次操作改写多行，撤销须**一次性**还原整批。 */
+      kind: 'replaceAll';
+      changes: ReplaceChange[];
+    };
 
 /** viewer 挂载目标：普通 WebviewPanel 与自定义编辑器面板的 webview 语义一致，统一抽象。 */
 interface ViewerTarget {
@@ -434,6 +446,18 @@ function registerHostHandlers(deps: HostHandlerDeps): vscode.Disposable {
               }
               return okReply(HostReply.EDIT_RESULT, req.requestId, result);
             },
+            // 全文查找替换（编辑能力 M2）：批量改写命中行，一次性原子落盘。
+            // 仅当本批替换具备撤销能力时才上报 —— 超限时如实告知（undoable=false），
+            // 而不是静默地让用户以为 Ctrl+Z 能救回来。
+            [HostEndpoint.REPLACE_TEXT]: async (req) => {
+              const result = await data.replaceText(req.query, req.replacement, {
+                caseInsensitive: req.caseInsensitive,
+              });
+              if (result.ok && result.undoable && reportEdit && result.changes?.length) {
+                reportEdit({ kind: 'replaceAll', changes: result.changes }, data);
+              }
+              return okReply(HostReply.REPLACE_RESULT, req.requestId, result);
+            },
           })
         ).response;
       } catch (e) {
@@ -711,6 +735,23 @@ class JsonlCustomEditorProvider
    * 都紧接其对应的正向操作，故操作时的行号语义始终成立，无需额外记录字节偏移。
    */
   private reportEdit(document: JsonlDocument, data: DataService, edit: JsonlEditRecord): void {
+    // 批量替换：撤销必须一次性还原整批 —— 逐行撤销会让用户在 N 次 Ctrl+Z 之间
+    // 看到「改了一半」的中间态，那比不支持撤销更令人困惑。
+    if (edit.kind === 'replaceAll') {
+      const list = edit.changes;
+      const write = async (pick: (c: ReplaceChange) => string): Promise<void> => {
+        const r = await data.applyLineTexts(list.map((c) => ({ line: c.line, text: pick(c) })));
+        if (!r.ok) throw new Error(r.error ?? '批量改写失败');
+      };
+      this.editEmitter.fire({
+        document,
+        label: `替换 ${list.length} 行`,
+        undo: () => write((c) => c.before),
+        redo: () => write((c) => c.after),
+      });
+      return;
+    }
+
     const insert = async (): Promise<void> => {
       const r = await data.insertRecord(edit.line, edit.afterText);
       if (!r.ok) throw new Error(r.error ?? '插入失败');
