@@ -28,6 +28,18 @@ export const MAX_LINE_BYTES = 16 * 1024 * 1024;
  *  临界行也仅 ~150MB 瞬时峰值，且 webview 缓存只持有有界摘要，不再整条巨物驻留。 */
 export const RECORD_INLINE_MAX_BYTES = 256 * 1024;
 
+/* ---------------------- 就地写入（编辑能力） ---------------------- */
+
+/** 就地写入时，尾部搬移与尾部备份的分块大小（4MB）—— 保证搬移期内存恒定有界。 */
+export const WRITE_BLOCK_SIZE = 4 * 1024 * 1024;
+
+/** 变长替换（Δ ≠ 0）时可备份的尾部字节上限（64MB）。
+ *  搬移前会把尾部数据备份到 sidecar；超过该值则拒绝执行（不以 GB 级备份换安全）。 */
+export const MAX_TAIL_BACKUP_BYTES = 64 * 1024 * 1024;
+
+/** 尾部备份 sidecar 的后缀（搬移成功即删除；失败时保留以供恢复）。 */
+export const TAIL_BACKUP_SUFFIX = '.jlv-tail-bak';
+
 /* ---------------------- 协议 & 搜索 ---------------------- */
 
 /** webview → host RPC 默认超时（轻量请求：偏好读写、跳转源码等）。 */
