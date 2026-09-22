@@ -313,13 +313,15 @@ export class DataService {
       });
     }
 
-    // ② 定位该行区间与旧内容长度
+    // ② 定位该行区间、旧内容长度与旧文本（旧文本供撤销/重做使用）
     let range: { start: number; end: number } | undefined;
     let oldContentBytes = 0;
+    let beforeText = '';
     for await (const r of li.scan(reader, line, line + 1)) {
       if (r.error) return DataService.editFailure(line, `该行过大，暂不支持编辑：${r.error}`);
       range = { start: r.start, end: r.end };
       oldContentBytes = r.bytes.length;
+      beforeText = r.bytes.toString('utf8');
       break;
     }
     if (!range) return DataService.editFailure(line, `行不存在：${line}`);
@@ -357,6 +359,7 @@ export class DataService {
         inPlace: res.inPlace,
         movedBytes: res.movedBytes,
         costMs: Math.round(res.costMs * 100) / 100,
+        beforeText,
       };
     } catch (e) {
       return DataService.editFailure(line, e instanceof Error ? e.message : String(e));

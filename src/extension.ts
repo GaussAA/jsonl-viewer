@@ -133,11 +133,26 @@ function notLocalHtml(rawScheme: string): string {
   });
 }
 
+/** 一次成功行替换的编辑记录（供自定义编辑器上报撤销/重做）。 */
+interface JsonlEditRecord {
+  line: number;
+  /** 被替换掉的旧行文本。 */
+  beforeText: string;
+  /** 写入的新行文本。 */
+  afterText: string;
+}
+
 /** viewer 挂载目标：普通 WebviewPanel 与自定义编辑器面板的 webview 语义一致，统一抽象。 */
 interface ViewerTarget {
   webview: vscode.Webview;
   /** 目标销毁时回调（用于清理 DataService / 定时器 / 消息订阅）。 */
   onDispose(cb: () => void): void;
+  /**
+   * 编辑成功后上报（**仅自定义编辑器路径**提供）。
+   * 独立 WebviewPanel 路径（命令 / 右键菜单）没有对应 document，故为 undefined ——
+   * 此时编辑照旧落盘，只是不进入 VS Code 的撤销栈。
+   */
+  reportEdit?: (edit: JsonlEditRecord, data: DataService) => void;
 }
 
 /**
@@ -152,7 +167,7 @@ function mountViewer(
   uri: vscode.Uri,
   context: vscode.ExtensionContext,
   runtime: HostRuntime
-): void {
+): { data: DataService; post: (msg: RpcMessage) => void } {
   const webview = target.webview;
   const scriptUri = webview.asWebviewUri(
     vscode.Uri.joinPath(context.extensionUri, 'dist', WEBVIEW_SCRIPT)
@@ -184,7 +199,15 @@ function mountViewer(
   };
   const cancel = new Set<string>();
 
-  const messageSub = registerHostHandlers({ webview, data, uri, context, cancel, post });
+  const messageSub = registerHostHandlers({
+    webview,
+    data,
+    uri,
+    context,
+    cancel,
+    post,
+    ...(target.reportEdit ? { reportEdit: target.reportEdit } : {}),
+  });
 
   const staleTimer = startStaleWatch({ data, post });
 
@@ -195,6 +218,8 @@ function mountViewer(
     messageSub.dispose();
     runtime.services.release(serviceKey);
   });
+
+  return { data, post };
 }
 
 /**
@@ -256,6 +281,8 @@ interface HostHandlerDeps {
   context: vscode.ExtensionContext;
   cancel: Set<string>;
   post: (msg: RpcMessage) => void;
+  /** 编辑成功后上报（仅自定义编辑器路径有值）。data 由调用方注入，避免依赖挂载结果。 */
+  reportEdit?: (edit: JsonlEditRecord, data: DataService) => void;
 }
 
 /**
@@ -264,7 +291,7 @@ interface HostHandlerDeps {
  * 职责单一：仅做「消息分发 + 调用 dataService」，不负责 HTML / stale 检测 / teardown。
  */
 function registerHostHandlers(deps: HostHandlerDeps): vscode.Disposable {
-  const { webview, data, uri, context, cancel, post } = deps;
+  const { webview, data, uri, context, cancel, post, reportEdit } = deps;
 
   // 点击坏行→在磁盘文件中定位该行（超大文件降级为提示，不抛错致面板崩溃）。
   const jumpToSource = async (line: number): Promise<void> => {
@@ -361,12 +388,21 @@ function registerHostHandlers(deps: HostHandlerDeps): vscode.Disposable {
             // 就地替换某一行（编辑能力）。业务失败（冲突 / JSON 校验不过 / 无权限）同样
             // 走 EDIT_RESULT 回执，便于前端结构化提示；只有宿主内部异常才由
             // dispatchMessage 兜底成 ERROR 回执。
-            [HostEndpoint.EDIT_RECORD]: async (req) =>
-              okReply(
-                HostReply.EDIT_RESULT,
-                req.requestId,
-                await data.editRecord(req.line, req.text, req.expectedBytes)
-              ),
+            [HostEndpoint.EDIT_RECORD]: async (req) => {
+              const result = await data.editRecord(req.line, req.text, req.expectedBytes);
+              // 成功即上报给 VS Code（自定义编辑器路径），使其进入撤销栈。
+              if (result.ok && reportEdit) {
+                reportEdit(
+                  {
+                    line: req.line,
+                    beforeText: result.beforeText ?? '',
+                    afterText: req.text,
+                  },
+                  data
+                );
+              }
+              return okReply(HostReply.EDIT_RESULT, req.requestId, result);
+            },
           })
         ).response;
       } catch (e) {
@@ -507,21 +543,42 @@ async function openJsonlViewerUnsafe(
   );
 }
 
+/** 自定义编辑器文档：仅持有 URI（不读文件内容），并挂一个「从磁盘复位」的回调。 */
+interface JsonlDocument extends vscode.CustomDocument {
+  readonly uri: vscode.Uri;
+  /** 由 `resolveCustomEditor` 注入：重建索引并通知 webview 复位。 */
+  resetFromDisk?: () => Promise<void>;
+}
+
+/** 本 provider 发出的编辑事件类型（供 `onDidChangeCustomDocument` 类型收敛）。 */
+type JsonlDocumentEdit = vscode.CustomDocumentEditEvent<JsonlDocument>;
+
 /**
- * 只读自定义编辑器：`.jsonl` / `.ndjson` / `.jsonlines` 的**默认**打开方式（双击即用）。
+ * 可写自定义编辑器：`.jsonl` / `.ndjson` / `.jsonlines` 的**默认**打开方式（双击即用）。
  *
- * 为何用 `CustomReadonlyEditorProvider` 而非 `CustomTextEditorProvider`：
- * 后者的文档模型是 VS Code 的 `TextDocument`——`resolveCustomTextEditor` 被调用前，
- * VS Code 必须先把整个文件读成文本模型；这既让 200MB+ 文件直接弹「too large to open」
- * （阶段一 P0），也让内存与文件大小成正比。
+ * 为何**不用** `CustomTextEditorProvider`：后者的文档模型是 VS Code 的 `TextDocument` ——
+ * `resolveCustomTextEditor` 被调用前，VS Code 必须先把整个文件读成文本模型；这既让
+ * 200MB+ 文件直接弹「too large to open」（阶段一 P0），也让内存与文件大小成正比。
  *
- * 只读提供者使用**扩展自带的文档模型**：`openCustomDocument` 只拿到一个 URI，
- * 我们不做任何读取，文件始终由 `DataService` 按需从磁盘随机读。于是
- * 「双击即用」与「数 GB 文件可开」不再互斥。
+ * 本实现使用**扩展自带的文档模型**：`openCustomDocument` 只拿到一个 URI、不做任何读取，
+ * 文件始终由 `DataService` 按需从磁盘随机读。于是「双击即用」「数 GB 文件可开」与
+ * 「原生编辑体验」三者不再互斥 —— 换来 VS Code 托管的脏标记、撤销/重做、Ctrl+S、
+ * 关闭提示与 Hot Exit 备份。
+ *
+ * 写盘策略为**即时写盘**：每次行替换立即落盘（`DataService.editRecord`），同时以
+ * `CustomDocumentEditEvent` 上报使其可撤销。故 `saveCustomDocument` 只需清脏 ——
+ * 绝不会在关闭时批量写出 GB 级数据（那正是「延迟写盘」在大文件上的真实风险）。
  */
-class JsonlCustomEditorProvider implements vscode.CustomReadonlyEditorProvider {
+class JsonlCustomEditorProvider
+  implements vscode.CustomEditorProvider<JsonlDocument>, vscode.Disposable
+{
   private readonly context: vscode.ExtensionContext;
   private readonly runtime: HostRuntime;
+
+  /** provider 级编辑事件源；事件体自带 document，VS Code 据此定位到具体编辑器。 */
+  private readonly editEmitter = new vscode.EventEmitter<JsonlDocumentEdit>();
+
+  readonly onDidChangeCustomDocument = this.editEmitter.event;
 
   constructor(context: vscode.ExtensionContext, runtime: HostRuntime) {
     this.context = context;
@@ -529,11 +586,11 @@ class JsonlCustomEditorProvider implements vscode.CustomReadonlyEditorProvider {
   }
 
   /** 只持有 URI，不读取文件内容（此即超大文件亦可双击打开的关键）。 */
-  openCustomDocument(uri: vscode.Uri): vscode.CustomDocument {
+  openCustomDocument(uri: vscode.Uri): JsonlDocument {
     return { uri, dispose: () => {} };
   }
 
-  resolveCustomEditor(document: vscode.CustomDocument, panel: vscode.WebviewPanel): void {
+  resolveCustomEditor(document: JsonlDocument, panel: vscode.WebviewPanel): void {
     try {
       // 非本地资源（untitled / vscode-vfs / git…）无磁盘路径：展示占位说明，不挂载查看器。
       if (!isFsReadable(document.uri)) {
@@ -544,18 +601,95 @@ class JsonlCustomEditorProvider implements vscode.CustomReadonlyEditorProvider {
         enableScripts: true,
         localResourceRoots: [vscode.Uri.joinPath(this.context.extensionUri, 'dist')],
       };
-      mountViewer(
-        { webview: panel.webview, onDispose: (cb) => panel.onDidDispose(cb) },
+      const mounted = mountViewer(
+        {
+          webview: panel.webview,
+          onDispose: (cb) => panel.onDidDispose(cb),
+          reportEdit: (edit, ds) => this.reportEdit(document, ds, edit),
+        },
         document.uri,
         this.context,
         this.runtime
       );
+      // 供 revertCustomDocument 使用：从磁盘重建索引并通知 webview 整体复位。
+      document.resetFromDisk = async () => {
+        await mounted.data.reload();
+        mounted.post({
+          type: HostReply.DOCUMENT_RESET,
+          payload: { message: '已放弃更改并从磁盘重新加载。' },
+        });
+      };
     } catch (e) {
       // 挂载失败（webview 配额 / 已销毁竞态）同样不得冒泡到扩展宿主。
       hostErr(
         'resolveCustomEditor 异常: ' + (e instanceof Error ? e.stack || e.message : String(e))
       );
     }
+  }
+
+  /**
+   * 即时写盘策略下内容早已落盘，此处直接返回即视为「已保存」（VS Code 据此清除脏标记）。
+   */
+  saveCustomDocument(_document: JsonlDocument, _token: vscode.CancellationToken): Promise<void> {
+    return Promise.resolve();
+  }
+
+  /**
+   * 明确不支持「另存为」：本查看器绑定的是 workspace 中的真实文件，改变落盘目标会让
+   * 行索引、变更检测与撤销栈全部失准。抛错让 VS Code 如实提示，而不是静默做半套。
+   */
+  saveCustomDocumentAs(
+    _document: JsonlDocument,
+    _destination: vscode.Uri,
+    _token: vscode.CancellationToken
+  ): Promise<void> {
+    return Promise.reject(
+      new Error('JSONL Viewer 暂不支持「另存为」；如需副本请在资源管理器中复制文件。')
+    );
+  }
+
+  /** 放弃改动：从磁盘重建索引，并让 webview 清空缓存/搜索/过滤后重拉。 */
+  async revertCustomDocument(
+    document: JsonlDocument,
+    _token: vscode.CancellationToken
+  ): Promise<void> {
+    await document.resetFromDisk?.();
+  }
+
+  /**
+   * Hot Exit 备份：即时写盘下不存在「未保存内容」，故无备份文件可产出 ——
+   * 返回空备份以满足 API 契约（重开窗口无需额外恢复动作）。
+   */
+  backupCustomDocument(
+    document: JsonlDocument,
+    _context: vscode.CustomDocumentBackupContext,
+    _token: vscode.CancellationToken
+  ): Promise<vscode.CustomDocumentBackup> {
+    return Promise.resolve({ id: document.uri.toString(), delete: () => {} });
+  }
+
+  /**
+   * 把一次成功编辑包装成可撤销的 document 编辑事件。
+   *
+   * 撤销/重做即「反向/再次写回同一行」：行级编辑下**行号是不变量**（行数不变），
+   * 故不必记录字节偏移，undo/redo 天然安全；VS Code 以 LIFO 调用它们，
+   * 同一行的连续多次编辑也能正确回退。
+   */
+  private reportEdit(document: JsonlDocument, data: DataService, edit: JsonlEditRecord): void {
+    const write = async (text: string): Promise<void> => {
+      const res = await data.editRecord(edit.line, text);
+      if (!res.ok) throw new Error(res.error ?? '编辑失败');
+    };
+    this.editEmitter.fire({
+      document,
+      label: `编辑第 ${edit.line + 1} 行`,
+      undo: () => write(edit.beforeText),
+      redo: () => write(edit.afterText),
+    });
+  }
+
+  dispose(): void {
+    this.editEmitter.dispose();
   }
 }
 
@@ -595,16 +729,16 @@ export function activate(context: vscode.ExtensionContext): void {
 
   // 默认编辑器关联：双击 .jsonl / .ndjson / .jsonlines 直接进入本查看器
   // （package.json contributes.customEditors，priority=default）。
-  // 只读文档模型 ⇒ VS Code 不会预载整文件 ⇒ 超大文件同样可双击打开。
+  // 扩展自有文档模型 ⇒ VS Code 不会预载整文件 ⇒ 超大文件同样可双击打开。
+  const editorProvider = new JsonlCustomEditorProvider(context, runtime);
   context.subscriptions.push(
-    vscode.window.registerCustomEditorProvider(
-      CUSTOM_EDITOR_VIEW_TYPE,
-      new JsonlCustomEditorProvider(context, runtime),
-      {
-        webviewOptions: { retainContextWhenHidden: true },
-        supportsMultipleEditorsPerDocument: true,
-      }
-    )
+    editorProvider,
+    vscode.window.registerCustomEditorProvider(CUSTOM_EDITOR_VIEW_TYPE, editorProvider, {
+      webviewOptions: { retainContextWhenHidden: true },
+      // 编辑语义下同一文档的多个编辑器会共享同一撤销栈，容易出现「在 A 撤销、B 未同步」
+      // 的混乱；查看场景能容忍，编辑场景不能，故关闭。
+      supportsMultipleEditorsPerDocument: false,
+    })
   );
 }
 

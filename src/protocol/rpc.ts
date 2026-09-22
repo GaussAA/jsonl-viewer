@@ -60,6 +60,8 @@ export const HostReply = {
   FILE_STALE: 'fileStale',
   /** 行替换结果（成功与业务失败均走此回执，便于携带冲突等结构化原因）。 */
   EDIT_RESULT: 'editResult',
+  /** host 主动推送：文档已从磁盘整体复位（放弃改动 / revert），webview 应清缓存并重拉。 */
+  DOCUMENT_RESET: 'documentReset',
 } as const;
 
 /* ------------------------------ 类型 ------------------------------ */
@@ -164,6 +166,14 @@ export interface EditResultPayload {
   conflict?: boolean;
   /** 是否因 JSON 校验未通过而拒绝（前端可据此提示语法错误）。 */
   invalid?: boolean;
+  /** 被替换掉的旧行文本（ok=true 时提供，供撤销/重做使用）。 */
+  beforeText?: string;
+}
+
+/** 文档复位通告：宿主已从磁盘重新加载，webview 应清空缓存/搜索/过滤并重拉概览与字段。 */
+export interface DocumentResetPayload {
+  /** 人类可读的原因（如「已放弃更改并从磁盘重新加载」）。 */
+  message: string;
 }
 
 /* webview -> host 的具体请求消息。 */
@@ -217,7 +227,8 @@ export type HostResponse =
   | { type: typeof HostReply.ERROR; requestId?: string; message: string }
   | { type: typeof HostReply.JUMP_TO_SOURCE; payload: JumpToSourcePayload }
   | { type: typeof HostReply.FILE_STALE; payload: StaleFilePayload }
-  | { type: typeof HostReply.EDIT_RESULT; requestId: string; payload: EditResultPayload };
+  | { type: typeof HostReply.EDIT_RESULT; requestId: string; payload: EditResultPayload }
+  | { type: typeof HostReply.DOCUMENT_RESET; payload: DocumentResetPayload };
 
 export type RpcMessage = HostRequest | HostResponse;
 
