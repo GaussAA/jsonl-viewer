@@ -11,6 +11,7 @@
 import { HostEndpoint, HostReply, isRpcMessage, makeRequestId } from '../protocol/rpc.ts';
 import type {
   DocumentResetPayload,
+  EditProgressPayload,
   InitPayload,
   JumpToSourcePayload,
   RpcMessage,
@@ -57,6 +58,8 @@ export type InitHandler = (payload: InitPayload) => void;
 export type JumpHandler = (payload: JumpToSourcePayload) => void;
 export type StaleHandler = (payload: StaleFilePayload) => void;
 export type ResetHandler = (payload: DocumentResetPayload) => void;
+/** 耗时写操作的进度推送（批量重写的全文件重写阶段）。 */
+export type EditProgressHandler = (payload: EditProgressPayload) => void;
 export type ErrorHandler = (e: { requestId?: string; message: string }) => void;
 
 export interface RequestOptions {
@@ -74,6 +77,7 @@ export class RpcBus {
   private readonly jumpHandlers = new Set<JumpHandler>();
   private readonly staleHandlers = new Set<StaleHandler>();
   private readonly resetHandlers = new Set<ResetHandler>();
+  private readonly editProgressHandlers = new Set<EditProgressHandler>();
   private readonly errorHandlers = new Set<ErrorHandler>();
   private readonly api: VSCodeApi;
 
@@ -98,6 +102,7 @@ export class RpcBus {
     this.jumpHandlers.clear();
     this.staleHandlers.clear();
     this.resetHandlers.clear();
+    this.editProgressHandlers.clear();
     this.errorHandlers.clear();
   }
 
@@ -113,6 +118,10 @@ export class RpcBus {
   /** 订阅「文档已从磁盘复位」推送（放弃改动 / revert 后，应清缓存并重拉）。 */
   onDocumentReset(cb: ResetHandler): void {
     this.resetHandlers.add(cb);
+  }
+  /** 订阅「耗时写操作进度」推送（批量替换重写大文件时会连续推送）。 */
+  onEditProgress(cb: EditProgressHandler): void {
+    this.editProgressHandlers.add(cb);
   }
   onError(cb: ErrorHandler): void {
     this.errorHandlers.add(cb);
@@ -190,6 +199,13 @@ export class RpcBus {
     }
     if (msg.type === HostReply.DOCUMENT_RESET) {
       for (const h of this.resetHandlers) h((msg as { payload: DocumentResetPayload }).payload);
+      return;
+    }
+    if (msg.type === HostReply.EDIT_PROGRESS) {
+      // 无 requestId 的主动推送，必须早于「按 requestId 关联」分支返回。
+      for (const h of this.editProgressHandlers) {
+        h((msg as { payload: EditProgressPayload }).payload);
+      }
       return;
     }
     if (msg.type === HostReply.ERROR) {

@@ -1,13 +1,17 @@
 /**
  * editLogic.ts — 编辑能力的**纯逻辑层**（无 DOM / 无 node 依赖，可直接单测）。
  *
- * 承担三件事：
+ * 承担四件事：
  *   1. **成本预估**：变长编辑必须搬移该行之后的全部字节，代价 = 尾部字节数。前端拿不到
  *      精确行偏移，故按「剩余行数占比」保守估算 —— 宁可高估（提醒用户），不可低估；
  *   2. **提交前校验**：文本非空且可被 `JSON.parse` 解析（宿主侧还会再校验一次，
  *      这里是即时反馈，省一次往返）；
- *   3. **文案整理**：把字节数 / 行号 / 校验错误整理成给用户看的一句话。
+ *   3. **文案整理**：把字节数 / 行号 / 校验错误整理成给用户看的一句话；
+ *   4. **批量替换的成本与文案**：批量重写的代价恒为文件大小（与命中数无关），
+ *      故按其估算耗时并在确认文案里说明「为什么慢」。
  */
+
+import { REWRITE_THROUGHPUT_BYTES_PER_MS } from '../constants.ts';
 
 /** 成本提示阈值：估值超过该值即提示「可能需要搬移较多数据」。32MB。 */
 export const EDIT_COST_WARN_BYTES = 32 * 1024 * 1024;
@@ -107,4 +111,75 @@ export function describeEditFailure(res: {
   }
   if (res.invalid) return res.error ?? 'JSON 校验未通过';
   return res.error ?? '保存失败';
+}
+
+/* ------------------------- 批量替换：成本与文案 ------------------------- */
+
+/** 批量重写的耗时估算。 */
+export interface BatchCostEstimate {
+  /** 需要重写的文件字节数。 */
+  bytes: number;
+  /** 预估耗时（毫秒）。 */
+  etaMs: number;
+  /** 是否值得提示用户（超过 `EDIT_COST_WARN_BYTES`）。 */
+  notable: boolean;
+}
+
+/**
+ * 估算批量替换的代价。
+ *
+ * 关键：成本**恒为 O(文件大小)，与命中行数无关** —— 这正是选「全量重写 + 原子 rename」
+ * 而非「逐处搬移」换来的性质（后者是 Σ(每处改动点距 EOF)，命中散落全文件时可达数十倍
+ * 文件大小）。故这里只需文件大小，不需要知道命中了多少行。
+ */
+export function estimateBatchCost(totalBytes: number): BatchCostEstimate {
+  const bytes = Number.isFinite(totalBytes) && totalBytes > 0 ? Math.floor(totalBytes) : 0;
+  // 有效吞吐含读 + 写 + fsync，取保守值：宁可高估等待，也不低估后让用户以为卡死。
+  const etaMs = Math.round(bytes / REWRITE_THROUGHPUT_BYTES_PER_MS);
+  return { bytes, etaMs, notable: bytes > EDIT_COST_WARN_BYTES };
+}
+
+/** 耗时的人类可读表示；不足 1 秒不给数字（「预计 0 秒」是荒谬的提示）。 */
+export function formatDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 1000) return '不到 1 秒';
+  const sec = Math.round(ms / 1000);
+  if (sec < 60) return `约 ${sec} 秒`;
+  const min = Math.floor(sec / 60);
+  const rest = sec % 60;
+  return rest === 0 ? `约 ${min} 分钟` : `约 ${min} 分 ${rest} 秒`;
+}
+
+/** 提示文案里的长文本截断（否则一次替换能把横幅撑成一行巨物）。 */
+export function clipLabel(s: string, max = 32): string {
+  const oneLine = s.replace(/\s+/g, ' ');
+  return oneLine.length > max ? oneLine.slice(0, max) + '…' : oneLine;
+}
+
+/**
+ * 批量替换的二次确认文案。
+ *
+ * 小文件不啰嗦；大文件必须说明**为什么慢** —— 用户知道代价来自「整个文件需要重写」，
+ * 才理解这是批量改写的物理约束，而非实现缺陷。
+ */
+export function replaceConfirmText(
+  query: string,
+  replacement: string,
+  totalBytes: number,
+  threshold: number = EDIT_COST_WARN_BYTES
+): string {
+  const head = `确定把全部「${clipLabel(query)}」替换为「${clipLabel(replacement)}」？`;
+  const cost = estimateBatchCost(totalBytes);
+  if (cost.bytes <= threshold) return `${head}该操作会立即写入磁盘。`;
+  return (
+    `${head}这需要重写整个 ${formatBytes(cost.bytes)} 文件` +
+    `（批量替换的代价与命中行数无关，恒为文件大小），预计${formatDuration(cost.etaMs)}，` +
+    `过程中可取消，取消后文件保持原样。`
+  );
+}
+
+/** 批量替换执行中的进度文案。 */
+export function replaceProgressText(processedBytes: number, totalBytes: number): string {
+  if (!Number.isFinite(totalBytes) || totalBytes <= 0) return '正在替换…';
+  const pct = Math.min(100, Math.max(0, Math.floor((processedBytes / totalBytes) * 100)));
+  return `正在替换… ${pct}%（${formatBytes(processedBytes)} / ${formatBytes(totalBytes)}）`;
 }

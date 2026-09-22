@@ -7,6 +7,11 @@ import {
   formatBytes,
   editCostWarning,
   describeEditFailure,
+  estimateBatchCost,
+  formatDuration,
+  clipLabel,
+  replaceConfirmText,
+  replaceProgressText,
   EDIT_COST_WARN_BYTES,
 } from '../editLogic.ts';
 
@@ -91,4 +96,63 @@ test('describeEditFailure：冲突 / 校验 / 通用三类文案可区分', () =
     describeEditFailure({ error: '无写入权限：/tmp/a.jsonl' }),
     '无写入权限：/tmp/a.jsonl'
   );
+});
+
+/* ---------------------- 批量替换：成本与文案 ---------------------- */
+
+test('estimateBatchCost：按文件大小估算，阈值上分级', () => {
+  assert.deepEqual(estimateBatchCost(0), { bytes: 0, etaMs: 0, notable: false });
+  // 脏输入不得产生 NaN 耗时（否则文案会出现「预计 NaN 秒」）
+  assert.equal(estimateBatchCost(Number.NaN).bytes, 0);
+  assert.equal(estimateBatchCost(-100).bytes, 0);
+
+  const small = estimateBatchCost(1024);
+  assert.equal(small.notable, false, '1KB 不值得提示');
+
+  const big = estimateBatchCost(EDIT_COST_WARN_BYTES + 1);
+  assert.equal(big.notable, true, '超过阈值即提示');
+  assert.ok(big.etaMs > 0, '大文件必须有正的预估耗时');
+});
+
+test('formatDuration：不足 1 秒不给数字，秒/分按量级切换', () => {
+  assert.equal(formatDuration(0), '不到 1 秒');
+  assert.equal(formatDuration(999), '不到 1 秒');
+  assert.equal(formatDuration(1000), '约 1 秒');
+  assert.equal(formatDuration(5500), '约 6 秒');
+  assert.equal(formatDuration(60000), '约 1 分钟');
+  assert.equal(formatDuration(90000), '约 1 分 30 秒');
+  assert.equal(formatDuration(Number.NaN), '不到 1 秒');
+});
+
+test('clipLabel：折叠空白并按长度截断', () => {
+  assert.equal(clipLabel('bob'), 'bob');
+  assert.equal(clipLabel('a\nb\tc'), 'a b c', '换行与制表折叠为空格');
+  assert.equal(clipLabel('x'.repeat(50)).length, 33, '32 字符 + 省略号');
+  assert.match(clipLabel('x'.repeat(50)), /…$/);
+});
+
+test('replaceConfirmText：小文件不啰嗦，大文件说明「为什么慢」并可取消', () => {
+  const small = replaceConfirmText('bob', 'alice', 1024);
+  assert.match(small, /确定把全部「bob」替换为「alice」/);
+  assert.match(small, /立即写入磁盘/);
+  assert.ok(!/重写整个/.test(small), '小文件不该出现重写成本说明');
+
+  const big = replaceConfirmText('bob', 'alice', EDIT_COST_WARN_BYTES + 1);
+  assert.match(big, /重写整个/);
+  assert.match(big, /与命中行数无关/, '必须说明代价来自文件大小而非命中数');
+  assert.match(big, /可取消/, '有取消入口就要说');
+  assert.match(big, /取消后文件保持原样/, '取消的安全性要说清楚');
+});
+
+test('replaceConfirmText：超长查找/替换文本被截断，不撑爆横幅', () => {
+  const text = replaceConfirmText('q'.repeat(200), 'r'.repeat(200), 1024);
+  assert.ok(text.length < 160, `文案应保持简短，实际 ${text.length} 字`);
+  assert.match(text, /…/);
+});
+
+test('replaceProgressText：百分比与字节数，且不越界', () => {
+  assert.equal(replaceProgressText(0, 0), '正在替换…', '无总长时不显示荒谬的 NaN%');
+  assert.equal(replaceProgressText(0, 100), '正在替换… 0%（0 B / 100 B）');
+  assert.equal(replaceProgressText(50, 100), '正在替换… 50%（50 B / 100 B）');
+  assert.match(replaceProgressText(200, 100), /100%/, '超过总长也封顶 100%');
 });

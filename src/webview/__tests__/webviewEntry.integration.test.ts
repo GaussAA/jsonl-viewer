@@ -1022,5 +1022,100 @@ describe('webviewEntry 装配层（集成）', () => {
       assert.match(bannerText(app), /文件已被外部修改/);
       assert.ok(!/已替换/.test(bannerText(app)), '失败时不得出现成功文案');
     });
+
+    /* ------------------ M3：成本分级 / 进度 / 取消 ------------------ */
+
+    it('大文件确认文案说明「重写整个文件」与可取消（小文件不啰嗦）', async () => {
+      const small = await bootWithRecords({ totalBytes: 4096 });
+      searchInput(small.app).value = 'bob';
+      replaceInput(small.app).value = 'alice';
+      replaceGo(small.app).click();
+      await sleep(10);
+      assert.ok(!/重写整个/.test(bannerText(small.app)), '小文件不该出现重写成本说明');
+
+      const big = await bootWithRecords({ totalBytes: 200 * 1024 * 1024 });
+      searchInput(big.app).value = 'bob';
+      replaceInput(big.app).value = 'alice';
+      replaceGo(big.app).click();
+      await sleep(10);
+      assert.match(bannerText(big.app), /重写整个/);
+      assert.match(bannerText(big.app), /可取消/);
+      assert.match(bannerText(big.app), /取消后文件保持原样/, '取消的安全性要说清楚');
+    });
+
+    it('替换执行中：进度推送更新文案，且**不得重置**「取消」按钮', async () => {
+      const { host, app } = await bootWithRecords({ totalBytes: 1024 });
+      searchInput(app).value = 'bob';
+      replaceInput(app).value = 'alice';
+      replaceGo(app).click();
+      await sleep(10);
+      app.querySelector<HTMLButtonElement>('.jlv-banner-action')!.click();
+      await sleep(20);
+
+      const action = app.querySelector<HTMLButtonElement>('.jlv-banner-action')!;
+      assert.strictEqual(text(action), '取消', '执行中出现取消按钮');
+
+      host.receive({
+        type: HostReply.EDIT_PROGRESS,
+        payload: { kind: 'replace', processedBytes: 512, totalBytes: 1024 },
+      });
+      await sleep(10);
+
+      assert.match(bannerText(app), /正在替换… 50%/, '进度文案已更新');
+      assert.strictEqual(
+        app.querySelector<HTMLButtonElement>('.jlv-banner-action'),
+        action,
+        '必须是同一个按钮节点 —— 走 show() 重建会让取消按钮在每次进度回调后闪烁'
+      );
+      assert.strictEqual(text(action), '取消', '按钮文案未被进度覆盖');
+    });
+
+    it('点「取消」发出 CANCEL 请求，且取消的是当前那次替换', async () => {
+      const { host, app } = await bootWithRecords();
+      searchInput(app).value = 'bob';
+      replaceInput(app).value = 'alice';
+      replaceGo(app).click();
+      await sleep(10);
+      app.querySelector<HTMLButtonElement>('.jlv-banner-action')!.click();
+      await sleep(20);
+
+      const replaceReq = lastReq(host, HostEndpoint.REPLACE_TEXT)!;
+      assert.strictEqual(reqs(host, HostEndpoint.CANCEL).length, 0, '确认阶段还没取消');
+
+      app.querySelector<HTMLButtonElement>('.jlv-banner-action')!.click();
+      await sleep(20);
+
+      const cancelReq = lastReq(host, HostEndpoint.CANCEL);
+      assert.ok(cancelReq, '已发出取消');
+      assert.strictEqual(cancelReq.requestId, replaceReq.requestId, '取消的是当前这次替换');
+    });
+
+    it('取消回执与失败严格区分：报「文件未被修改」而非「失败」', async () => {
+      const { host, app } = await bootWithRecords();
+      searchInput(app).value = 'bob';
+      replaceInput(app).value = 'alice';
+      replaceGo(app).click();
+      await sleep(10);
+      app.querySelector<HTMLButtonElement>('.jlv-banner-action')!.click();
+      await sleep(20);
+
+      reply(host, lastReq(host, HostEndpoint.REPLACE_TEXT)!, {
+        ok: false,
+        cancelled: true,
+        replaced: 0,
+        skippedInvalid: 0,
+        unchanged: 0,
+        total: 0,
+        bytesDelta: 0,
+        costMs: 0,
+        undoable: false,
+        error: '已取消',
+      });
+      await sleep(40);
+
+      assert.match(bannerText(app), /已取消/);
+      assert.match(bannerText(app), /文件未被修改/, '取消是零风险的，必须说清楚');
+      assert.ok(!/替换失败/.test(bannerText(app)), '不得把取消报成失败');
+    });
   });
 });

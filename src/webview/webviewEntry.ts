@@ -19,7 +19,7 @@ import { createToolbar } from './toolbar.ts';
 import type { ToolbarInfo } from './toolbar.ts';
 import { createDetailTree, type DetailTreeNavHandlers } from './detailTree.ts';
 import { createEditPanel } from './editPanel.ts';
-import { describeEditFailure } from './editLogic.ts';
+import { describeEditFailure, replaceConfirmText, replaceProgressText } from './editLogic.ts';
 import { createColumnLayout, type ColumnLayout } from './columnLayout.ts';
 import { createQueryActions, type QueryActions } from './queryActions.ts';
 import { createPersistence } from './persistence.ts';
@@ -74,10 +74,12 @@ function clamp(v: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, v));
 }
 
-/** 顶部可操作提示横幅（文件已变更 / 重新加载 / 重试）。 */
+/** 顶部可操作提示横幅（文件已变更 / 重新加载 / 重试 / 写操作进度）。 */
 function createBanner(): {
   root: HTMLElement;
   show(text: string, actionLabel?: string, onAction?: () => void): void;
+  /** 只换文字，**不触碰按钮** —— 进度更新若走 show() 会让「取消」按钮每次回调都重置闪烁。 */
+  setText(message: string): void;
   hide(): void;
   get active(): boolean;
 } {
@@ -106,6 +108,9 @@ function createBanner(): {
       }
       root.hidden = false;
       ctrl.active = true;
+    },
+    setText(message: string) {
+      text.textContent = message;
     },
     hide() {
       root.hidden = true;
@@ -298,6 +303,20 @@ export function main(): void {
   /* ---------------- 文件变更 / 错误横幅：右上角浮层提示（不占整行） ---------------- */
   const banner = createBanner();
 
+  /**
+   * 正在执行的批量替换（null = 无）。
+   *
+   * 进度推送与「取消」按钮都依赖它：没有它就无法判断某条进度是否属于当前操作
+   * （迟到的推送不该覆盖新横幅），也无从知道该取消哪个 requestId。
+   */
+  let activeReplace: { requestId: string } | null = null;
+
+  /** 写操作进度 → 横幅（只换文字，不得触碰「取消」按钮）。 */
+  bus.onEditProgress((info) => {
+    if (!activeReplace || info.kind !== 'replace') return;
+    banner.setText(replaceProgressText(info.processedBytes, info.totalBytes));
+  });
+
   // 宿主返回的通用错误（如 init/索引构建失败）当前无 requestId 关联，
   // 这里统一透出到横幅，便于定位问题。
   bus.onError((e) => {
@@ -484,17 +503,15 @@ export function main(): void {
     });
   }
 
-  /** 横幅文案里的长文本截断（否则一次替换能把提示撑成一行巨物）。 */
-  function clipLabel(s: string): string {
-    const oneLine = s.replace(/\s+/g, ' ');
-    return oneLine.length > 32 ? oneLine.slice(0, 32) + '…' : oneLine;
-  }
-
   /**
    * 全文查找替换（工具栏「全部替换」）。
    *
    * 二次确认走顶部横幅 —— webview 里 `window.confirm` 不可用（沙箱拦截阻塞式对话框），
    * 且批量改写会**立即落盘**，必须先问一句。
+   *
+   * 大文件会在确认文案里说明代价（整个文件需要重写），执行中显示**可取消**的进度：
+   * 重写 1GB 文件要数秒，没有进度也没有取消入口的等待是最难熬的 —— 用户只能
+   * 猜测程序是不是死了，然后去点第二次。
    *
    * 结果文案必须包含「跳过的行数」：用户点了「全部替换」后最危险的误解就是
    * 以为全改完了，而实际有一批行因 JSON 非法被跳过。
@@ -506,42 +523,55 @@ export function main(): void {
       toolbar.toggleReplace(true);
       return;
     }
-    banner.show(
-      `确定把全部「${clipLabel(query)}」替换为「${clipLabel(replacement)}」？该操作会立即写入磁盘。`,
-      '确认替换',
-      () => {
-        void (async () => {
-          toolbar.setReplaceBusy(true);
-          try {
-            const res = await bus.request<ReplaceResultPayload>(
-              HostEndpoint.REPLACE_TEXT,
-              { query, replacement },
-              { timeoutMs: RPC_HEAVY_TIMEOUT_MS }
-            ).promise;
-            if (!res?.ok) {
-              banner.show(res?.error ?? '替换失败', undefined);
-              return;
-            }
-            // 改动可能散落全文件，无法逐行失效 —— 整体清空缓存并按需重拉。
-            state.cache.clear();
-            state.maxLoaded = 0;
-            list.refresh();
-            updateToolbar();
-            // 内容变了，过滤结果同样不再可信；有过滤条件就重算。
-            if (state.filterCond) actions.runFilter(state.filterCond);
-            // 重跑搜索刷新命中计数（原本命中的行可能已经不匹配）。
-            actions.runSearch(query);
-            if (state.selectedLine !== undefined) void showDetailForLine(state.selectedLine);
-            const suffix = res.undoable ? '' : '；（改动量较大，本次未纳入撤销栈）';
-            banner.show(describeReplaceOutcome(res) + suffix, undefined);
-          } catch (e) {
-            banner.show(e instanceof Error ? e.message : String(e), undefined);
-          } finally {
-            toolbar.setReplaceBusy(false);
+    const totalBytes = state.overview?.totalBytes ?? 0;
+    banner.show(replaceConfirmText(query, replacement, totalBytes), '确认替换', () => {
+      void (async () => {
+        toolbar.setReplaceBusy(true);
+        try {
+          const { requestId, promise } = bus.request<ReplaceResultPayload>(
+            HostEndpoint.REPLACE_TEXT,
+            { query, replacement },
+            { timeoutMs: RPC_HEAVY_TIMEOUT_MS }
+          );
+          // 记下本次请求：进度推送据此渲染横幅，取消按钮据此发 CANCEL。
+          activeReplace = { requestId };
+          banner.show('正在替换…', '取消', () => {
+            // 只发 CANCEL，**不 settle 本地 Promise** —— 我们要等宿主回执 cancelled 的结果
+            // 才能如实告诉用户「文件未被修改」，而不是本地草草收尾。
+            bus.post(HostEndpoint.CANCEL, { requestId });
+          });
+
+          const res = await promise;
+          activeReplace = null;
+
+          if (res?.cancelled) {
+            banner.show('已取消：文件未被修改。', undefined);
+            return;
           }
-        })();
-      }
-    );
+          if (!res?.ok) {
+            banner.show(res?.error ?? '替换失败', undefined);
+            return;
+          }
+          // 改动可能散落全文件，无法逐行失效 —— 整体清空缓存并按需重拉。
+          state.cache.clear();
+          state.maxLoaded = 0;
+          list.refresh();
+          updateToolbar();
+          // 内容变了，过滤结果同样不再可信；有过滤条件就重算。
+          if (state.filterCond) actions.runFilter(state.filterCond);
+          // 重跑搜索刷新命中计数（原本命中的行可能已经不匹配）。
+          actions.runSearch(query);
+          if (state.selectedLine !== undefined) void showDetailForLine(state.selectedLine);
+          const suffix = res.undoable ? '' : '；（改动量较大，本次未纳入撤销栈）';
+          banner.show(describeReplaceOutcome(res) + suffix, undefined);
+        } catch (e) {
+          banner.show(e instanceof Error ? e.message : String(e), undefined);
+        } finally {
+          activeReplace = null;
+          toolbar.setReplaceBusy(false);
+        }
+      })();
+    });
   }
 
   // 组装两栏：左栏放入列头(toolbar) + 目录列表(分页)；右栏为详情面板；横幅浮层最后挂载。
