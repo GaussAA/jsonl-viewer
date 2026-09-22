@@ -38,6 +38,17 @@
  * Host Mock Harness：在普通浏览器中运行真实的 dist/webview.js。
  * 模拟扩展宿主：acquireVsCodeApi + RPC 响应（init/readRecords/
  * readRecord/search/filter/getSampleFields/persistState/...）。
+ *
+ * 编辑能力（2026-09-22 补齐）：维护一份**可变的行文本表**，故「编辑」在 harness 里
+ * 是真的会改数据的 —— 保存后刷新列表/详情能看到变化；乐观锁与 JSON 校验亦按真实宿主
+ * 的语义实现（冲突/非法一律拒绝，且绝不写入）。
+ *
+ * 控制台可用（便于手动验证 webview 的各条推送路径）：
+ *   mockRevert()  放弃改动并从「磁盘」重载 → 触发 documentReset
+ *   mockStale()   模拟外部修改文件       → 触发 fileStale（顶部「重新加载」横幅）
+ *
+ * 注：totalBytes 乘了 BYTES_SCALE（默认 2000），以便在小样例上也能验证「大 cost
+ * 编辑」的提示；真实宿主的 totalBytes 是磁盘真实字节数。
  * ============================================================ */
 
 /* ---------------- 模拟数据：500 行样例 JSONL ---------------- */
@@ -77,11 +88,47 @@ function sampleValue(line) {
 const store = new Map(); // persistState 模拟（按 key）
 const allLines = Array.from({ length: TOTAL_LINES }, (_, i) => i);
 
-function recordFor(line) {
-  if ((line + 1) % BAD_LINE === 0) {
-    return { line, ok: false, error: `JSON 解析失败（行 ${line + 1}）：预期属性键，未闭合引号或括号` };
+/** 坏行的**原文**（非法 JSON）：用于演示红标，以及「把坏行改好」这一最常见的编辑动作。 */
+const BAD_RAW = '{"broken": ';
+
+/** 被编辑过的行：line -> 该行现在的原文（未编辑的行由 sampleValue 派生）。 */
+const editedText = new Map();
+
+/** 演示用字节放大系数（见文件头说明）。 */
+const BYTES_SCALE = 2000;
+let cachedTotalBytes = null;
+
+function byteLen(s) {
+  return new TextEncoder().encode(s).length;
+}
+
+/** 取某行的**磁盘原文**：编辑后是编辑内容，否则由样例对象序列化而来。 */
+function rawTextOf(line) {
+  if (!Number.isInteger(line) || line < 0 || line >= TOTAL_LINES) return '';
+  const edited = editedText.get(line);
+  if (edited !== undefined) return edited;
+  if ((line + 1) % BAD_LINE === 0) return BAD_RAW;
+  return JSON.stringify(sampleValue(line));
+}
+
+/** 当前总字节数（含换行）；编辑后按增量维护，重载后重算。 */
+function totalBytesNow() {
+  if (cachedTotalBytes === null) {
+    let n = 0;
+    for (let i = 0; i < TOTAL_LINES; i++) n += byteLen(rawTextOf(i)) + 1;
+    cachedTotalBytes = n * BYTES_SCALE;
   }
-  return { line, ok: true, value: sampleValue(line) };
+  return cachedTotalBytes;
+}
+
+function recordFor(line) {
+  const raw = rawTextOf(line);
+  if (raw === '') return { line, ok: false, error: `行不存在：${line}` };
+  try {
+    return { line, ok: true, value: JSON.parse(raw) };
+  } catch (e) {
+    return { line, ok: false, error: `JSON 解析失败（行 ${line + 1}）：${e && e.message ? e.message : String(e)}` };
+  }
 }
 
 function stringifyValue(v) {
@@ -97,11 +144,11 @@ function handleHostRequest(msg) {
       // init 主动推送
       window.postMessage({
         type: 'init',
-        payload: { uri: 'mock://samples.jsonl', totalLines: TOTAL_LINES, totalBytes: 0, buildMs: 48, eof: true },
+        payload: { uri: 'mock://samples.jsonl', totalLines: TOTAL_LINES, totalBytes: totalBytesNow(), buildMs: 48, eof: true },
       }, '*');
       return;
     case 'getOverview':
-      reply('overview', msg.requestId, { uri: 'mock://samples.jsonl', totalLines: TOTAL_LINES, totalBytes: 0, buildMs: 48, eof: true });
+      reply('overview', msg.requestId, { uri: 'mock://samples.jsonl', totalLines: TOTAL_LINES, totalBytes: totalBytesNow(), buildMs: 48, eof: true });
       return;
     case 'getSampleFields': {
       const fields = ['id', 'user', 'status', 'amount', 'category', 'score', 'created', 'description', 'meta', 'tags']
@@ -124,7 +171,15 @@ function handleHostRequest(msg) {
     }
     case 'readRecord': {
       const r = recordFor(msg.line);
-      reply('result', msg.requestId, { value: r.value, ok: r.ok, error: r.error });
+      const rawText = rawTextOf(msg.line);
+      // 编辑功能依赖 rawText（初始文本必须是磁盘原文）与 rawBytes（乐观锁断言）。
+      reply('result', msg.requestId, {
+        value: r.value,
+        ok: r.ok,
+        error: r.error,
+        rawText,
+        rawBytes: byteLen(rawText),
+      });
       return;
     }
     case 'search': {
@@ -170,8 +225,59 @@ function handleHostRequest(msg) {
     case 'loadState':
       reply('result', msg.requestId, store.get(msg.key));
       return;
+    case 'editRecord': {
+      const line = msg.line;
+      const text = String(msg.text ?? '');
+      const fail = (extra) =>
+        reply('editResult', msg.requestId, {
+          ok: false,
+          line,
+          bytesDelta: 0,
+          inPlace: false,
+          movedBytes: 0,
+          costMs: 0,
+          ...extra,
+        });
+
+      if (!Number.isInteger(line) || line < 0 || line >= TOTAL_LINES) {
+        fail({ error: `无效行号：${line}` });
+        return;
+      }
+
+      const before = rawTextOf(line);
+      const beforeBytes = byteLen(before);
+
+      // 乐观锁：磁盘上该行若已变化即拒绝（与真实宿主语义一致，绝不写入）。
+      if (typeof msg.expectedBytes === 'number' && msg.expectedBytes !== beforeBytes) {
+        fail({ conflict: true, error: '该行内容已变化（与编辑前视图不一致），请重新加载。' });
+        return;
+      }
+
+      // JSON 校验：非法默认拒绝（真实宿主同样如此）。
+      try {
+        JSON.parse(text);
+      } catch (e) {
+        fail({ invalid: true, error: `JSON 校验未通过：${e && e.message ? e.message : String(e)}` });
+        return;
+      }
+
+      editedText.set(line, text);
+      const delta = (byteLen(text) - beforeBytes) * BYTES_SCALE;
+      if (cachedTotalBytes !== null) cachedTotalBytes += delta;
+      reply('editResult', msg.requestId, {
+        ok: true,
+        line,
+        bytesDelta: delta,
+        inPlace: byteLen(text) === beforeBytes,
+        movedBytes: 0,
+        costMs: 1,
+        beforeText: before,
+      });
+      return;
+    }
     case 'fileReload':
-      reply('overview', msg.requestId, { uri: 'mock://samples.jsonl', totalLines: TOTAL_LINES, totalBytes: 0, buildMs: 12, eof: true });
+      cachedTotalBytes = null; // 模拟真正从磁盘重建索引后重新统计
+      reply('overview', msg.requestId, { uri: 'mock://samples.jsonl', totalLines: TOTAL_LINES, totalBytes: totalBytesNow(), buildMs: 12, eof: true });
       return;
     case 'cancel':
       return;
@@ -179,6 +285,26 @@ function handleHostRequest(msg) {
       reply('error', msg.requestId, `endpoint not implemented: ${msg.type}`);
   }
 }
+
+/* ---------------- 控制台钩子（手动验证各条推送路径） ---------------- */
+
+/** 放弃所有改动并从「磁盘」重载 → 触发 documentReset。 */
+window.mockRevert = () => {
+  editedText.clear();
+  cachedTotalBytes = null;
+  window.postMessage(
+    { type: 'documentReset', payload: { message: '已从磁盘重新加载（harness 模拟）。' } },
+    '*'
+  );
+};
+
+/** 模拟外部程序修改了文件 → 触发 fileStale（应出现「重新加载」横幅）。 */
+window.mockStale = () => {
+  window.postMessage(
+    { type: 'fileStale', payload: { message: '文件已被外部修改（harness 模拟）。', deleted: false } },
+    '*'
+  );
+};
 
 /* ---------------- mock acquireVsCodeApi ---------------- */
 window.acquireVsCodeApi = () => ({
