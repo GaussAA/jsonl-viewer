@@ -90,11 +90,11 @@
 ```
 M1  只读安全的地基              M2  完整行级编辑               M3  批量与字段级
 ──────────────────────          ──────────────────────        ──────────────────────
-· 升级可写 provider（骨架）      · 任意长度行替换              · 多行删除/插入/复制
-· 写入模块 + 原子性策略          · 新增行 / 删除行             · 查找替换
-· 索引增量更新（核查点平移）     · 行内原始 JSON 编辑器        · 详情树字段级编辑
-· selfWrite 抑制 stale           · JSON 校验与错误定位         · 大文件成本分级与进度
-· 并发冲突检测（写前 stat）      · undo/redo 打通              · 会话级编辑历史
+· 升级可写 provider（骨架）      · 任意长度行替换              · 多行框选删除 / 复制
+· 写入模块 + 原子性策略          · 新增行 / 删除行             · 详情树字段级编辑
+· 索引增量更新（检查点平移）     · 行内原始 JSON 编辑器        · 大文件成本分级与进度
+· selfWrite 抑制 stale           · 查找替换（批量原子重写）    · 会话级编辑历史
+· 并发冲突检测（写前 stat）      · JSON 校验 / 错误定位 / 撤销栈
 ```
 
 **每期结束都保持"可发布"状态**：M1 完成后功能上仍是只读，但地基齐备；M2 完成即可日常使用。
@@ -124,8 +124,34 @@ M1  只读安全的地基              M2  完整行级编辑               M3  
 | webview | 右键「在第 N 行前插入」/「删除第 N 行」+ 删除二次确认（复用横幅，webview 里 `confirm` 不可用） | `bac4afc` |
 | harness | 数据源改可变行数组，增删可真实验证 | `d7873ee` |
 
-**M2 剩余**：查找替换、多行批量操作。
-**M3 未动**：详情树字段级编辑、会话级编辑历史。
+**M2 剩余**：多行批量操作（框选删除 / 复制）。
+**M3 未动**：详情树字段级编辑、会话级编辑历史、大文件成本分级与进度。
+
+### M2 查找替换交付（2026-09-22）
+
+| 环节 | 产出 | 提交 |
+|---|---|---|
+| 写入原语 | `rewriteWithEdits` —— 写同目录临时文件 + 原子 rename；`IndexHost.releaseFile/reacquireFile` | `cb2e8f5` |
+| 替换规则 | `src/core/replaceLogic.ts`（零依赖，宿主与 webview 共用判定规则） | `a976f21` |
+| host 链路 | `DataService.replaceText` / `applyLineTexts` / 私有 `applyEdits` + `REPLACE_TEXT`/`REPLACE_RESULT` | `98adb10` |
+| webview | 搜索框内互换图标展开替换行 + 「全部替换」+ 横幅二次确认 + 结果如实报跳过数 | `8cc7b5d` |
+| harness | `replaceText` mock，按真实宿主语义实现 | `1c5357e` |
+
+#### 关键设计：批量改写为什么不用「逐处倒序搬移」
+
+M1/M2 的 `replaceRange` 一次只能改**一处**，成本是「改动点距 EOF 的字节数」。批量替换若逐处调用它：
+
+| 维度 | 逐处倒序 `replaceRange` | **全量重写 + 原子 rename** |
+|---|---|---|
+| 成本 | `Σ(每处改动点距 EOF)`，命中行散落全文件时可达数十倍文件大小 | **O(文件大小)，与编辑处数无关** |
+| 原子性 | ❌ 中途失败留下「改了一半」的半成品 | ✅ rename 之前目标文件始终原封不动 |
+| 临时空间 | 无需求 | 需要等量空间（故设 `MAX_BATCH_REWRITE_BYTES` = 1GB 上限，超限**拒绝**而非降级） |
+
+批量改写最怕的正是「改了一半」——所以这里宁可拒绝也不做无原子性的降级。撤消同理：`applyLineTexts` 走同一条原子路径，而不是逐行 `editRecord`（那会是 N 次尾部搬移）。
+
+**一个平台细节**：Windows 会拒绝 `rename` 覆盖一个仍被其它句柄打开的文件（EPERM），而主线程 `DataService` 与索引宿主（主线程兜底或 worker）**各持一个 reader**。故重写前后必须`releaseFileHandles()` → 重写 → `acquireFileHandles()` 严格配对（放在 `finally` 里，失败也要拿回来）。
+
+**一条不可让步的规则**：替换后 JSON 非法的行**跳过而非整批拒绝**（个别行失败不该拖垮整体），但结果文案必须如实报出跳过数 —— 用户点完「全部替换」后最危险的误解就是以为全改完了。
 
 ---
 
@@ -253,9 +279,11 @@ interface CustomEditorProvider<T extends CustomDocument> {
 
 ```ts
 HostEndpoint.EDIT_RECORD   = 'editRecord'    // { line, text, expectedBytes? } → 单行替换
-HostEndpoint.INSERT_RECORD = 'insertRecord'  // { line, text }               → 在其后插入（M2）
+HostEndpoint.INSERT_RECORD = 'insertRecord'  // { at, text }                 → 在其前插入（M2）
 HostEndpoint.DELETE_RECORD = 'deleteRecord'  // { line }                    → 删除（M2）
+HostEndpoint.REPLACE_TEXT  = 'replaceText'   // { query, replacement }      → 全文批量替换（M2）
 HostReply.EDIT_RESULT      = 'editResult'    // { line, ok, bytesDelta, costMs, conflict? }
+HostReply.REPLACE_RESULT   = 'replaceResult' // { ok, replaced, skippedInvalid, unchanged, changes?, undoable }
 ```
 
 要点：
@@ -270,6 +298,15 @@ HostReply.EDIT_RESULT      = 'editResult'    // { line, ok, bytesDelta, costMs, 
 - **保存快捷键**：`Ctrl+S` 交给 VS Code 的脏文档机制；编辑态内额外支持 `Esc` 取消、`Ctrl+Enter` 保存。
 - **反馈**：写入进行中显示进度（大 `cost` 时）；失败给明确原因（冲突 / 权限 / 磁盘满 / 校验不过）。
 - 视觉与动效**必须**遵循 `docs/DESIGN_SYSTEM.md`（令牌、动效只动 transform/opacity、`prefers-reduced-motion` 兜底）。
+
+### 4.8 查找替换（M2 实际实现）
+
+- **不另造预览机制**：`replaceText` 复用既有搜索定位命中行 —— 用户在工具栏已经看到命中数，搜索即预览。
+- **入口**：搜索框内的互换图标展开「替换为…」输入行（默认收起，不长期占据工具区）；「全部替换」在搜索框为空时提示并自动展开替换行。
+- **二次确认走顶部横幅**，不用 `window.confirm`（webview 沙箱拦截阻塞式对话框）。
+- **失败与跳过必须如实报出**：文案形如「已替换 3 行；1 行因替换后 JSON 非法已跳过」，超限时追「未纳入撤销栈」。
+- **撤销是整批的**：`replaceAll` 映射为一次 `applyLineTexts`，而非 N 次逐行撤销（后者会让用户看到「改了一半」的中间态）。
+- **查询为空一律拒绝**：空串会匹配每一行的每个位置，那不是替换而是毁文件。命中数达搜索上限时同样拒绝（无法确认待改行的全集）。
 
 ---
 
@@ -286,6 +323,9 @@ HostReply.EDIT_RESULT      = 'editResult'    // { line, ok, bytesDelta, costMs, 
 | 文档过时误导后续实现 | 中 | 先修 §1.2 两处 |
 | 覆盖率门槛（96/86/88）被新代码拉低 | 低 | 新模块按现有风格配 `__tests__`；写入逻辑用 `MemoryReader` + 临时文件做单测 |
 | 前端风格漂移 | 低 | 实现前读 `DESIGN_SYSTEM.md` |
+| 批量重写需要等量临时空间（1GB 文件即 1GB 临时文件） | 中 | `MAX_BATCH_REWRITE_BYTES` 设上限并拒绝；`ENOSPC` 翻译为「磁盘空间不足」；临时文件同目录以免跨分区 |
+| Windows 下 `rename` 覆盖被占用文件会失败 | **高** | 重写前 `releaseFileHandles()` 松开**主线程与 worker 两侧**的 reader，重写后 `finally` 中拿回；`EPERM/EBUSY` 翻译为可操作提示 |
+| 用户误以为「全部替换」改完了（实际有行被跳过） | 中 | 结果文案强制包含跳过数与原因；`skippedInvalid` 与 `replaced` 同等醒目 |
 
 ---
 
@@ -300,8 +340,14 @@ HostReply.EDIT_RESULT      = 'editResult'    // { line, ok, bytesDelta, costMs, 
 | 5 | 格式化策略 | **默认保持原样**，格式化做成显式命令（重排会放大变长编辑的搬移成本） | `editPanel` 的「格式化」按钮 |
 | 6 | M1 撤稿线 | M1 直接做到**最小可用编辑**（不止地基） | 本次交付 |
 | 7 | 初始文本来源 | **磁盘原文**（`readRecord.rawText`），绝不用 `value` 重新序列化 | `jsonParser.readRecord` / `openEditForLine` |
+| 8 | 批量替换的写入策略 | **全量重写 + 原子 rename**，不做逐处搬移的降级路径（宁可拒绝也不留在无原子性的路径上）；上限 1GB | `fileWriter.rewriteWithEdits` |
+| 9 | 替换后 JSON 非法的行 | **跳过该行**并如实报出跳过数，而非整批拒绝 | `core/replaceLogic.planLineReplace` |
+| 10 | 匹配语义 | **字面量、非重叠、大小写不敏感**（折叠只折 ASCII A-Z 且长度不变），与搜索保持一致 | 同上 |
+| 11 | 批量撤销粒度 | **整批一次**（`applyLineTexts`），超 2000 行 / 8MB 时不入撤销栈并明确告知 | `DataService.applyLineTexts` / `MAX_REPLACE_UNDO_*` |
 
 ### 仍未决（待实机验证后再定）
 
 - **provider 运行时行为**：沙箱无直连外网，`@vscode/test-electron` 集成测试跑不了 → 需本机 F5 验证大文件打开、编辑、`Ctrl+Z`、`File: Revert File`。
 - **大 cost 编辑的取消**：`replaceLine` 已支持 `shouldCancel`（抛 `WriteCancelledError` 并保留 sidecar），但 UI 尚未接线取消按钮 —— 需先确定「取消后半搬移状态如何处理」的产品语义。
+- **字段级替换**：当前替换作用于整行文本（不改动 JSON 结构外的语义）。若要「只替换某字段的值」，需要把字段值在原文中的位置映射出来，复杂度明显更高。
+- **正则替换**：刻意未做（见 §4.8 与 `replaceLogic` 文件头规则 1）。若后续要加，需先设计「预览全部命中」的交互，否则一次错误的正则就是一次不可控的大面积改写。
