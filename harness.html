@@ -54,6 +54,10 @@
  * 先弹顶部横幅二次确认（webview 里 window.confirm 不可用），确认后本 harness 按真实宿主
  * 语义逐行改写：字面量匹配、非重叠、替换后 JSON 非法即跳过该行并在结果文案中如实报出。
  *
+ * M3（进度与取消）：确认后先推 4 拍进度（真实宿主按 4MB 分块节流上报），横幅显示百分比
+ * 与「取消」按钮；中途点取消会真的中止且**不改动任何数据** —— 与真实宿主一致，
+ * 批量重写在 rename 之前中止时目标文件从未被触碰。
+ *
  * 注：totalBytes 乘了 BYTES_SCALE（默认 2000），以便在小样例上也能验证「大 cost
  * 编辑」的提示；真实宿主的 totalBytes 是磁盘真实字节数。
  * ============================================================ */
@@ -105,6 +109,8 @@ let lines = null;
 
 /** 演示用字节放大系数（见文件头说明）。 */
 const BYTES_SCALE = 2000;
+/** 已请求取消的 requestId（模拟宿主的 cancel 集合）。 */
+const cancelledRequests = new Set();
 
 function byteLen(s) {
   return new TextEncoder().encode(s).length;
@@ -157,10 +163,15 @@ function parseFieldOf(line, field) {
   }
 }
 
-function handleHostRequest(msg) {
+async function handleHostRequest(msg) {
   const reply = (type, requestId, payload) => {
     window.postMessage({ type, requestId, payload }, '*');
   };
+  /** 无 requestId 的主动推送（如 editProgress）。 */
+  const push = (type, payload) => {
+    window.postMessage({ type, payload }, '*');
+  };
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   switch (msg.type) {
     case 'ready':
       // init 主动推送
@@ -449,6 +460,35 @@ function handleHostRequest(msg) {
         return;
       }
 
+      // 模拟真实宿主的进度推送（真实版按 4MB 分块节流上报），分 4 拍演示，
+      // 顺带让「取消」按钮在浏览器里可验证：中途点取消会真的中止且不改数据。
+      const totalNow = totalBytesNow();
+      const STEPS = 4;
+      for (let i = 1; i <= STEPS; i++) {
+        if (cancelledRequests.has(msg.requestId)) {
+          cancelledRequests.delete(msg.requestId);
+          reply('replaceResult', msg.requestId, {
+            ok: false,
+            cancelled: true,
+            replaced: 0,
+            skippedInvalid: 0,
+            unchanged: 0,
+            total: 0,
+            bytesDelta: 0,
+            costMs: 0,
+            undoable: false,
+            error: '已取消',
+          });
+          return;
+        }
+        push('editProgress', {
+          kind: 'replace',
+          processedBytes: Math.floor((totalNow * i) / STEPS),
+          totalBytes: totalNow,
+        });
+        await sleep(140);
+      }
+
       let delta = 0;
       for (const c of changes) {
         delta += byteLen(c.after) - byteLen(c.before);
@@ -472,6 +512,7 @@ function handleHostRequest(msg) {
       reply('overview', msg.requestId, { uri: 'mock://samples.jsonl', totalLines: totalLinesNow(), totalBytes: totalBytesNow(), buildMs: 12, eof: true });
       return;
     case 'cancel':
+      cancelledRequests.add(msg.requestId);
       return;
     default:
       reply('error', msg.requestId, `endpoint not implemented: ${msg.type}`);
@@ -499,7 +540,17 @@ window.mockStale = () => {
 
 /* ---------------- mock acquireVsCodeApi ---------------- */
 window.acquireVsCodeApi = () => ({
-  postMessage: (msg) => handleHostRequest(msg),
+  postMessage: (msg) => {
+    // handler 已改为 async：异常必须显式兜住，否则会静默变成 unhandled rejection，
+    // 在浏览器控制台里表现为「点了没反应」。
+    Promise.resolve(handleHostRequest(msg)).catch((e) => {
+      console.error('[harness] handler 异常：', e);
+      window.postMessage(
+        { type: 'error', requestId: msg && msg.requestId, message: String(e) },
+        '*'
+      );
+    });
+  },
   getState: () => null,
   setState: () => {},
 });
