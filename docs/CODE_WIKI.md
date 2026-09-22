@@ -29,7 +29,7 @@
 | 项 | 选型 |
 |---|---|
 | 语言 | TypeScript（strict） |
-| 宿主 API | VS Code 扩展 API（`CustomTextEditorProvider`） |
+| 宿主 API | VS Code 扩展 API（`CustomReadonlyEditorProvider`，只读文档模型） |
 | 构建 | esbuild（扩展主进程 CJS + webview IIFE） |
 | 前端 | 原生 TS + DOM（**无框架**，无虚拟 DOM 依赖） |
 | 测试 | Node 原生 test runner（`node --test`，类型擦除运行） |
@@ -40,11 +40,11 @@
 ```
 ┌─────────────────────────── VS Code 扩展宿主（Node 主进程） ───────────────────────────┐
 │                                                                                         │
-│  src/extension.ts                JsonlCustomEditorProvider（CustomTextEditorProvider）  │
+│  src/extension.ts              JsonlCustomEditorProvider（CustomReadonlyEditorProvider）│
 │  └─ 注入 webview HTML / CSP / nonce，桥接所有 RPC 消息，5s 轮询文件变更检测             │
 │                                                                                         │
 │  src/host/dataService.ts          DataService —— 数据宿主服务（无 vscode 依赖）          │
-│  ├─ src/indexer/lineIndex.ts      LineIndex       行偏移索引（流式扫描，一次建完）       │
+│  ├─ src/indexer/lineIndex.ts      LineIndex       稀疏检查点（流式扫描，一次建完）       │
 │  ├─ src/parser/jsonParser.ts      readBatch/readRecord + FileByteReader（随机读）        │
 │  ├─ src/infer/inferFields.ts      inferFields     前 N 行字段推断抽样                    │
 │  └─ src/host/searchEngine.ts      searchLines/filterLines  流式搜索与过滤                │
@@ -66,7 +66,7 @@
 └──────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-**核心思想**：主进程持有文件句柄与行偏移索引，webview 只按可视区「按需请求」；
+**核心思想**：主进程持有文件句柄与稀疏检查点行索引，webview 只按可视区「按需请求」；
 两侧通过一条带 `requestId` 的异步消息协议通信，所有请求均可中断（`supersede`）。
 
 ### 1.3 数据流（打开一个文件的生命周期）
@@ -74,7 +74,7 @@
 1. 用户打开 `.jsonl` → VS Code 以 `jsonlViewer.customEditor` 唤起 `resolveCustomTextEditor`。
 2. 宿主注入 HTML（CSP + nonce + `dist/webview.js`）→ 创建 `DataService`。
 3. webview 启动 `main()`：注入样式 → `RpcBus` → 发送 `READY`。
-4. 宿主收到 `READY` → 首次调用 `getOverview()` **触发惰性索引构建**（流式扫描建行偏移数组）→ 回 `init`，并主动推送抽样窗口错误统计 `errorSummary`。
+4. 宿主收到 `READY` → 首次调用 `getOverview()` **触发惰性索引构建**（流式扫描建稀疏检查点索引）→ 回 `init`，并主动推送抽样窗口错误统计 `errorSummary`。
 5. webview 收到 `init` → 渲染概览 → 请求 `getSampleFields`（字段推断）与 `getOverview`。
 6. 目录列表按当前页触发 `readRecords` → 宿主按字节区间随机读 + 单行解析 → 回 `records`。
 7. 用户点击某行 → `readRecord` 取整行 → 右栏 `detailTree` 渲染 JSON 树。
@@ -180,7 +180,7 @@ flowchart TD
 | **发送 READY** | main() 末尾 | `bus.post(HostEndpoint.READY)`；同时挂 8s 超时兜底 —— 若迟迟收不到 init 回执，横幅提示并给出「重试」（重新发送 READY） |
 | **dispatchMessage(READY)** | 宿主收到消息 | [rpc.ts](../src/protocol/rpc.ts#L256-L358) 对 READY 调用 `onReady`：内部执行 `data.getOverview()`（**这是索引构建的触发点**），构建完成后组装 `initReply`，并**并行**发起 `getErrorSummary()` 主动推送抽样窗口坏行统计（顶栏红标/概要的数据源） |
 | **ensureIndex() 惰性构建** | getOverview 首次调用 | [dataService.ts](../src/host/dataService.ts#L79-L97) 并发安全（`building` 缓存 Promise，多次同时调用只构建一次） |
-| **LineIndex.build()** | 索引构建 | [lineIndex.ts](../src/indexer/lineIndex.ts#L76-L124) 用 `createReadStream` 逐块扫描，单字节 `\n` 切行，把「每行起始的绝对字节偏移」push 进扁平升序数组（约 8B/行）；游标法不做跨块拼接，超大单行下构建期内存恒定有界；每 4 MiB 回调一次进度 |
+| **LineIndex.build()** | 索引构建 | [lineIndex.ts](../src/indexer/lineIndex.ts#L76-L124) 用 `createReadStream` 逐块扫描，单字节 `\n` 切行，每隔 INDEX_CHECKPOINT_INTERVAL(1024) 行记录一个 {line, offset} 检查点（约 16B/检查点）；游标法不做跨块拼接，超大单行下构建期内存恒定有界；每 4 MiB 回调一次进度 |
 | **打开读取器 + 记快照** | 构建完成 | `openFileReader(path)` 用 `fs.open` 打开随机读句柄；同时 `stat()` 记录 size/mtime 快照，作为后续「文件变更检测」的基线 |
 | **回执 init** | 构建完成后 | 回 `init`（uri/行数/字节数/构建耗时/eof）→ webview 侧 `onInit` 进入阶段 ③ |
 
@@ -198,7 +198,7 @@ flowchart TD
 | 节点 | 触发点 | 具体逻辑 |
 |---|---|---|
 | **fetchWindow()** | ThrottleQueue(40ms) 执行 | [webviewEntry.ts](../src/webview/webviewEntry.ts#L483-L521) 先 `computeFetchWindow` 跳过两端已缓存/已在途的行，**只请求中间缺失段**；若上一请求仍在途则 `supersede` 标记并通知宿主中断，再发 `READ_RECORDS`（startLine + count） |
-| **宿主 readBatch** | 收到 READ_RECORDS | [jsonParser.ts](../src/parser/jsonParser.ts#L140-L156) 对每行：`LineIndex.lineRange(line)` 二分拿到 `[start,end)` 字节区间 → 超过 `maxLineBytes`(16MiB) 报「超长行」→ 否则 `fd.read` 随机读回 → 剥离 `\r\n` → 单行 `JSON.parse`；**逐行检查 `shouldCancel`**，被取消立即停（不占 CPU）；坏行结果登记进 `knownBadLines` 缓存 |
+| **宿主 readBatch** | 收到 READ_RECORDS | [jsonParser.ts](../src/parser/jsonParser.ts#L140-L156) 对每行：`lineIndex.scan(reader, from, to)` 从最近检查点顺序扫出各行 `[start,end)` 字节区间 → 超过 `maxLineBytes`(16MiB) 报「超长行」→ 否则 `fd.read` 随机读回 → 剥离 `\r\n` → 单行 `JSON.parse`；**逐行检查 `shouldCancel`**，被取消立即停（不占 CPU）；坏行结果登记进 `knownBadLines` 缓存 |
 | **回执 records → LRU** | 宿主回包 | 按 `requestId` 关联到对应 Promise；`superseded` 的迟到响应被 `RpcBus` 直接丢弃；有效数据写入 `LRUCache`（容量 600，超出逐出最久未用并释放大对象），更新 `maxLoaded`，`list.refresh()` 重绘当前页 |
 | **渲染当前页卡片** | refresh() | [virtualScroll.ts](../src/webview/virtualScroll.ts#L309-L418) 每张卡片 = 行号徽章 `L{n}` + 类型徽章（string/number/…/error）+ keys/items 计数 + 字段摘要预览（按字段布局截取，超长省略）；未加载显示「加载中…」占位；坏行红标 + 精简错误文案；悬停复制行号、右键菜单（定位到源码行/复制行号/复制 JSON） |
 
@@ -244,7 +244,7 @@ jsonl-viewer/
 │   │   ├── rpc.ts               # 协议常量 + 类型 + dispatchMessage 分发器
 │   │   └── __tests__/rpc.test.ts
 │   ├── indexer/
-│   │   ├── lineIndex.ts         # 行偏移索引（性能核心①）
+│   │   ├── lineIndex.ts         # 稀疏检查点行索引（性能核心①）
 │   │   └── __tests__/lineIndex.test.ts
 │   ├── parser/
 │   │   ├── jsonParser.ts        # 按需惰性解析 + 读取器（性能核心②）
@@ -288,7 +288,7 @@ jsonl-viewer/
 
 | # | 机制 | 实现位置 | 效果 |
 |---|---|---|---|
-| 1 | **行偏移索引** | `lineIndex.ts` | 一次流式扫描建 `行号→字节偏移` 扁平升序数组；任意行 O(log n) 二分定位；内存 ≈ 8B/行，与文件字节数无关 |
+| 1 | **稀疏检查点行索引** | `lineIndex.ts` | 一次流式扫描，每 `INDEX_CHECKPOINT_INTERVAL`(1024) 行记一个 `{line, offset}` 检查点；任意行从 ≤ 该行的最近检查点顺读定位；内存 ≈ 16B/检查点（例：3000 万行 ≈ 480KB），与文件字节数无关 |
 | 2 | **按需惰性解析** | `jsonParser.ts` | 给定行号 → 取 `[start,end)` 区间 → 一次随机读 + 单行 JSON 解析；绝不整文件载入 |
 | 3 | **虚拟滚动（可变行高）** | `logic.ts::VirtualListLayout` | scrollTop↔行号双向定位 O(可见区)；节流 + 合并调度，滚动再快只发 1~2 个读批 |
 | 4 | **可中断执行** | `dataService` + `RpcBus` | 搜索/过滤/读批逐行检查 `shouldCancel`；`requestId` + `supersede` 丢弃迟到响应，杜绝 UI 污染 |
@@ -304,7 +304,7 @@ jsonl-viewer/
 
 ### 4.1 `src/extension.ts` — 扩展宿主入口
 
-- `JsonlCustomEditorProvider`（`CustomTextEditorProvider`）：绑定 workspace 文件（`document.uri`），在编辑器 tab 内渲染。
+- `JsonlCustomEditorProvider`（`CustomReadonlyEditorProvider`）：绑定 workspace 文件（`document.uri`），在编辑器 tab 内渲染。**文档模型为扩展自有**（`openCustomDocument` 只持有 URI、不读文件），故 200MB+ / 多 GB 文件同样可打开。
   - 注入 webview HTML：CSP（`default-src 'none'` + nonce）、`dist/webview.js`。
   - 创建 `DataService`（读取 `jsonlViewer.sampleLines` 配置）。
   - `onDidReceiveMessage` → `dispatchMessage` 分发所有 RPC 请求；`cancel` 集合实现请求中断。
@@ -321,13 +321,13 @@ jsonl-viewer/
 - `dispatchMessage(msg, onReady, ...)`：请求分发器，按端点分发到对应 handler，返回带 `requestId` 的回执；`READY`/`CANCEL` 无回执。
 - 工具：`makeRequestId`、`isRpcMessage`、`isHostRequest`、`okReply`、`errReply`、`initReply`、`buildRecordsPayload`。
 
-### 4.3 `src/indexer/lineIndex.ts` — 行偏移索引
+### 4.3 `src/indexer/lineIndex.ts` — 稀疏检查点行索引
 
-- `LineIndex` 类：持有 `offsets`（第 i 行起始字节偏移，严格递增）+ 统计字段。
+- `LineIndex` 类：持有 `checkpoints`（第 `checkpoints[i].line` 行起始的字节偏移，按 line 升序；默认每 `interval`(1024) 行一个）+ 统计字段。
   - `static build(handle, opts)`：流式顺序扫描单字节 `\n` 切行；游标法避免跨块拼接，超大单行构建期内存恒定有界；支持进度回调。
-  - `getOffsetAtLine(line)` / `lineRange(line)` / `getLineRangeAtOffset(offset)`：二分定位。
-  - `contentLengthAt(line)`：内容长度（供读取前裁剪）。
-- 设计取舍：完整偏移数组（8B/行）而非采样 —— 目标文件行通常较大（KB~MB），行数适中，收益更高。
+  - `offsetAtLine(line)`：同步返回 ≤ line 的最近检查点偏移（扫描锚点，非精确行偏移）。
+  - `scan(reader, from, to, opts)`：异步生成器，从最近检查点顺序扫出各行区间；`resolveRange(line, reader)`：便捷解析单行区间；`toStats()`：导出统计。
+- 设计取舍：稀疏检查点（约 16B/检查点）而非全量偏移数组 —— 全量数组（8B/行）在「极短行、数千万行」场景自身就要吃掉上百 MB；稀疏后索引内存下降约 3 个数量级，代价仅是从最近检查点顺读（最坏一个区间，默认 1024 行）。
 
 ### 4.4 `src/parser/jsonParser.ts` — 按需惰性解析
 
@@ -439,10 +439,10 @@ jsonl-viewer/
 
 | 符号 | 位置 | 职责 |
 |---|---|---|
-| `JsonlCustomEditorProvider` | `extension.ts` | CustomTextEditorProvider 实现，webview 生命周期与 RPC 桥 |
+| `JsonlCustomEditorProvider` | `extension.ts` | CustomReadonlyEditorProvider 实现，webview 生命周期与 RPC 桥 |
 | `activate` / `deactivate` | `extension.ts` | 扩展激活 / 停用 |
-| `LineIndex.build` | `indexer/lineIndex.ts` | 流式扫描建行偏移索引 |
-| `LineIndex.lineRange` / `getLineRangeAtOffset` | 同上 | 二分定位行区间 |
+| `LineIndex.build` | `indexer/lineIndex.ts` | 流式扫描建稀疏检查点索引 |
+| `LineIndex.scan` / `resolveRange` | 同上 | 从最近检查点顺读定位行区间 |
 | `parseJsonLine` | `parser/jsonParser.ts` | 单行 JSON 校验 + 精简错误定位 |
 | `readBatch` / `readRecord` | 同上 | 批量 / 单行按需读取解析 |
 | `FileByteReader.open` | 同上 | 打开文件随机读句柄 |
