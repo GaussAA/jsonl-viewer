@@ -252,7 +252,17 @@ export class DataService {
     return buildRecordsPayload(startLine, items, li.totalLines);
   }
 
-  async readRecord(line: number): Promise<{ value?: unknown; error?: string; ok: boolean }> {
+  /**
+   * 读取并解析单行。除解析结果外还回**该行原文**（`rawText` / `rawBytes`）——
+   * 编辑功能据此把「磁盘上原样」填进编辑框，并作为乐观锁断言（`expectedBytes`）。
+   */
+  async readRecord(line: number): Promise<{
+    value?: unknown;
+    error?: string;
+    ok: boolean;
+    rawText?: string;
+    rawBytes?: number;
+  }> {
     const li = await this.ensureIndex();
     const reader = this.reader!;
     if (!Number.isInteger(line) || line < 0) {
@@ -260,7 +270,13 @@ export class DataService {
     }
     const r = await readRecordAt(line, li, reader, this.opts.readLine);
     if (!r.ok) this.knownBadLines.add(line);
-    return { value: r.value, error: r.error, ok: r.ok };
+    return {
+      value: r.value,
+      error: r.error,
+      ok: r.ok,
+      rawText: r.rawText,
+      rawBytes: r.rawBytes,
+    };
   }
 
   /** 编辑失败的统一回执（避免多处重复填充字段）。 */

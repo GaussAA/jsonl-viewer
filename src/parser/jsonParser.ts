@@ -21,6 +21,14 @@ export interface RecordResult {
   ok: boolean;
   value?: unknown;
   error?: string;
+  /**
+   * 该行的**原始文本**（已剥离行尾）。仅 `readRecord` 单行路径提供 —— 编辑功能需要
+   * 「磁盘上原样是什么」而非「重新序列化后的样子」，否则一保存就会把用户原有的
+   * 键序与空白重排掉。
+   */
+  rawText?: string;
+  /** 原始文本的 UTF-8 字节长度（编辑乐观锁的断言依据）。 */
+  rawBytes?: number;
 }
 
 export interface ReadRecordOpts {
@@ -139,9 +147,13 @@ export async function readRecord(
   const scanOpts = opts.maxLineBytes != null ? { maxLineBytes: opts.maxLineBytes } : undefined;
   for await (const r of lineIndex.scan(reader, line, line + 1, scanOpts)) {
     if (r.error) return { line, ok: false, error: r.error };
-    const parsed = parseJsonLine(r.bytes.toString('utf8'));
-    if (parsed.ok) return { line, ok: true, value: parsed.value };
-    return { line, ok: false, error: parsed.error };
+    const rawText = r.bytes.toString('utf8');
+    const parsed = parseJsonLine(rawText);
+    if (parsed.ok) {
+      return { line, ok: true, value: parsed.value, rawText, rawBytes: r.bytes.length };
+    }
+    // 坏行同样回原文：编辑要支持「把坏行改好」这一最常见的修复动作。
+    return { line, ok: false, error: parsed.error, rawText, rawBytes: r.bytes.length };
   }
   return { line, ok: false, error: '行不存在' };
 }

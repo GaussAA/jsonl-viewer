@@ -435,3 +435,26 @@ test('editRecord：把坏行改成合法 JSON 后可正常读回', async () => {
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test('readRecord：回传该行磁盘原文与字节长度（编辑初始文本 + 乐观锁依据）', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const file = await makeFile(dir, ['{"a":1}', 'not-json']);
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    const good = await ds.readRecord(0);
+    assert.equal(good.rawText, '{"a":1}');
+    assert.equal(good.rawBytes, 7);
+
+    // 坏行同样要回原文 —— 编辑中最常见的动作就是「把坏行改好」。
+    const bad = await ds.readRecord(1);
+    assert.equal(bad.ok, false);
+    assert.equal(bad.rawText, 'not-json');
+    assert.equal(bad.rawBytes, 8);
+
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
