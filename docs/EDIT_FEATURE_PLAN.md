@@ -99,6 +99,22 @@ M1  只读安全的地基              M2  完整行级编辑               M3  
 
 **每期结束都保持"可发布"状态**：M1 完成后功能上仍是只读，但地基齐备；M2 完成即可日常使用。
 
+### 实施进度（2026-09-22）
+
+**M1 已交付，且范围上探至「最小可用编辑」** —— 用户已可端到端编辑，不再只是地基：
+
+| 环节 | 产出 | 提交 |
+|---|---|---|
+| 写入层 | `src/host/fileWriter.ts`：等长原位覆写 / 变长「Δ>0 倒序、Δ<0 正序」搬移 / sidecar 崩溃备份 / errno 中文翻译 | `144fc4d` |
+| 索引增量 | `LineIndex.applyLineReplace`：O(检查点数)；含「与重建索引扫描结果完全一致」的等价性验证 | `213a2d6` |
+| 编辑链路 | `DataService.editRecord` + `EDIT_RECORD`/`EDIT_RESULT`：写前冲突检测、乐观锁、写后基线同步、`editing` 短路 | `213544a` |
+| 可写 provider | `CustomEditorProvider<JsonlDocument>`（文档模型仍为扩展自有）：脏标记 / 撤销重做 / Ctrl+S / Hot Exit | `de3467c` |
+| 原文回传 | `readRecord` 回 `rawText`/`rawBytes` —— 编辑初始文本必须是磁盘原文，另有乐观锁依据 | `de2f05f` |
+| 编辑 UI | `editLogic.ts` + `editPanel.ts` + 列表右键/详情工具双入口 + `DOCUMENT_RESET` 处理 | `1e08859` |
+
+**M2 剩余**：任意行增删（插入/删除行，需检查点 `line` 与 `offset` 双重平移）、查找替换、多行批量操作。
+**M3 未动**：详情树字段级编辑、会话级编辑历史、harness 手动体验支持。
+
 ---
 
 ## 4. 关键设计
@@ -261,11 +277,19 @@ HostReply.EDIT_RESULT      = 'editResult'    // { line, ok, bytesDelta, costMs, 
 
 ---
 
-## 6. 待决问题（需钦点）
+## 6. 决策记录（原「待决问题」，2026-09-22 已定）
 
-1. **编辑范围**：是否接受"仅行级替换（不增删行）"作为第一版？还是 M2 就要插入/删除行？
-2. **大文件策略**：是否接受"改动点距 EOF 超过阈值时提示代价、由用户确认"？还是要设一个硬性只读上限（如 > 1GB 禁止编辑）？
-3. **写盘时机**：即时写盘（推荐）还是"编辑攒着、Ctrl+S 才写"？（后者在 GB 文件上有最坏体验风险）
-4. **`supportsMultipleEditorsPerDocument`**：确认由 `true` 改为 `false`？（编辑场景下多视图共享撤销栈语义混乱）
-5. **格式化策略**：保存时是否允许 `JSON.stringify` 重排（会改变原行格式与字节长度、放大 `Δ`）？建议**默认保持原样**，格式化做成显式命令。
-6. **撤稿线**：M1 只做地基（功能仍只读）是否可接受？还是希望 M1 就带一个最小可用编辑（仅等长覆写）？
+| # | 问题 | 决策 | 落实位置 |
+|---|---|---|---|
+| 1 | 编辑范围 | 第一版为**行级替换（行数不变）**；增删行留到 M2 | `DataService.editRecord` |
+| 2 | 大文件策略 | **提示代价 + 由用户确认**（按「剩余行数占比」保守估算，超 32MB 即提示）；不设硬性只读上限 | `editLogic.estimateEditCost` / `editCostWarning` |
+| 3 | 写盘时机 | **即时写盘** —— 不会在关闭时批量写出 GB 级数据（延迟写盘在大文件上的真实风险） | provider 的 `saveCustomDocument` 为空实现 |
+| 4 | 多编辑器开关 | `supportsMultipleEditorsPerDocument` 改 **false**（编辑语义下多编辑器共享撤销栈会错乱） | `extension.ts` |
+| 5 | 格式化策略 | **默认保持原样**，格式化做成显式命令（重排会放大变长编辑的搬移成本） | `editPanel` 的「格式化」按钮 |
+| 6 | M1 撤稿线 | M1 直接做到**最小可用编辑**（不止地基） | 本次交付 |
+| 7 | 初始文本来源 | **磁盘原文**（`readRecord.rawText`），绝不用 `value` 重新序列化 | `jsonParser.readRecord` / `openEditForLine` |
+
+### 仍未决（待实机验证后再定）
+
+- **provider 运行时行为**：沙箱无直连外网，`@vscode/test-electron` 集成测试跑不了 → 需本机 F5 验证大文件打开、编辑、`Ctrl+Z`、`File: Revert File`。
+- **大 cost 编辑的取消**：`replaceLine` 已支持 `shouldCancel`（抛 `WriteCancelledError` 并保留 sidecar），但 UI 尚未接线取消按钮 —— 需先确定「取消后半搬移状态如何处理」的产品语义。
