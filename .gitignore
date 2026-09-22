@@ -33,3 +33,5 @@ samples/
 test_out.txt
 # 本地临时产物统一入口（推荐）：调试脚本、命令输出、一次性诊断都放进这里
 .scratch/
+# WorkBuddy 工作区记忆 / 技能数据（本地协作数据，非项目产物，不入库）
+.workbuddy/
