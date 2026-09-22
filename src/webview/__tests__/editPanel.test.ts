@@ -27,12 +27,12 @@ interface SubmitResult {
 function makePanel(
   opts: { result?: SubmitResult; overview?: { totalBytes: number; totalLines: number } } = {}
 ) {
-  const calls: Array<{ line: number; text: string }> = [];
-  const committed: Array<{ line: number; bytesDelta: number; movedBytes: number }> = [];
+  const calls: Array<{ line: number; text: string; mode: string }> = [];
+  const committed: Array<{ line: number; mode: string }> = [];
   const panel = createEditPanel({
     getOverview: () => opts.overview,
-    submit: async (line, text) => {
-      calls.push({ line, text });
+    submit: async (info) => {
+      calls.push({ line: info.line, text: info.text, mode: info.mode });
       return opts.result ?? { ok: true, bytesDelta: 0, movedBytes: 0, costMs: 1 };
     },
     onCommitted: (info) => committed.push(info),
@@ -93,8 +93,8 @@ test('editPanel：提交成功 → 上报 onCommitted 并关闭', async () => {
     q<HTMLButtonElement>(panel.root, '.jlv-edit-primary').click();
     await tick();
 
-    assert.deepEqual(calls, [{ line: 4, text: '{"a":2}' }]);
-    assert.deepEqual(committed, [{ line: 4, bytesDelta: 7, movedBytes: 3 }]);
+    assert.deepEqual(calls, [{ line: 4, text: '{"a":2}', mode: 'replace' }]);
+    assert.deepEqual(committed, [{ line: 4, mode: 'replace' }]);
     assert.equal(panel.isOpen(), false);
   } finally {
     panel.dispose();
@@ -115,6 +115,22 @@ test('editPanel：冲突失败 → 保持打开并给出「重新加载」指引
     const err = q<HTMLElement>(panel.root, '.jlv-edit-error');
     assert.equal(err.hidden, false);
     assert.match(err.textContent ?? '', /重新加载/);
+  } finally {
+    panel.dispose();
+  }
+});
+
+test('editPanel：insert 模式使用插入标题，且提交时携带 mode', async () => {
+  const { panel, calls } = makePanel();
+  try {
+    panel.open(3, '', 'insert');
+    assert.equal(q<HTMLElement>(panel.root, '.jlv-edit-title').textContent, '在第 4 行前插入');
+
+    q<HTMLTextAreaElement>(panel.root, '.jlv-edit-input').value = '{"new":1}';
+    q<HTMLButtonElement>(panel.root, '.jlv-edit-primary').click();
+    await tick();
+
+    assert.deepEqual(calls, [{ line: 3, text: '{"new":1}', mode: 'insert' }]);
   } finally {
     panel.dispose();
   }

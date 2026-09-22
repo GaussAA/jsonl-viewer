@@ -19,6 +19,7 @@ import { createToolbar } from './toolbar.ts';
 import type { ToolbarInfo } from './toolbar.ts';
 import { createDetailTree, type DetailTreeNavHandlers } from './detailTree.ts';
 import { createEditPanel } from './editPanel.ts';
+import { describeEditFailure } from './editLogic.ts';
 import { createColumnLayout, type ColumnLayout } from './columnLayout.ts';
 import { createQueryActions, type QueryActions } from './queryActions.ts';
 import { createPersistence } from './persistence.ts';
@@ -349,6 +350,10 @@ export function main(): void {
     },
     // 右键「编辑第 N 行」：打开编辑浮层（初始文本取磁盘原文）。
     onEditRecord: (line) => void openEditForLine(line),
+    // 右键「在第 N 行前插入」：无需拉原文，直接以空文本打开插入模式的浮层。
+    onInsertRecord: (line) => editPanel.open(line, '', 'insert'),
+    // 右键「删除第 N 行」：先横幅二次确认，再落盘。
+    onDeleteRecord: (line) => deleteRecordAt(line),
     onClearFilter: () => actions.clearFilterForCond(),
     // 截断态「复制该行 JSON」：按需拉完整值（列表缓存不持有超大对象）。
     onRequestRecord: (line) =>
@@ -369,17 +374,29 @@ export function main(): void {
       state.overview
         ? { totalBytes: state.overview.totalBytes, totalLines: state.overview.totalLines }
         : undefined,
-    submit: (line, text) =>
-      bus.request<EditResultPayload>(
-        HostEndpoint.EDIT_RECORD,
-        { line, text, expectedBytes: editExpectedBytes },
-        { timeoutMs: RPC_HEAVY_TIMEOUT_MS }
-      ).promise,
-    onCommitted: ({ line }) => {
-      // 该行的列表缓存已过期：丢弃后重绘卡片；若详情树正显示它，则重新拉取。
-      state.cache.delete(line);
+    submit: (info) =>
+      info.mode === 'insert'
+        ? bus.request<EditResultPayload>(
+            HostEndpoint.INSERT_RECORD,
+            { at: info.line, text: info.text },
+            { timeoutMs: RPC_HEAVY_TIMEOUT_MS }
+          ).promise
+        : bus.request<EditResultPayload>(
+            HostEndpoint.EDIT_RECORD,
+            { line: info.line, text: info.text, expectedBytes: editExpectedBytes },
+            { timeoutMs: RPC_HEAVY_TIMEOUT_MS }
+          ).promise,
+    onCommitted: ({ line, mode }) => {
+      if (mode === 'replace') {
+        // 只有该行内容变了 —— 丢弃这一行的缓存即可。
+        state.cache.delete(line);
+      } else {
+        // 行增删会改变其后每一行的行号 → 整个以行号为键的缓存都失效，必须清空。
+        applyRowCountChange(line, mode);
+      }
       list.refresh();
-      if (state.selectedLine === line) void showDetailForLine(line);
+      if (state.selectedLine !== undefined) void showDetailForLine(state.selectedLine);
+      updateToolbar();
     },
   });
   rootEl.appendChild(editPanel.root);
@@ -405,6 +422,64 @@ export function main(): void {
     } catch (e) {
       banner.show(e instanceof Error ? e.message : String(e), undefined);
     }
+  }
+
+  /**
+   * 行增删成功后的本地状态调整。
+   *
+   * 与替换不同，增删会**改变其后所有行的行号**：以行号为键的列表缓存整体失效，
+   * 选中锚点也必须跟随位移（否则详情树会显示「原来是别的行」的内容）。
+   * 总行数在此本地维护，不必为一次增删再往返一次 getOverview。
+   */
+  function applyRowCountChange(line: number, mode: 'insert' | 'delete'): void {
+    state.cache.clear();
+    if (state.overview) {
+      const totalLines = state.overview.totalLines + (mode === 'insert' ? 1 : -1);
+      state.overview = { ...state.overview, totalLines };
+      list.setTotalRows(Math.max(0, totalLines));
+    }
+    if (mode === 'insert') {
+      // 插入后把选中锚点落到新行上（与「光标停在新行」的编辑器习惯一致）。
+      state.selectedLine = line;
+      list.select(line);
+      return;
+    }
+    if (state.selectedLine === undefined) return;
+    state.selectedLine = state.selectedLine > line ? state.selectedLine - 1 : state.selectedLine;
+    const maxLine = Math.max(0, (state.overview?.totalLines ?? 1) - 1);
+    if (state.selectedLine > maxLine) state.selectedLine = maxLine;
+    list.select(state.selectedLine);
+  }
+
+  /**
+   * 删除某一行（右键入口）。
+   *
+   * webview 里 window.confirm 不可用（沙箱拦截阻塞式对话框），故复用顶部横幅做二次
+   * 确认 —— 删除是不可逆的磁盘写入，必须先问一句。
+   */
+  function deleteRecordAt(line: number): void {
+    banner.show(`确定删除第 ${line + 1} 行？该操作会立即写入磁盘。`, '确认删除', () => {
+      void (async () => {
+        try {
+          const res = await bus.request<EditResultPayload>(
+            HostEndpoint.DELETE_RECORD,
+            { line },
+            { timeoutMs: RPC_HEAVY_TIMEOUT_MS }
+          ).promise;
+          if (!res?.ok) {
+            banner.show(describeEditFailure(res ?? {}), undefined);
+            return;
+          }
+          banner.hide();
+          applyRowCountChange(line, 'delete');
+          list.refresh();
+          updateToolbar();
+          if (state.selectedLine !== undefined) void showDetailForLine(state.selectedLine);
+        } catch (e) {
+          banner.show(e instanceof Error ? e.message : String(e), undefined);
+        }
+      })();
+    });
   }
 
   // 组装两栏：左栏放入列头(toolbar) + 目录列表(分页)；右栏为详情面板；横幅浮层最后挂载。

@@ -42,6 +42,10 @@ export interface ListCallbacks {
   onJumpToSource?(line: number): void;
   /** 可选：编辑该行（右键「编辑第 N 行」打开编辑浮层）。 */
   onEditRecord?(line: number): void;
+  /** 可选：删除该行（右键「删除第 N 行」；**二次确认由调用方负责**）。 */
+  onDeleteRecord?(line: number): void;
+  /** 可选：在本行之前插入一行（右键「在第 N 行前插入」）。 */
+  onInsertRecord?(line: number): void;
   /** 可选：清空过滤条件（空态「清除过滤」按钮）。 */
   onClearFilter?(): void;
   /** 可选：按需拉取某行完整值（截断态「复制该行 JSON」用）。 */
@@ -490,6 +494,19 @@ export class VirtualRecordList {
         items.push({
           label: `编辑第 ${real + 1} 行`,
           run: () => this.cb.onEditRecord?.(real),
+        });
+        items.push({ sep: true });
+      }
+      if (this.cb.onInsertRecord) {
+        items.push({
+          label: `在第 ${real + 1} 行前插入`,
+          run: () => this.cb.onInsertRecord?.(real),
+        });
+      }
+      if (this.cb.onDeleteRecord) {
+        items.push({
+          label: `删除第 ${real + 1} 行`,
+          run: () => this.cb.onDeleteRecord?.(real),
         });
         items.push({ sep: true });
       }

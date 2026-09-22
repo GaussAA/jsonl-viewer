@@ -8,6 +8,9 @@
  *
  * 编辑粒度是**整行**（JSONL 的天然单位）：面板只负责「给一段文本、拿一份结果」，
  * 校验、成本提示、错误文案全部委托给纯逻辑层 `editLogic.ts`（可单测）。
+ *
+ * 两种模式共用同一面板（`mode`）：**替换**既有行、**插入**新行 —— 两者除了标题与
+ * 提交端点不同，交互完全一致，没必要造两套浮层。
  */
 
 import {
@@ -29,11 +32,14 @@ export interface EditPanelSubmitResult {
   costMs?: number;
 }
 
+/** 编辑模式：替换既有行 / 在指定行之前插入新行（决定标题文案与提交走哪个端点）。 */
+export type EditMode = 'replace' | 'insert';
+
 export interface EditPanelDeps {
-  /** 把编辑提交给宿主。 */
-  submit(line: number, text: string): Promise<EditPanelSubmitResult>;
+  /** 把编辑提交给宿主（mode 决定宿主走替换还是插入）。 */
+  submit(info: { line: number; text: string; mode: EditMode }): Promise<EditPanelSubmitResult>;
   /** 提交成功后的回调（刷新列表卡片 / 详情树）。 */
-  onCommitted?(info: { line: number; bytesDelta: number; movedBytes: number }): void;
+  onCommitted?(info: { line: number; mode: EditMode }): void;
   /** 取概览用于成本预估；索引未就绪时返回 undefined。 */
   getOverview?(): { totalBytes: number; totalLines: number } | undefined;
 }
@@ -41,8 +47,13 @@ export interface EditPanelDeps {
 export interface EditPanelController {
   /** 面板根元素（遮罩层），由宿主挂到布局容器。 */
   readonly root: HTMLElement;
-  /** 打开面板编辑第 `line` 行（`initialText` 为该行当前文本）。 */
-  open(line: number, initialText: string): void;
+  /**
+   * 打开面板。
+   * @param line 目标行号；`mode === 'insert'` 时表示「新行将插到它之前」。
+   * @param initialText 编辑框初始文本（替换：磁盘原文；插入：空串）。
+   * @param mode 替换既有行 / 插入新行。
+   */
+  open(line: number, initialText: string, mode?: EditMode): void;
   /** 关闭面板（不提交）。 */
   close(): void;
   isOpen(): boolean;
@@ -51,6 +62,7 @@ export interface EditPanelController {
 
 export function createEditPanel(deps: EditPanelDeps): EditPanelController {
   let currentLine = -1;
+  let currentMode: EditMode = 'replace';
   let submitting = false;
   /** 逻辑上的打开态（与 CSS 过渡无关：关闭动画的 100ms 内也应如实返回 false）。 */
   let opened = false;
@@ -177,13 +189,9 @@ export function createEditPanel(deps: EditPanelDeps): EditPanelController {
     btnCancel.disabled = true;
     btnSave.textContent = '保存中…';
     try {
-      const res = await deps.submit(currentLine, checked.text);
+      const res = await deps.submit({ line: currentLine, text: checked.text, mode: currentMode });
       if (res.ok) {
-        deps.onCommitted?.({
-          line: currentLine,
-          bytesDelta: res.bytesDelta ?? 0,
-          movedBytes: res.movedBytes ?? 0,
-        });
+        deps.onCommitted?.({ line: currentLine, mode: currentMode });
         close();
         return;
       }
@@ -243,10 +251,11 @@ export function createEditPanel(deps: EditPanelDeps): EditPanelController {
 
   const controller: EditPanelController = {
     root: backdrop,
-    open(line: number, initialText: string): void {
+    open(line: number, initialText: string, mode: EditMode = 'replace'): void {
       currentLine = line;
+      currentMode = mode;
       opened = true;
-      title.textContent = `编辑第 ${line + 1} 行`;
+      title.textContent = mode === 'insert' ? `在第 ${line + 1} 行前插入` : `编辑第 ${line + 1} 行`;
       input.value = initialText;
       clearError();
       refreshHint();

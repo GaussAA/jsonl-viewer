@@ -694,6 +694,42 @@ describe('webviewEntry 装配层（集成）', () => {
         '{"a":1}',
         '初始文本必须是磁盘原文'
       );
+
+      // 插入入口：右键「在第 N 行前插入」→ 直接以插入模式打开（插入不需要原文）
+      const menu4 = openMenu(app, 0);
+      menuItem(menu4, /在第 1 行前插入/).click();
+      await sleep(20);
+      const insertPanel = globalThis.document.querySelector<HTMLElement>('.jlv-edit-backdrop');
+      assert.ok(insertPanel, '插入浮层已打开');
+      assert.strictEqual(text(insertPanel!.querySelector('.jlv-edit-title')), '在第 1 行前插入');
+      (insertPanel!.querySelector('.jlv-edit-input') as HTMLTextAreaElement).value = '{"new":1}';
+      Array.from(insertPanel!.querySelectorAll<HTMLButtonElement>('.jlv-edit-btn'))
+        .find((b) => b.textContent === '保存')!
+        .click();
+      await sleep(20);
+      const insReq = lastReq(host, HostEndpoint.INSERT_RECORD);
+      assert.ok(insReq, '已发起插入请求');
+      assert.strictEqual(insReq!.at, 0);
+      assert.strictEqual(insReq!.text, '{"new":1}');
+
+      // 删除入口：右键「删除第 N 行」→ 必须先经横幅二次确认，不得直接落盘
+      const menu5 = openMenu(app, 0);
+      menuItem(menu5, /删除第 1 行/).click();
+      await sleep(20);
+      assert.strictEqual(
+        reqs(host, HostEndpoint.DELETE_RECORD).length,
+        0,
+        '点击删除后必须先确认，不得直接发请求'
+      );
+      const confirmBtn = Array.from(app.querySelectorAll<HTMLButtonElement>('button')).find((b) =>
+        (b.textContent ?? '').includes('确认删除')
+      );
+      assert.ok(confirmBtn, '横幅应出现「确认删除」按钮');
+      confirmBtn!.click();
+      await sleep(20);
+      const delReq = lastReq(host, HostEndpoint.DELETE_RECORD);
+      assert.ok(delReq, '确认后才发起删除请求');
+      assert.strictEqual(delReq!.line, 0);
     });
 
     it('beforeunload 触发清理，重复派发安全', async () => {
