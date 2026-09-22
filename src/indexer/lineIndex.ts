@@ -296,6 +296,79 @@ export class LineIndex implements LineIndexStats {
     });
   }
 
+  /**
+   * 在第 `line` 行**之前**插入一行（该行连同行尾共 `insertedBytes` 字节）。
+   *
+   * 与替换不同，插入会**改变行号**：插入点及其之后的检查点，`line` 与 `offset` 双双平移。
+   * 边界：`line === totalLines` 表示追加到文件末尾（此时无检查点需要平移）。
+   */
+  applyLineInsert(line: number, insertedBytes: number): LineIndex {
+    if (!Number.isInteger(line) || line < 0 || line > this.totalLines) {
+      throw new RangeError(`insert position out of range: ${line} (totalLines=${this.totalLines})`);
+    }
+    if (!Number.isInteger(insertedBytes) || insertedBytes < 0) {
+      throw new TypeError(`insertedBytes must be a non-negative integer, got ${insertedBytes}`);
+    }
+
+    // 空文件首次插入：原本没有任何检查点可平移，必须补上第 0 行的锚点，
+    // 否则 scan 找不到顺读起点（会访问 checkpoints[0] === undefined）。
+    if (this.totalLines === 0) {
+      return new LineIndex([{ line: 0, offset: 0 }], insertedBytes, 1, this.interval, {
+        buildMs: this.buildMs,
+        eof: this.eof,
+      });
+    }
+
+    const next = this.checkpoints.map((cp) =>
+      cp.line >= line ? { line: cp.line + 1, offset: cp.offset + insertedBytes } : cp
+    );
+    return new LineIndex(
+      next,
+      this.totalBytes + insertedBytes,
+      this.totalLines + 1,
+      this.interval,
+      { buildMs: this.buildMs, eof: this.eof }
+    );
+  }
+
+  /**
+   * 删除第 `line` 行（该行连同行尾共 `removedBytes` 字节）。
+   *
+   * 检查点处理有两处不显眼但关键的地方：
+   *   1. `cp.line === line` 的检查点，其 `offset` 恰好就是「删后接替该行的下一行」的起始
+   *      偏移 —— 故**无需改动**（仅当删的是最后一行、无人接替时才丢弃）；
+   *   2. `cp.line > line` 的检查点需 `line-1` 且 `offset-removedBytes`。
+   */
+  applyLineDelete(line: number, removedBytes: number): LineIndex {
+    if (!Number.isInteger(line) || line < 0 || line >= this.totalLines) {
+      throw new RangeError(`line out of range: ${line} (totalLines=${this.totalLines})`);
+    }
+    if (!Number.isInteger(removedBytes) || removedBytes < 0) {
+      throw new TypeError(`removedBytes must be a non-negative integer, got ${removedBytes}`);
+    }
+
+    const next: Checkpoint[] = [];
+    const hasSuccessor = line < this.totalLines - 1;
+    for (const cp of this.checkpoints) {
+      if (cp.line === line) {
+        if (hasSuccessor) next.push(cp); // 接替行的起始偏移与原行相同
+        continue; // 删的是最后一行 → 该锚点指向已不存在的内容，丢弃
+      }
+      if (cp.line > line) {
+        next.push({ line: cp.line - 1, offset: cp.offset - removedBytes });
+        continue;
+      }
+      next.push(cp);
+    }
+    return new LineIndex(
+      next,
+      Math.max(0, this.totalBytes - removedBytes),
+      this.totalLines - 1,
+      this.interval,
+      { buildMs: this.buildMs, eof: this.eof }
+    );
+  }
+
   toStats(): LineIndexStats {
     return {
       totalBytes: this.totalBytes,

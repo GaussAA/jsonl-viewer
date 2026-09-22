@@ -283,3 +283,92 @@ test('applyLineReplace：变长/变短/首行/末行四类编辑的扫描结果�
     );
   }
 });
+
+/* ------------- applyLineInsert / applyLineDelete：增删行 ------------- */
+
+/** 取某行的真实字节区间（含行尾）。 */
+async function rangeOf(li: LineIndex, reader: ByteReader, line: number) {
+  const r = await li.resolveRange(line, reader);
+  assert.ok(r, `行 ${line} 应可定位`);
+  return { start: (r as { start: number }).start, end: (r as { end: number }).end };
+}
+
+test('applyLineInsert：插入后行号与偏移双双平移，且与重建索引一致', async () => {
+  const base = makeLines(20);
+  const before = base.join('\n') + '\n';
+  const li = await buildFromString(before, 5, { checkpointInterval: 4 });
+
+  const at = 7;
+  const inserted = `INSERTED-${'q'.repeat(50)}`;
+  const insertedBytes = Buffer.byteLength(inserted) + 1; // 含行尾
+  const afterLines = [...base.slice(0, at), inserted, ...base.slice(at)];
+  const after = afterLines.join('\n') + '\n';
+
+  const incremental = li.applyLineInsert(at, insertedBytes);
+  const rebuilt = await buildFromString(after, 5, { checkpointInterval: 4 });
+  const reader = new MemoryReader(Buffer.from(after));
+
+  assert.equal(incremental.totalLines, afterLines.length);
+  assert.equal(incremental.totalBytes, Buffer.byteLength(after));
+  assert.deepEqual(await scanAll(incremental, reader), afterLines);
+  assert.deepEqual(
+    await scanAll(incremental, reader),
+    await scanAll(rebuilt, reader),
+    '与重建索引完全一致'
+  );
+});
+
+test('applyLineDelete：删首行 / 中间行 / 末行均与重建索引一致（末行检查点不得越界）', async () => {
+  for (const target of [0, 9, 19]) {
+    const base = makeLines(20);
+    const before = base.join('\n') + '\n';
+    const li = await buildFromString(before, 5, { checkpointInterval: 4 });
+    const readerBefore = new MemoryReader(Buffer.from(before));
+    const r = await rangeOf(li, readerBefore, target);
+    const removedBytes = r.end - r.start;
+
+    const afterLines = [...base.slice(0, target), ...base.slice(target + 1)];
+    const after = afterLines.join('\n') + '\n';
+
+    const incremental = li.applyLineDelete(target, removedBytes);
+    const rebuilt = await buildFromString(after, 5, { checkpointInterval: 4 });
+    const reader = new MemoryReader(Buffer.from(after));
+
+    assert.equal(incremental.totalLines, 19, `删行 ${target}：行数`);
+    assert.equal(incremental.totalBytes, Buffer.byteLength(after), `删行 ${target}：字节数`);
+    assert.deepEqual(await scanAll(incremental, reader), afterLines, `删行 ${target}：内容`);
+    assert.deepEqual(
+      await scanAll(incremental, reader),
+      await scanAll(rebuilt, reader),
+      `删行 ${target}：与重建索引一致`
+    );
+  }
+});
+
+test('applyLineInsert：空文件首次插入会补上锚点（否则 scan 找不到起点）', async () => {
+  const li = await buildFromString('', 5);
+  assert.equal(li.totalLines, 0);
+  assert.equal(li.checkpoints.length, 0);
+
+  const text = '{"a":1}';
+  const bytes = Buffer.byteLength(text) + 1;
+  const next = li.applyLineInsert(0, bytes);
+
+  assert.equal(next.totalLines, 1);
+  assert.equal(next.totalBytes, bytes);
+  const reader = new MemoryReader(Buffer.from(text + '\n'));
+  assert.deepEqual(await scanAll(next, reader), [text]);
+});
+
+test('applyLineInsert / applyLineDelete：越界与非整数参数抛错', async () => {
+  const li = await buildFromString('a\nb\nc\n');
+  assert.throws(() => li.applyLineInsert(4, 1), RangeError, 'totalLines=3，插入位 4 越界');
+  assert.throws(() => li.applyLineInsert(-1, 1), RangeError);
+  assert.throws(() => li.applyLineInsert(0, -1), TypeError);
+  assert.throws(() => li.applyLineInsert(0, 1.5), TypeError);
+  assert.throws(() => li.applyLineDelete(3, 1), RangeError, 'totalLines=3，行 3 越界');
+  assert.throws(() => li.applyLineDelete(-1, 1), RangeError);
+  assert.throws(() => li.applyLineDelete(0, -1), TypeError);
+  // 合法边界：插入到末尾（line === totalLines）
+  assert.equal(li.applyLineInsert(3, 2).totalLines, 4);
+});
