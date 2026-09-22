@@ -112,8 +112,20 @@ M1  只读安全的地基              M2  完整行级编辑               M3  
 | 原文回传 | `readRecord` 回 `rawText`/`rawBytes` —— 编辑初始文本必须是磁盘原文，另有乐观锁依据 | `de2f05f` |
 | 编辑 UI | `editLogic.ts` + `editPanel.ts` + 列表右键/详情工具双入口 + `DOCUMENT_RESET` 处理 | `1e08859` |
 
-**M2 剩余**：任意行增删（插入/删除行，需检查点 `line` 与 `offset` 双重平移）、查找替换、多行批量操作。
-**M3 未动**：详情树字段级编辑、会话级编辑历史、harness 手动体验支持。
+**M2 部分交付（2026-09-22）：任意行增删已落地**
+
+关键简化：插入与删除本质都是「用一段字节替换一个区间」——**插入是空区间、删除是空 replacement**。故把 `replaceLine` 泛化为写入层唯一原语 `replaceRange`，三者共用一套搬移/备份/错误翻译（否则会把「Δ>0 倒序、Δ<0 正序」这种易错细节复制三份）。
+
+| 环节 | 产出 | 提交 |
+|---|---|---|
+| 写入原语 | `replaceRange(path, range, replacement)`；`replaceLine` 退化为薄封装 | `1c432ab` |
+| 索引增量 | `applyLineInsert` / `applyLineDelete`（含空文件锚点、删末行检查点两个边界） | `4d9278f` |
+| host 链路 | `DataService.deleteRecord` / `insertRecord` + `INSERT_RECORD`/`DELETE_RECORD` 端点；编辑事件加 `kind` 供撤销分派 | `7eb755e` |
+| webview | 右键「在第 N 行前插入」/「删除第 N 行」+ 删除二次确认（复用横幅，webview 里 `confirm` 不可用） | `bac4afc` |
+| harness | 数据源改可变行数组，增删可真实验证 | `d7873ee` |
+
+**M2 剩余**：查找替换、多行批量操作。
+**M3 未动**：详情树字段级编辑、会话级编辑历史。
 
 ---
 
