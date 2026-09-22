@@ -50,6 +50,10 @@
  * M2（增删行）：数据源是**真正的可变行数组**，故 insertRecord / deleteRecord 会实际
  * 改变行数与后续行号，右键「在第 N 行前插入」「删除第 N 行」都能验完整链路。
  *
+ * M2（查找替换）：工具栏搜索框右侧的互换图标展开「替换为…」输入行，点「全部替换」会
+ * 先弹顶部横幅二次确认（webview 里 window.confirm 不可用），确认后本 harness 按真实宿主
+ * 语义逐行改写：字面量匹配、非重叠、替换后 JSON 非法即跳过该行并在结果文案中如实报出。
+ *
  * 注：totalBytes 乘了 BYTES_SCALE（默认 2000），以便在小样例上也能验证「大 cost
  * 编辑」的提示；真实宿主的 totalBytes 是磁盘真实字节数。
  * ============================================================ */
@@ -366,6 +370,101 @@ function handleHostRequest(msg) {
         movedBytes: 0,
         costMs: 1,
         beforeText: removed,
+      });
+      return;
+    }
+    case 'replaceText': {
+      // 与真实宿主语义一致：字面量匹配（绝不当正则）、非重叠、逐行 JSON 校验后跳过非法行。
+      const query = String(msg.query ?? '');
+      const replacement = String(msg.replacement ?? '');
+      const ci = msg.caseInsensitive !== false;
+      const lines = ensureLines();
+
+      const fail = (error) =>
+        reply('replaceResult', msg.requestId, {
+          ok: false,
+          replaced: 0,
+          skippedInvalid: 0,
+          unchanged: 0,
+          total: 0,
+          bytesDelta: 0,
+          costMs: 0,
+          undoable: false,
+          error,
+        });
+      if (!query) {
+        fail('查找内容不能为空');
+        return;
+      }
+
+      // 只折 ASCII A-Z 且长度严格不变 —— 否则用折叠串算出的索引去原串切片会错位。
+      const fold = (s) => s.replace(/[A-Z]/g, (c) => c.toLowerCase());
+      const needle = ci ? fold(query) : query;
+
+      const changes = [];
+      let skippedInvalid = 0;
+      let unchanged = 0;
+      for (let line = 0; line < lines.length; line++) {
+        const raw = lines[line];
+        const hay = ci ? fold(raw) : raw;
+        if (!hay.includes(needle)) continue;
+
+        let from = 0;
+        let out = '';
+        let count = 0;
+        let at;
+        while ((at = hay.indexOf(needle, from)) >= 0) {
+          out += raw.slice(from, at) + replacement; // 用原串切片，保留未命中处的大小写
+          from = at + needle.length;
+          count++;
+        }
+        if (count === 0) continue;
+        out += raw.slice(from);
+
+        if (out === raw) {
+          unchanged++;
+          continue;
+        }
+        try {
+          JSON.parse(out);
+        } catch {
+          skippedInvalid++;
+          continue;
+        }
+        changes.push({ line, before: raw, after: out });
+      }
+
+      const total = changes.length + skippedInvalid + unchanged;
+      if (changes.length === 0) {
+        reply('replaceResult', msg.requestId, {
+          ok: true,
+          replaced: 0,
+          skippedInvalid,
+          unchanged,
+          total,
+          bytesDelta: 0,
+          costMs: 0,
+          undoable: false,
+        });
+        return;
+      }
+
+      let delta = 0;
+      for (const c of changes) {
+        delta += byteLen(c.after) - byteLen(c.before);
+        lines[c.line] = c.after;
+      }
+      const undoable = changes.length <= 2000;
+      reply('replaceResult', msg.requestId, {
+        ok: true,
+        replaced: changes.length,
+        skippedInvalid,
+        unchanged,
+        total,
+        bytesDelta: delta * BYTES_SCALE,
+        costMs: 2,
+        changes: undoable ? changes : undefined,
+        undoable,
       });
       return;
     }
