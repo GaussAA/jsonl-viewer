@@ -47,6 +47,9 @@
  *   mockRevert()  放弃改动并从「磁盘」重载 → 触发 documentReset
  *   mockStale()   模拟外部修改文件       → 触发 fileStale（顶部「重新加载」横幅）
  *
+ * M2（增删行）：数据源是**真正的可变行数组**，故 insertRecord / deleteRecord 会实际
+ * 改变行数与后续行号，右键「在第 N 行前插入」「删除第 N 行」都能验完整链路。
+ *
  * 注：totalBytes 乘了 BYTES_SCALE（默认 2000），以便在小样例上也能验证「大 cost
  * 编辑」的提示；真实宿主的 totalBytes 是磁盘真实字节数。
  * ============================================================ */
@@ -86,39 +89,49 @@ function sampleValue(line) {
 
 /* ---------------- 宿主实现 ---------------- */
 const store = new Map(); // persistState 模拟（按 key）
-const allLines = Array.from({ length: TOTAL_LINES }, (_, i) => i);
 
 /** 坏行的**原文**（非法 JSON）：用于演示红标，以及「把坏行改好」这一最常见的编辑动作。 */
 const BAD_RAW = '{"broken": ';
 
-/** 被编辑过的行：line -> 该行现在的原文（未编辑的行由 sampleValue 派生）。 */
-const editedText = new Map();
+/**
+ * 可变行数组 —— 编辑 / 插入 / 删除都直接作用于它（惰性初始化）。
+ * 用数组而非「下标 → 文本」的稀疏表，是因为增删会改变后续行号，稀疏表表达不了。
+ */
+let lines = null;
 
 /** 演示用字节放大系数（见文件头说明）。 */
 const BYTES_SCALE = 2000;
-let cachedTotalBytes = null;
 
 function byteLen(s) {
   return new TextEncoder().encode(s).length;
 }
 
-/** 取某行的**磁盘原文**：编辑后是编辑内容，否则由样例对象序列化而来。 */
-function rawTextOf(line) {
-  if (!Number.isInteger(line) || line < 0 || line >= TOTAL_LINES) return '';
-  const edited = editedText.get(line);
-  if (edited !== undefined) return edited;
-  if ((line + 1) % BAD_LINE === 0) return BAD_RAW;
-  return JSON.stringify(sampleValue(line));
+/** 惰性初始化：坏行用非法 JSON 原文（演示红标与「把坏行改好」）。 */
+function ensureLines() {
+  if (lines) return lines;
+  lines = [];
+  for (let i = 0; i < TOTAL_LINES; i++) {
+    lines.push((i + 1) % BAD_LINE === 0 ? BAD_RAW : JSON.stringify(sampleValue(i)));
+  }
+  return lines;
 }
 
-/** 当前总字节数（含换行）；编辑后按增量维护，重载后重算。 */
+/** 取某行的**磁盘原文**。 */
+function rawTextOf(line) {
+  const arr = ensureLines();
+  return Number.isInteger(line) && line >= 0 && line < arr.length ? arr[line] : '';
+}
+
+/** 当前总行数（随增删变化）。 */
+function totalLinesNow() {
+  return ensureLines().length;
+}
+
+/** 当前总字节数（含换行）。 */
 function totalBytesNow() {
-  if (cachedTotalBytes === null) {
-    let n = 0;
-    for (let i = 0; i < TOTAL_LINES; i++) n += byteLen(rawTextOf(i)) + 1;
-    cachedTotalBytes = n * BYTES_SCALE;
-  }
-  return cachedTotalBytes;
+  let n = 0;
+  for (const s of ensureLines()) n += byteLen(s) + 1;
+  return n * BYTES_SCALE;
 }
 
 function recordFor(line) {
@@ -131,8 +144,13 @@ function recordFor(line) {
   }
 }
 
-function stringifyValue(v) {
-  try { return JSON.stringify(v); } catch { return String(v); }
+/** 取某行某字段的值（解析失败返回 undefined）。 */
+function parseFieldOf(line, field) {
+  try {
+    return JSON.parse(rawTextOf(line))[field];
+  } catch {
+    return undefined;
+  }
 }
 
 function handleHostRequest(msg) {
@@ -144,11 +162,11 @@ function handleHostRequest(msg) {
       // init 主动推送
       window.postMessage({
         type: 'init',
-        payload: { uri: 'mock://samples.jsonl', totalLines: TOTAL_LINES, totalBytes: totalBytesNow(), buildMs: 48, eof: true },
+        payload: { uri: 'mock://samples.jsonl', totalLines: totalLinesNow(), totalBytes: totalBytesNow(), buildMs: 48, eof: true },
       }, '*');
       return;
     case 'getOverview':
-      reply('overview', msg.requestId, { uri: 'mock://samples.jsonl', totalLines: TOTAL_LINES, totalBytes: totalBytesNow(), buildMs: 48, eof: true });
+      reply('overview', msg.requestId, { uri: 'mock://samples.jsonl', totalLines: totalLinesNow(), totalBytes: totalBytesNow(), buildMs: 48, eof: true });
       return;
     case 'getSampleFields': {
       const fields = ['id', 'user', 'status', 'amount', 'category', 'score', 'created', 'description', 'meta', 'tags']
@@ -161,12 +179,17 @@ function handleHostRequest(msg) {
       return;
     }
     case 'readRecords': {
+      const total = totalLinesNow();
       const items = [];
       for (let n = 0; n < msg.count; n++) {
         const line = msg.startLine + n;
-        if (line >= 0 && line < TOTAL_LINES) items.push(recordFor(line));
+        if (line >= 0 && line < total) items.push(recordFor(line));
       }
-      reply('records', msg.requestId, { startLine: msg.startLine, items, hasMore: msg.startLine + msg.count < TOTAL_LINES });
+      reply('records', msg.requestId, {
+        startLine: msg.startLine,
+        items,
+        hasMore: msg.startLine + msg.count < total,
+      });
       return;
     }
     case 'readRecord': {
@@ -184,11 +207,11 @@ function handleHostRequest(msg) {
     }
     case 'search': {
       const q = String(msg.query || '').toLowerCase();
+      const total = totalLinesNow();
       const matches = [];
-      for (const line of allLines) {
+      for (let line = 0; line < total; line++) {
         if (line % 2 === 0) continue; // 模拟性能：仅奇数行参与匹配
-        const text = stringifyValue(sampleValue(line)).toLowerCase();
-        if (text.includes(q)) matches.push(line);
+        if (rawTextOf(line).toLowerCase().includes(q)) matches.push(line);
         if (matches.length >= 200) break;
       }
       reply('searchResults', msg.requestId, { matches, total: matches.length, truncated: false });
@@ -199,8 +222,9 @@ function handleHostRequest(msg) {
       const field = msg.field;
       const value = String(msg.value ?? '');
       const matches = [];
-      for (const line of allLines) {
-        const v = sampleValue(line)[field];
+      const total = totalLinesNow();
+      for (let line = 0; line < total; line++) {
+        const v = parseFieldOf(line, field);
         let hit = false;
         if (op === 'eq') hit = String(v) === value;
         else if (op === 'contains') hit = String(v).toLowerCase().includes(value.toLowerCase());
@@ -212,9 +236,19 @@ function handleHostRequest(msg) {
       reply('filterResults', msg.requestId, { matches: matches.length ? matches : [], total: matches.length, truncated: false });
       return;
     }
-    case 'getErrorLines':
-      reply('errorLines', msg.requestId, { lines: allLines.filter((l) => (l + 1) % BAD_LINE === 0) });
+    case 'getErrorLines': {
+      const bad = [];
+      const total = totalLinesNow();
+      for (let line = 0; line < total; line++) {
+        try {
+          JSON.parse(rawTextOf(line));
+        } catch {
+          bad.push(line);
+        }
+      }
+      reply('errorLines', msg.requestId, { lines: bad });
       return;
+    }
     case 'jumpToSource':
       reply('result', msg.requestId, { jumped: true });
       return;
@@ -261,13 +295,11 @@ function handleHostRequest(msg) {
         return;
       }
 
-      editedText.set(line, text);
-      const delta = (byteLen(text) - beforeBytes) * BYTES_SCALE;
-      if (cachedTotalBytes !== null) cachedTotalBytes += delta;
+      ensureLines()[line] = text;
       reply('editResult', msg.requestId, {
         ok: true,
         line,
-        bytesDelta: delta,
+        bytesDelta: (byteLen(text) - beforeBytes) * BYTES_SCALE,
         inPlace: byteLen(text) === beforeBytes,
         movedBytes: 0,
         costMs: 1,
@@ -275,9 +307,70 @@ function handleHostRequest(msg) {
       });
       return;
     }
+    case 'insertRecord': {
+      const arr = ensureLines();
+      const at = msg.at;
+      const text = String(msg.text ?? '');
+      const fail = (extra) =>
+        reply('editResult', msg.requestId, {
+          ok: false,
+          line: at,
+          bytesDelta: 0,
+          inPlace: false,
+          movedBytes: 0,
+          costMs: 0,
+          ...extra,
+        });
+      if (!Number.isInteger(at) || at < 0 || at > arr.length) {
+        fail({ error: `无效插入位置：${at}` });
+        return;
+      }
+      try {
+        JSON.parse(text);
+      } catch (e) {
+        fail({ invalid: true, error: `JSON 校验未通过：${e && e.message ? e.message : String(e)}` });
+        return;
+      }
+      arr.splice(at, 0, text);
+      reply('editResult', msg.requestId, {
+        ok: true,
+        line: at,
+        bytesDelta: (byteLen(text) + 1) * BYTES_SCALE,
+        inPlace: false,
+        movedBytes: 0,
+        costMs: 1,
+      });
+      return;
+    }
+    case 'deleteRecord': {
+      const arr = ensureLines();
+      const line = msg.line;
+      if (!Number.isInteger(line) || line < 0 || line >= arr.length) {
+        reply('editResult', msg.requestId, {
+          ok: false,
+          line,
+          bytesDelta: 0,
+          inPlace: false,
+          movedBytes: 0,
+          costMs: 0,
+          error: `无效行号：${line}`,
+        });
+        return;
+      }
+      const removed = arr.splice(line, 1)[0];
+      reply('editResult', msg.requestId, {
+        ok: true,
+        line,
+        bytesDelta: -(byteLen(removed) + 1) * BYTES_SCALE,
+        inPlace: false,
+        movedBytes: 0,
+        costMs: 1,
+        beforeText: removed,
+      });
+      return;
+    }
     case 'fileReload':
-      cachedTotalBytes = null; // 模拟真正从磁盘重建索引后重新统计
-      reply('overview', msg.requestId, { uri: 'mock://samples.jsonl', totalLines: TOTAL_LINES, totalBytes: totalBytesNow(), buildMs: 12, eof: true });
+      reply('overview', msg.requestId, { uri: 'mock://samples.jsonl', totalLines: totalLinesNow(), totalBytes: totalBytesNow(), buildMs: 12, eof: true });
       return;
     case 'cancel':
       return;
@@ -290,8 +383,7 @@ function handleHostRequest(msg) {
 
 /** 放弃所有改动并从「磁盘」重载 → 触发 documentReset。 */
 window.mockRevert = () => {
-  editedText.clear();
-  cachedTotalBytes = null;
+  lines = null; // 丢弃所有改动，下次访问时按样例重新生成
   window.postMessage(
     { type: 'documentReset', payload: { message: '已从磁盘重新加载（harness 模拟）。' } },
     '*'
