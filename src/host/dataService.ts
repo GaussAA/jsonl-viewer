@@ -18,6 +18,7 @@ import { LineIndex } from '../indexer/lineIndex.ts';
 import type { ByteReader, ReadRecordOpts } from '../parser/jsonParser.ts';
 import { openFileReader, parseJsonLine, readRecord as readRecordAt } from '../parser/jsonParser.ts';
 import { inferFields } from '../infer/inferFields.ts';
+import { detectLineEnding, replaceLine } from './fileWriter.ts';
 import type { FieldCondition } from '../core/query.ts';
 import type { FilterLinesResult, SearchLinesResult } from './searchEngine.ts';
 import {
@@ -29,6 +30,7 @@ import {
 import { buildIndexWithFallback, type IndexHost } from './indexHost.ts';
 import { buildRecordsPayload } from '../protocol/rpc.ts';
 import type {
+  EditResultPayload,
   OverviewPayload,
   RecordsPayload,
   RecordsPayloadItem,
@@ -81,6 +83,11 @@ export class DataService {
    * （构建完成检测到代际变化即丢弃结果，不写回成员，防止 fd 泄漏与索引复活）。
    */
   private generation = 0;
+  /**
+   * 编辑进行中标志。期间 `checkStale` 不判定 —— 文件正被本进程改写、基线随后同步，
+   * 此刻判定只会产生「自己改自己」的误报横幅。
+   */
+  private editing = false;
 
   private readonly uri: string;
   private readonly path: string;
@@ -156,6 +163,8 @@ export class DataService {
    * 幂等：多次调用返回同一基线下的「当前是否已走样」判断。
    */
   async checkStale(): Promise<StaleCheckResult> {
+    // 编辑进行中：不判定（见 editing 字段说明）。
+    if (this.editing) return null;
     if (!this.snapshot) return null;
     const cur = await this.currentSnapshot();
     if (!cur) {
@@ -252,6 +261,108 @@ export class DataService {
     const r = await readRecordAt(line, li, reader, this.opts.readLine);
     if (!r.ok) this.knownBadLines.add(line);
     return { value: r.value, error: r.error, ok: r.ok };
+  }
+
+  /** 编辑失败的统一回执（避免多处重复填充字段）。 */
+  private static editFailure(
+    line: number,
+    error: string,
+    extra?: Partial<EditResultPayload>
+  ): EditResultPayload {
+    return {
+      ok: false,
+      line,
+      bytesDelta: 0,
+      inPlace: false,
+      movedBytes: 0,
+      costMs: 0,
+      error,
+      ...extra,
+    };
+  }
+
+  /**
+   * 就地替换第 `line` 行（行数不变；行尾按磁盘原样保留，不擅自规范化）。
+   *
+   * 安全与一致性要点（**顺序即正确性**）：
+   *   1. **写前冲突检测**：stat 与索引基线比对（size/mtime）。不一致说明文件已被外部
+   *      改动，拒绝写入并返回 conflict —— 避免基于过期视图覆写他人改动；
+   *   2. **乐观锁**：`expectedBytes` 非空时须与磁盘上该行内容字节长度一致；
+   *   3. **JSON 校验**：非法 JSON 默认拒绝（保持文件语义），返回 invalid；
+   *   4. **写盘**：委托 `replaceLine`（等长原位覆写 / 变长尾部搬移）；
+   *   5. **索引与基线同步**：写盘成功后先换上新索引，再立刻刷新基线快照。二者若不同步，
+   *      5s 轮询的 `checkStale` 会把「自写」误判为外部变更并弹「重新加载」横幅。
+   */
+  async editRecord(line: number, text: string, expectedBytes?: number): Promise<EditResultPayload> {
+    const li = await this.ensureIndex();
+    const reader = this.reader!;
+
+    if (!Number.isInteger(line) || line < 0 || line >= li.totalLines) {
+      return DataService.editFailure(line, `无效行号：${line}`);
+    }
+
+    // ① 写前冲突检测
+    const before = await this.currentSnapshot();
+    if (!before) return DataService.editFailure(line, '文件不存在或无法访问', { conflict: true });
+    if (
+      this.snapshot &&
+      (before.size !== this.snapshot.size || before.mtimeMs !== this.snapshot.mtimeMs)
+    ) {
+      return DataService.editFailure(line, '文件已被外部修改，请先重新加载再编辑。', {
+        conflict: true,
+      });
+    }
+
+    // ② 定位该行区间与旧内容长度
+    let range: { start: number; end: number } | undefined;
+    let oldContentBytes = 0;
+    for await (const r of li.scan(reader, line, line + 1)) {
+      if (r.error) return DataService.editFailure(line, `该行过大，暂不支持编辑：${r.error}`);
+      range = { start: r.start, end: r.end };
+      oldContentBytes = r.bytes.length;
+      break;
+    }
+    if (!range) return DataService.editFailure(line, `行不存在：${line}`);
+
+    // ③ 乐观锁
+    if (expectedBytes != null && expectedBytes !== oldContentBytes) {
+      return DataService.editFailure(line, '该行内容已变化（与编辑前视图不一致），请重新加载。', {
+        conflict: true,
+      });
+    }
+
+    // ④ JSON 校验
+    const parsed = parseJsonLine(text);
+    if (!parsed.ok) {
+      return DataService.editFailure(line, `JSON 校验未通过：${parsed.error}`, { invalid: true });
+    }
+
+    // ⑤⑥ 写盘 + 同步索引与基线
+    this.editing = true;
+    try {
+      const res = await replaceLine(
+        this.path,
+        range,
+        Buffer.from(text, 'utf8'),
+        detectLineEnding(range, oldContentBytes)
+      );
+      this.index = li.applyLineReplace(line, res.bytesDelta);
+      const after = await this.currentSnapshot();
+      if (after) this.snapshot = after;
+      this.knownBadLines.delete(line);
+      return {
+        ok: true,
+        line,
+        bytesDelta: res.bytesDelta,
+        inPlace: res.inPlace,
+        movedBytes: res.movedBytes,
+        costMs: Math.round(res.costMs * 100) / 100,
+      };
+    } catch (e) {
+      return DataService.editFailure(line, e instanceof Error ? e.message : String(e));
+    } finally {
+      this.editing = false;
+    }
   }
 
   /** 抽样前 N 行推断字段（只扫前 sampleLines/count 行，绝不全文件）。 */

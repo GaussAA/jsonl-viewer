@@ -358,6 +358,15 @@ function registerHostHandlers(deps: HostHandlerDeps): vscode.Disposable {
             // 文件变更后 webview 点「重新加载」→ 重建索引并返回新概览。
             [HostEndpoint.RELOAD]: async (req) =>
               okReply(HostReply.OVERVIEW, req.requestId, await data.reload()),
+            // 就地替换某一行（编辑能力）。业务失败（冲突 / JSON 校验不过 / 无权限）同样
+            // 走 EDIT_RESULT 回执，便于前端结构化提示；只有宿主内部异常才由
+            // dispatchMessage 兜底成 ERROR 回执。
+            [HostEndpoint.EDIT_RECORD]: async (req) =>
+              okReply(
+                HostReply.EDIT_RESULT,
+                req.requestId,
+                await data.editRecord(req.line, req.text, req.expectedBytes)
+              ),
           })
         ).response;
       } catch (e) {

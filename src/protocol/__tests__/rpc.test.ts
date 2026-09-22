@@ -47,6 +47,15 @@ const baseHandlers: HostHandlerMap = {
       buildMs: 0,
       eof: true,
     }),
+  [HostEndpoint.EDIT_RECORD]: (r) =>
+    okReply(HostReply.EDIT_RESULT, r.requestId, {
+      line: r.line,
+      ok: true,
+      bytesDelta: 0,
+      inPlace: true,
+      movedBytes: 0,
+      costMs: 0,
+    }),
   [HostEndpoint.CANCEL]: () => undefined,
 };
 

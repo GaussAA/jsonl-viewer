@@ -9,7 +9,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createWriteStream } from 'node:fs';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DataService } from '../dataService.ts';
@@ -271,6 +271,164 @@ test('checkStale：文件被删除 → changed=true 且 deleted=true（索引失
       assert.equal(res.deleted, true, '标记为已删除');
       assert.match(res.message, /删除/);
     }
+
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+/* ------------------------- editRecord：就地行替换 ------------------------- */
+
+test('editRecord：等长编辑走原位覆写（零搬移）且磁盘内容正确', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const file = await makeFile(dir, ['{"id":1}', '{"id":2}', '{"id":3}']);
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    const res = await ds.editRecord(1, '{"id":9}'); // 与 {"id":2} 等长
+
+    assert.equal(res.ok, true);
+    assert.equal(res.inPlace, true);
+    assert.equal(res.bytesDelta, 0);
+    assert.equal(res.movedBytes, 0);
+    assert.equal(await readFile(file, 'utf8'), '{"id":1}\n{"id":9}\n{"id":3}\n');
+
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('editRecord：变长编辑搬移尾部并同步索引，编辑行与其后各行均可正确读回', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const file = await makeFile(dir, ['{"id":1}', '{"id":2}', '{"id":3}']);
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    const next = '{"id":2,"note":"a much longer payload"}';
+    const res = await ds.editRecord(1, next);
+
+    assert.equal(res.ok, true);
+    assert.equal(res.inPlace, false);
+    assert.equal(res.bytesDelta, Buffer.byteLength(next) - Buffer.byteLength('{"id":2}'));
+    assert.equal(res.movedBytes, Buffer.byteLength('{"id":3}\n'), '仅其后第 3 行被搬移');
+    assert.equal(await readFile(file, 'utf8'), `{"id":1}\n${next}\n{"id":3}\n`);
+
+    // 索引已增量同步：三行都能按新偏移读回
+    assert.deepEqual((await ds.readRecord(0)).value, { id: 1 });
+    assert.deepEqual((await ds.readRecord(1)).value, { id: 2, note: 'a much longer payload' });
+    assert.deepEqual((await ds.readRecord(2)).value, { id: 3 });
+
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('editRecord：写后同步基线 —— checkStale 不把「自写」误判为外部变更', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const file = await makeFile(dir, ['{"a":1}', '{"b":2}']);
+    const ds = makeService(file);
+    await ds.getOverview();
+    assert.equal((await ds.checkStale())?.changed, false, '前置：无变更');
+
+    const res = await ds.editRecord(0, '{"a":111111}');
+    assert.equal(res.ok, true);
+
+    const stale = await ds.checkStale();
+    assert.equal(stale?.changed, false, '自写后不得报告外部变更');
+
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('editRecord：文件被外部修改或乐观锁不符 → 拒绝并保持文件原样', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const file = await makeFile(dir, ['{"a":1}', '{"b":2}']);
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    // 外部追加一行（size 变化）
+    const external = '{"a":1}\n{"b":2}\n{"c":3}\n';
+    await writeFile(file, external);
+
+    const conflict = await ds.editRecord(0, '{"a":9}');
+    assert.equal(conflict.ok, false);
+    assert.equal(conflict.conflict, true);
+    assert.match(conflict.error ?? '', /外部修改/);
+    assert.equal(await readFile(file, 'utf8'), external, '冲突时绝不能写盘');
+
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('editRecord：乐观锁 expectedBytes 与磁盘实际不符 → 判冲突', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const file = await makeFile(dir, ['{"a":1}', '{"b":2}']);
+    const ds = makeService(file);
+    await ds.getOverview();
+    const original = await readFile(file, 'utf8');
+
+    const res = await ds.editRecord(0, '{"a":9}', 999); // 谎报旧长度
+    assert.equal(res.ok, false);
+    assert.equal(res.conflict, true);
+    assert.equal(await readFile(file, 'utf8'), original);
+
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('editRecord：JSON 非法或行号越界 → 拒绝且不写盘', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const file = await makeFile(dir, ['{"a":1}', '{"b":2}']);
+    const ds = makeService(file);
+    await ds.getOverview();
+    const original = await readFile(file, 'utf8');
+
+    const bad = await ds.editRecord(0, '{"a":1,,}');
+    assert.equal(bad.ok, false);
+    assert.equal(bad.invalid, true);
+    assert.match(bad.error ?? '', /JSON 校验未通过/);
+
+    const oob = await ds.editRecord(99, '{"x":1}');
+    assert.equal(oob.ok, false);
+    assert.match(oob.error ?? '', /无效行号/);
+
+    assert.equal(await readFile(file, 'utf8'), original, '拒绝时必须保持文件原样');
+
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('editRecord：把坏行改成合法 JSON 后可正常读回', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const file = await makeFile(dir, ['{"a":1}', 'not-json', '{"c":3}']);
+    const ds = makeService(file);
+    await ds.getOverview();
+    assert.equal((await ds.readRecord(1)).ok, false, '前置：第 1 行是坏行');
+
+    const res = await ds.editRecord(1, '{"b":2}');
+    assert.equal(res.ok, true);
+
+    const after = await ds.readRecord(1);
+    assert.equal(after.ok, true);
+    assert.deepEqual(after.value, { b: 2 });
 
     await ds.dispose();
   } finally {

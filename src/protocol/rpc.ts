@@ -34,6 +34,8 @@ export const HostEndpoint = {
   LOAD_STATE: 'loadState',
   /** 重建行偏移索引（文件被检测到变更后，webview 点「重新加载」触发）。 */
   RELOAD: 'fileReload',
+  /** 就地替换某一行（编辑能力；行数不变，行尾按原样保留）。 */
+  EDIT_RECORD: 'editRecord',
 } as const;
 
 /** O(1) 查找表：把 HostEndpoint 所有值预编译成 Set，isHostEndpoint 每次调用不再 O(n) 遍历。 */
@@ -56,6 +58,8 @@ export const HostReply = {
   JUMP_TO_SOURCE: 'jumpToSource',
   /** host 主动推送：文件已变更，索引可能过期（webview 展示「重新加载」）。 */
   FILE_STALE: 'fileStale',
+  /** 行替换结果（成功与业务失败均走此回执，便于携带冲突等结构化原因）。 */
+  EDIT_RESULT: 'editResult',
 } as const;
 
 /* ------------------------------ 类型 ------------------------------ */
@@ -140,6 +144,28 @@ export interface FilterResultsPayload {
   truncated?: boolean;
 }
 
+/** 行替换结果。业务失败（冲突 / 校验不过 / 权限不足）也走此载荷，便于前端结构化处理。 */
+export interface EditResultPayload {
+  /** 被编辑的行号（0 基）。 */
+  line: number;
+  /** 是否写入成功。 */
+  ok: boolean;
+  /** 字节增量（新行含行尾 − 旧行含行尾）。 */
+  bytesDelta: number;
+  /** 是否走原位覆写（等长替换，零搬移）。 */
+  inPlace: boolean;
+  /** 实际搬移的尾部字节数（成本度量）。 */
+  movedBytes: number;
+  /** 磁盘动作耗时（毫秒）。 */
+  costMs: number;
+  /** 失败原因（ok=false 时给出，可直接展示给用户）。 */
+  error?: string;
+  /** 是否为「文件已被外部修改」冲突（需重新加载后再编辑）。 */
+  conflict?: boolean;
+  /** 是否因 JSON 校验未通过而拒绝（前端可据此提示语法错误）。 */
+  invalid?: boolean;
+}
+
 /* webview -> host 的具体请求消息。 */
 export type HostRequest =
   | { type: typeof HostEndpoint.READY }
@@ -165,7 +191,19 @@ export type HostRequest =
   | { type: typeof HostEndpoint.CANCEL; requestId: string }
   | { type: typeof HostEndpoint.PERSIST_STATE; requestId: string; key: string; value: unknown }
   | { type: typeof HostEndpoint.LOAD_STATE; requestId: string; key: string }
-  | { type: typeof HostEndpoint.RELOAD; requestId: string };
+  | { type: typeof HostEndpoint.RELOAD; requestId: string }
+  | {
+      type: typeof HostEndpoint.EDIT_RECORD;
+      requestId: string;
+      line: number;
+      /** 替换后的整行文本（不含行尾；行尾由宿主按原样保留）。 */
+      text: string;
+      /**
+       * 乐观锁：断言旧行的内容字节长度。与磁盘实际不符即判冲突 ——
+       * 用于发现「会话期间文件被外部程序改过」，避免基于过期视图覆写。
+       */
+      expectedBytes?: number;
+    };
 
 /* host -> webview 的具体响应消息。 */
 export type HostResponse =
@@ -178,7 +216,8 @@ export type HostResponse =
   | { type: typeof HostReply.RESULT; requestId: string; payload: unknown }
   | { type: typeof HostReply.ERROR; requestId?: string; message: string }
   | { type: typeof HostReply.JUMP_TO_SOURCE; payload: JumpToSourcePayload }
-  | { type: typeof HostReply.FILE_STALE; payload: StaleFilePayload };
+  | { type: typeof HostReply.FILE_STALE; payload: StaleFilePayload }
+  | { type: typeof HostReply.EDIT_RESULT; requestId: string; payload: EditResultPayload };
 
 export type RpcMessage = HostRequest | HostResponse;
 
@@ -279,6 +318,9 @@ export type HostHandlerMap = {
   ) => Promise<HostResponse> | HostResponse;
   [HostEndpoint.RELOAD]: (
     req: Extract<HostRequest, { type: typeof HostEndpoint.RELOAD }>
+  ) => Promise<HostResponse> | HostResponse;
+  [HostEndpoint.EDIT_RECORD]: (
+    req: Extract<HostRequest, { type: typeof HostEndpoint.EDIT_RECORD }>
   ) => Promise<HostResponse> | HostResponse;
   [HostEndpoint.CANCEL]: (
     req: Extract<HostRequest, { type: typeof HostEndpoint.CANCEL }>
