@@ -27,9 +27,10 @@ import { createVSCodeApi, RpcBus } from './rpc.ts';
 import { mergePersistedState, summarizeWithLayout } from './queryLogic.ts';
 import type { FieldCondition, FieldLayout } from './queryLogic.ts';
 import { HostEndpoint } from '../protocol/rpc.ts';
-import type { EditResultPayload } from '../protocol/rpc.ts';
+import type { EditResultPayload, ReplaceResultPayload } from '../protocol/rpc.ts';
 import type { InitPayload, OverviewPayload, RecordsPayload } from '../protocol/rpc.ts';
 import { CSS_TEXT } from './styles.ts';
+import { describeReplaceOutcome } from '../core/replaceLogic.ts';
 import { INIT_TIMEOUT_MS, RPC_HEAVY_TIMEOUT_MS } from '../constants.ts';
 
 /** 渲染用的记录形状（与 LRUCache 值一致）。 */
@@ -250,6 +251,7 @@ export function main(): void {
     onSearch: (query) => actions.runSearch(query),
     onSearchPrev: () => actions.stepSearch(-1),
     onSearchNext: () => actions.stepSearch(1),
+    onReplaceAll: (query, replacement) => replaceAll(query, replacement),
     onApplyFilter: (cond) => actions.runFilter(cond),
     onApplyLayout: (layout) => actions.applyLayout(layout),
   });
@@ -480,6 +482,66 @@ export function main(): void {
         }
       })();
     });
+  }
+
+  /** 横幅文案里的长文本截断（否则一次替换能把提示撑成一行巨物）。 */
+  function clipLabel(s: string): string {
+    const oneLine = s.replace(/\s+/g, ' ');
+    return oneLine.length > 32 ? oneLine.slice(0, 32) + '…' : oneLine;
+  }
+
+  /**
+   * 全文查找替换（工具栏「全部替换」）。
+   *
+   * 二次确认走顶部横幅 —— webview 里 `window.confirm` 不可用（沙箱拦截阻塞式对话框），
+   * 且批量改写会**立即落盘**，必须先问一句。
+   *
+   * 结果文案必须包含「跳过的行数」：用户点了「全部替换」后最危险的误解就是
+   * 以为全改完了，而实际有一批行因 JSON 非法被跳过。
+   */
+  function replaceAll(rawQuery: string, replacement: string): void {
+    const query = rawQuery.trim();
+    if (!query) {
+      banner.show('请先在搜索框填入要查找的内容。', undefined);
+      toolbar.toggleReplace(true);
+      return;
+    }
+    banner.show(
+      `确定把全部「${clipLabel(query)}」替换为「${clipLabel(replacement)}」？该操作会立即写入磁盘。`,
+      '确认替换',
+      () => {
+        void (async () => {
+          toolbar.setReplaceBusy(true);
+          try {
+            const res = await bus.request<ReplaceResultPayload>(
+              HostEndpoint.REPLACE_TEXT,
+              { query, replacement },
+              { timeoutMs: RPC_HEAVY_TIMEOUT_MS }
+            ).promise;
+            if (!res?.ok) {
+              banner.show(res?.error ?? '替换失败', undefined);
+              return;
+            }
+            // 改动可能散落全文件，无法逐行失效 —— 整体清空缓存并按需重拉。
+            state.cache.clear();
+            state.maxLoaded = 0;
+            list.refresh();
+            updateToolbar();
+            // 内容变了，过滤结果同样不再可信；有过滤条件就重算。
+            if (state.filterCond) actions.runFilter(state.filterCond);
+            // 重跑搜索刷新命中计数（原本命中的行可能已经不匹配）。
+            actions.runSearch(query);
+            if (state.selectedLine !== undefined) void showDetailForLine(state.selectedLine);
+            const suffix = res.undoable ? '' : '；（改动量较大，本次未纳入撤销栈）';
+            banner.show(describeReplaceOutcome(res) + suffix, undefined);
+          } catch (e) {
+            banner.show(e instanceof Error ? e.message : String(e), undefined);
+          } finally {
+            toolbar.setReplaceBusy(false);
+          }
+        })();
+      }
+    );
   }
 
   // 组装两栏：左栏放入列头(toolbar) + 目录列表(分页)；右栏为详情面板；横幅浮层最后挂载。

@@ -22,6 +22,8 @@ export interface ToolbarHandlers {
   onSearch?: (query: string) => void;
   onSearchPrev?: () => void;
   onSearchNext?: () => void;
+  /** 「全部替换」：查询取自搜索框，替换文本取自替换输入框。 */
+  onReplaceAll?: (query: string, replacement: string) => void;
   onApplyFilter?: (cond: FieldCondition | null) => void;
   onApplyLayout?: (layout: FieldLayout) => void;
 }
@@ -74,6 +76,12 @@ export function createToolbar(
   setLayout(layout: FieldLayout): void;
   setSearchResult(total: number, index: number): void;
   setFilterTruncated(truncated: boolean): void;
+  /** 替换输入框（未展开时仍存在，只是不可见）。 */
+  replaceInput(): HTMLInputElement;
+  /** 展开 / 收起替换行；返回展开后的状态。 */
+  toggleReplace(open?: boolean): boolean;
+  /** 替换执行中：禁用按钮并改文案，避免重复点击触发第二次写入。 */
+  setReplaceBusy(busy: boolean): void;
   /** 释放 document 级监听器（webview 关闭时调用）。 */
   destroy(): void;
 } {
@@ -150,14 +158,64 @@ export function createToolbar(
   nextBtn.disabled = true;
   navGroup.append(prevBtn, nextBtn);
 
+  /* ---------- 查找替换：切换按钮 + 替换行（默认收起） ---------- */
+  const replaceToggle = document.createElement('button');
+  replaceToggle.type = 'button';
+  replaceToggle.className = 'jlv-nav-btn jlv-replace-toggle';
+  replaceToggle.title = '查找替换';
+  replaceToggle.setAttribute('aria-label', '查找替换');
+  replaceToggle.setAttribute('aria-expanded', 'false');
+  replaceToggle.innerHTML = ICON_REPLACE;
+
+  const replaceRow = document.createElement('div');
+  replaceRow.className = 'jlv-replace';
+  replaceRow.hidden = true;
+
+  const replaceInputEl = document.createElement('input');
+  replaceInputEl.type = 'text';
+  replaceInputEl.className = 'jlv-replace-input';
+  replaceInputEl.placeholder = '替换为…';
+  replaceInputEl.autocomplete = 'off';
+  replaceInputEl.spellcheck = false;
+
+  const replaceBtn = document.createElement('button');
+  replaceBtn.type = 'button';
+  replaceBtn.className = 'jlv-btn jlv-replace-go';
+  replaceBtn.textContent = '全部替换';
+  replaceBtn.title = '把搜索框命中的文本全部替换掉（立即写入磁盘）';
+  replaceBtn.addEventListener('click', () =>
+    handlers.onReplaceAll?.(searchInputEl.value, replaceInputEl.value)
+  );
+
+  replaceRow.append(replaceInputEl, replaceBtn);
+
+  const setReplaceBusy = (busy: boolean): void => {
+    replaceBtn.disabled = busy;
+    replaceInputEl.disabled = busy;
+    replaceBtn.textContent = busy ? '替换中…' : '全部替换';
+  };
+
+  const toggleReplace = (open?: boolean): boolean => {
+    // hidden 在新 DOM 类型里是 boolean | 'until-found'，此处归一化为布尔（我们只用 true/false）。
+    const next = open ?? replaceRow.hidden === true;
+    replaceRow.hidden = !next;
+    replaceToggle.setAttribute('aria-expanded', String(next));
+    replaceToggle.classList.toggle('active', next);
+    if (next) replaceInputEl.focus();
+    return next;
+  };
+  replaceToggle.addEventListener('click', () => void toggleReplace());
+
   search.append(
     iconSpan('jlv-search-ic', ICON_SEARCH),
     searchInputEl,
     searchClear,
     matchInfo,
-    navGroup
+    navGroup,
+    replaceToggle
   );
   root.appendChild(search);
+  root.appendChild(replaceRow);
 
   const updateClear = (): void => {
     searchClear.hidden = searchInputEl.value.length === 0;
@@ -676,6 +734,9 @@ export function createToolbar(
     setLayout,
     setSearchResult,
     setFilterTruncated,
+    replaceInput: () => replaceInputEl,
+    toggleReplace,
+    setReplaceBusy,
     destroy,
   };
 }
@@ -730,5 +791,7 @@ const ICON_CLEAR =
   '<svg width="10" height="10" viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>';
 const ICON_FILTER =
   '<svg width="12" height="12" viewBox="0 0 16 16"><path d="M2 4h12M5 8h6M8 12h3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>';
+const ICON_REPLACE =
+  '<svg width="12" height="12" viewBox="0 0 16 16"><path d="M3 5.5h7.5a2.5 2.5 0 0 1 0 5H6" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><path d="M8 3L5.6 5.5 8 8" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><path d="M13 10.5H9.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>';
 const ICON_COLUMNS =
   '<svg width="12" height="12" viewBox="0 0 16 16"><rect x="2" y="2" width="5" height="12" rx="1" fill="none" stroke="currentColor" stroke-width="1.2"/><rect x="9" y="2" width="5" height="8" rx="1" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>';

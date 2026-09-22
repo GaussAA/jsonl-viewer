@@ -341,6 +341,37 @@ body {
 }
 .jlv-nav-btn:hover:not(:disabled) { background: rgba(255,255,255,0.08); color: var(--jlv-fg); }
 .jlv-nav-btn:disabled { opacity: .3; cursor: default; }
+.jlv-replace-toggle.active { background: color-mix(in srgb, var(--jlv-focus) 22%, transparent); color: var(--jlv-info); }
+
+/* 替换行（默认收起，点搜索框内的互换图标展开） */
+.jlv-replace {
+  display: flex; align-items: center; gap: 8px; margin-top: 6px;
+  animation: jlv-reveal .16s ease both;
+}
+.jlv-replace-input {
+  flex: 1; min-width: 0;
+  background: rgba(0,0,0,0.35); border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 8px; padding: 8px 12px;
+  color: var(--jlv-fg); font-size: 11px; font-family: inherit;
+  transition: border-color .15s, box-shadow .15s;
+}
+.jlv-replace-input::placeholder { color: var(--jlv-dim); }
+.jlv-replace-input:focus {
+  outline: none; border-color: color-mix(in srgb, var(--jlv-focus) 60%, transparent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--jlv-focus) 18%, transparent);
+}
+.jlv-replace-input:disabled { opacity: .55; }
+.jlv-replace-go { flex: none; }
+.jlv-replace-go:disabled { opacity: .5; cursor: default; }
+
+/* 展开动效：只动 opacity/transform，避免布局抖动 */
+@keyframes jlv-reveal {
+  from { opacity: 0; transform: translateY(-3px); }
+  to   { opacity: 1; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .jlv-replace { animation: none; }
+}
 
 /* 按钮行（原型 .toolbar-actions / .btn）——宽度自适应文本 */
 .jlv-toolbar-actions { display: flex; align-items: center; gap: 6px; margin-top: 10px; flex-wrap: wrap; }

@@ -905,4 +905,122 @@ describe('webviewEntry 装配层（集成）', () => {
       assert.ok(app.querySelector('.jlv-list-wrap'), '布局仍可用');
     });
   });
+
+  describe('查找替换：入口 / 二次确认 / 结果反馈', () => {
+    const replaceInput = (app: HTMLElement): HTMLInputElement =>
+      app.querySelector<HTMLInputElement>('.jlv-replace-input')!;
+    const replaceGo = (app: HTMLElement): HTMLButtonElement =>
+      app.querySelector<HTMLButtonElement>('.jlv-replace-go')!;
+    const bannerText = (app: HTMLElement): string =>
+      text(app.querySelector('.jlv-banner')?.querySelector('.jlv-banner-text') ?? null);
+
+    it('点击「全部替换」先二次确认，确认后才发 REPLACE_TEXT 并展示结果', async () => {
+      const { host, app } = await bootWithRecords();
+      searchInput(app).value = 'bob';
+      replaceInput(app).value = 'alice';
+
+      replaceGo(app).click();
+      await sleep(10);
+
+      const banner = app.querySelector<HTMLElement>('.jlv-banner')!;
+      assert.strictEqual(banner.hidden, false, '横幅出现');
+      assert.match(bannerText(app), /确定把全部「bob」替换为「alice」/, '确认文案含查找与替换内容');
+      assert.strictEqual(text(banner.querySelector('.jlv-banner-action')), '确认替换');
+      assert.strictEqual(
+        reqs(host, HostEndpoint.REPLACE_TEXT).length,
+        0,
+        '确认之前绝不发起写入请求'
+      );
+
+      banner.querySelector<HTMLButtonElement>('.jlv-banner-action')!.click();
+      await sleep(20);
+      const req = lastReq(host, HostEndpoint.REPLACE_TEXT)!;
+      assert.ok(req, '已发起批量替换');
+      assert.strictEqual(req.query, 'bob');
+      assert.strictEqual(req.replacement, 'alice');
+
+      reply(host, req, {
+        ok: true,
+        replaced: 3,
+        skippedInvalid: 1,
+        unchanged: 0,
+        total: 4,
+        bytesDelta: 12,
+        costMs: 1.5,
+        undoable: true,
+      });
+      await sleep(40);
+
+      assert.match(bannerText(app), /已替换 3 行/);
+      assert.match(bannerText(app), /1 行因替换后 JSON 非法已跳过/, '跳过的行必须如实告知');
+    });
+
+    it('替换超限未纳入撤销栈时明确提示', async () => {
+      const { host, app } = await bootWithRecords();
+      searchInput(app).value = 'x';
+      replaceInput(app).value = 'y';
+      replaceGo(app).click();
+      await sleep(10);
+      app.querySelector<HTMLButtonElement>('.jlv-banner-action')!.click();
+      await sleep(20);
+
+      reply(host, lastReq(host, HostEndpoint.REPLACE_TEXT)!, {
+        ok: true,
+        replaced: 9000,
+        skippedInvalid: 0,
+        unchanged: 0,
+        total: 9000,
+        bytesDelta: 0,
+        costMs: 2,
+        undoable: false,
+      });
+      await sleep(40);
+
+      assert.match(bannerText(app), /未纳入撤销栈/, '不能静默丢失撤销能力');
+    });
+
+    it('查找内容为空时提示并展开替换行，不发起写入', async () => {
+      const { host, app } = await bootWithRecords();
+      searchInput(app).value = '   ';
+      replaceInput(app).value = 'y';
+
+      replaceGo(app).click();
+      await sleep(10);
+
+      assert.strictEqual(reqs(host, HostEndpoint.REPLACE_TEXT).length, 0, '空查询绝不写盘');
+      assert.match(bannerText(app), /请先在搜索框填入/);
+      assert.strictEqual(
+        app.querySelector<HTMLElement>('.jlv-replace')!.hidden,
+        false,
+        '自动展开替换行，让用户看到该填哪里'
+      );
+    });
+
+    it('替换失败（业务失败回执）时展示原因，且不误报成功', async () => {
+      const { host, app } = await bootWithRecords();
+      searchInput(app).value = 'bob';
+      replaceInput(app).value = 'alice';
+      replaceGo(app).click();
+      await sleep(10);
+      app.querySelector<HTMLButtonElement>('.jlv-banner-action')!.click();
+      await sleep(20);
+
+      reply(host, lastReq(host, HostEndpoint.REPLACE_TEXT)!, {
+        ok: false,
+        replaced: 0,
+        skippedInvalid: 0,
+        unchanged: 0,
+        total: 0,
+        bytesDelta: 0,
+        costMs: 0,
+        undoable: false,
+        error: '文件已被外部修改，请先重新加载再编辑。',
+        conflict: true,
+      });
+      await sleep(40);
+
+      assert.match(bannerText(app), /文件已被外部修改/);
+      assert.ok(!/已替换/.test(bannerText(app)), '失败时不得出现成功文案');
+    });
+  });
 });

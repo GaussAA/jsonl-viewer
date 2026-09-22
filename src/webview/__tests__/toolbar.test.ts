@@ -26,6 +26,8 @@ interface Harness {
     next: number;
     filter: (FieldCondition | null)[];
     layout: FieldLayout[];
+    /** 「全部替换」收到的 (查询, 替换文本)。 */
+    replace: [string, string][];
   };
 }
 
@@ -41,6 +43,7 @@ function makeToolbar(): Harness {
     next: 0,
     filter: [] as (FieldCondition | null)[],
     layout: [] as FieldLayout[],
+    replace: [] as [string, string][],
   };
   const host = doc.createElement('div');
   doc.body.append(host);
@@ -52,6 +55,7 @@ function makeToolbar(): Harness {
     onSearchNext: () => {
       calls.next += 1;
     },
+    onReplaceAll: (q, r) => calls.replace.push([q, r]),
     onApplyFilter: (c) => calls.filter.push(c),
     onApplyLayout: (l) => calls.layout.push(l),
   });
@@ -181,6 +185,66 @@ describe('createToolbar（视图层覆盖率补强）', () => {
 
     h.tb.setFilterTruncated(false);
     assert.strictEqual(note.hidden, true, '未截断时隐藏');
+  });
+
+  /* ------------------------- 查找替换 ------------------------- */
+
+  /** 替换按钮的 title 带操作说明（会写入磁盘），故按类名而非 title 定位。 */
+  const goBtn = (h: Harness): HTMLButtonElement =>
+    h.tb.root.querySelector<HTMLButtonElement>('.jlv-replace-go')!;
+  const replaceRow = (h: Harness): HTMLElement =>
+    h.tb.root.querySelector<HTMLElement>('.jlv-replace')!;
+
+  it('替换行默认收起，切换按钮可展开 / 收起', () => {
+    const h = makeToolbar();
+    const row = replaceRow(h);
+    const toggle = byTitle(h, '查找替换');
+    assert.strictEqual(row.hidden, true, '默认收起');
+    assert.strictEqual(toggle.getAttribute('aria-expanded'), 'false');
+
+    toggle.click();
+    assert.strictEqual(row.hidden, false, '点击后展开');
+    assert.strictEqual(toggle.getAttribute('aria-expanded'), 'true', '无障碍状态同步');
+
+    toggle.click();
+    assert.strictEqual(row.hidden, true, '再次点击收起');
+  });
+
+  it('toggleReplace(open)：显式指定展开状态（幂等，不来回切换）', () => {
+    const h = makeToolbar();
+    const row = replaceRow(h);
+
+    assert.strictEqual(h.tb.toggleReplace(true), true);
+    assert.strictEqual(row.hidden, false);
+    assert.strictEqual(h.tb.toggleReplace(true), true, '已经是展开态，再指定展开仍是展开');
+    assert.strictEqual(row.hidden, false);
+    assert.strictEqual(h.tb.toggleReplace(false), false);
+    assert.strictEqual(row.hidden, true);
+  });
+
+  it('「全部替换」把搜索框与替换框的内容一并回调', () => {
+    const h = makeToolbar();
+    const search = h.tb.searchInput()!;
+    search.value = 'bob';
+    h.tb.replaceInput().value = 'alice';
+
+    goBtn(h).click();
+    assert.deepStrictEqual(h.calls.replace, [['bob', 'alice']]);
+  });
+
+  it('setReplaceBusy：执行中禁用控件并改文案，避免重复触发第二次写入', () => {
+    const h = makeToolbar();
+    const btn = goBtn(h);
+
+    h.tb.setReplaceBusy(true);
+    assert.strictEqual(btn.disabled, true);
+    assert.match(btn.textContent ?? '', /替换中/);
+    assert.strictEqual(h.tb.replaceInput().disabled, true);
+
+    h.tb.setReplaceBusy(false);
+    assert.strictEqual(btn.disabled, false);
+    assert.strictEqual(btn.textContent, '全部替换');
+    assert.strictEqual(h.tb.replaceInput().disabled, false);
   });
 
   it('过滤面板：点击按钮打开浮层，点关闭淡出隐藏（单实例复用，不移除 DOM）', async () => {
