@@ -1,15 +1,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { createReadStream, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { LineIndex } from '../../indexer/lineIndex.ts';
 import { openFileReader } from '../../parser/jsonParser.ts';
-import { TAIL_BACKUP_SUFFIX } from '../../constants.ts';
+import { TAIL_BACKUP_SUFFIX, REWRITE_TEMP_SUFFIX } from '../../constants.ts';
 import {
   replaceLine,
   replaceRange,
+  rewriteWithEdits,
   detectLineEnding,
   lineEndingBytes,
   WriteCancelledError,
@@ -323,6 +324,151 @@ test('replaceRange：追加到文件末尾（空区间 + 末尾偏移）无需�
     assert.equal(res.bytesDelta, 3);
     assert.equal(res.movedBytes, 0);
     assert.equal(await readFile(path, 'utf8'), 'aa\nbb\ncc\n');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+/* ------------------ 批量重写：原子替换整个文件 ------------------ */
+
+/** 临时文件是否残留（批量重写失败/取消后必须归零）。 */
+async function tempLeftovers(dir: string): Promise<string[]> {
+  return (await readdir(dir)).filter((f) => f.includes(REWRITE_TEMP_SUFFIX));
+}
+
+test('rewriteWithEdits：多处区间一次替换，内容与增量正确', async () => {
+  const { dir, path } = await scaffold('aaa\nbbb\nccc\n');
+  try {
+    const res = await rewriteWithEdits(path, [
+      { start: 0, end: 3, replacement: Buffer.from('AAAA') }, // 3 → 4：+1
+      { start: 8, end: 11, replacement: Buffer.from('C') }, // 3 → 1：−2
+    ]);
+
+    assert.equal(res.edits, 2);
+    assert.equal(res.bytesDelta, -1);
+    // 'aaa\nbbb\nccc\n' = 12 字节，两个区间各被替换 3 字节 → 复制量 = 12 − 6 = 6。
+    assert.equal(res.copiedBytes, 6);
+    assert.equal(await readFile(path, 'utf8'), 'AAAA\nbbb\nC\n');
+    assert.equal((await stat(path)).size, 11);
+    assert.deepEqual(await tempLeftovers(dir), [], '临时文件已清理');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('rewriteWithEdits：乱序传入的编辑按位置正确应用', async () => {
+  const { dir, path } = await scaffold('aaa\nbbb\nccc\n');
+  try {
+    await rewriteWithEdits(path, [
+      { start: 8, end: 11, replacement: Buffer.from('C') },
+      { start: 0, end: 3, replacement: Buffer.from('AAAA') },
+    ]);
+    assert.equal(await readFile(path, 'utf8'), 'AAAA\nbbb\nC\n');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('rewriteWithEdits：重叠区间拒绝，且文件在任何写入之前保持原样', async () => {
+  const { dir, path } = await scaffold('aaa\nbbb\n');
+  try {
+    await assert.rejects(
+      () =>
+        rewriteWithEdits(path, [
+          { start: 0, end: 4, replacement: Buffer.from('X') },
+          { start: 2, end: 5, replacement: Buffer.from('Y') },
+        ]),
+      /重叠/
+    );
+    assert.equal(await readFile(path, 'utf8'), 'aaa\nbbb\n', '校验失败必须零副作用');
+    assert.deepEqual(await tempLeftovers(dir), []);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('rewriteWithEdits：越界区间拒绝', async () => {
+  const { dir, path } = await scaffold('aaa\nbbb\n');
+  try {
+    await assert.rejects(
+      () => rewriteWithEdits(path, [{ start: 0, end: 99, replacement: Buffer.from('X') }]),
+      /越界/
+    );
+    await assert.rejects(
+      () => rewriteWithEdits(path, [{ start: 5, end: 2, replacement: Buffer.from('X') }]),
+      /越界/
+    );
+    assert.equal(await readFile(path, 'utf8'), 'aaa\nbbb\n');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('rewriteWithEdits：空编辑列表拒绝（不做无谓的全量重写）', async () => {
+  const { dir, path } = await scaffold('aaa\n');
+  try {
+    await assert.rejects(() => rewriteWithEdits(path, []), /没有需要应用的编辑/);
+    assert.equal(await readFile(path, 'utf8'), 'aaa\n');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('rewriteWithEdits：超过 maxBytes 时拒绝，文件原样保留', async () => {
+  const { dir, path } = await scaffold('aaa\nbbb\n');
+  try {
+    await assert.rejects(
+      () =>
+        rewriteWithEdits(path, [{ start: 0, end: 3, replacement: Buffer.from('X') }], {
+          maxBytes: 4,
+        }),
+      /超过批量替换上限/
+    );
+    assert.equal(await readFile(path, 'utf8'), 'aaa\nbbb\n');
+    assert.deepEqual(await tempLeftovers(dir), []);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('rewriteWithEdits：取消时抛 WriteCancelledError 且清理临时文件', async () => {
+  const { dir, path } = await scaffold('aaaa\nbbbb\ncccc\n');
+  try {
+    await assert.rejects(
+      () =>
+        rewriteWithEdits(path, [{ start: 10, end: 14, replacement: Buffer.from('C') }], {
+          shouldCancel: () => true,
+          blockSize: 4,
+        }),
+      (e: unknown) => e instanceof WriteCancelledError
+    );
+    assert.equal(await readFile(path, 'utf8'), 'aaaa\nbbbb\ncccc\n', '取消后原文件未被触碰');
+    assert.deepEqual(await tempLeftovers(dir), [], '取消路径同样清理临时文件');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('rewriteWithEdits：纯插入（空区间）与纯删除（空 replacement）', async () => {
+  const { dir, path } = await scaffold('aa\nbb\ncc\n');
+  try {
+    await rewriteWithEdits(path, [
+      { start: 3, end: 3, replacement: Buffer.from('XX\n') }, // 在 bb 前插入
+      { start: 6, end: 9, replacement: Buffer.alloc(0) }, // 删掉 cc\n
+    ]);
+    assert.equal(await readFile(path, 'utf8'), 'aa\nXX\nbb\n');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('rewriteWithEdits：成功重写不留 sidecar / 临时文件', async () => {
+  const { dir, path } = await scaffold('aaa\n');
+  try {
+    await rewriteWithEdits(path, [{ start: 0, end: 3, replacement: Buffer.from('bbbb') }]);
+    const files = await readdir(dir);
+    assert.deepEqual(files, ['data.jsonl'], '目录内只应剩目标文件');
+    assert.equal(existsSync(path + TAIL_BACKUP_SUFFIX), false);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

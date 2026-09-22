@@ -115,6 +115,19 @@ async function handle(msg: WorkerRequest): Promise<void> {
         }
         return;
       }
+      case 'releaseFile': {
+        // 只松手文件句柄，**不动索引** —— 主线程要「写临时文件 + rename」覆盖此文件，
+        // Windows 下若仍持有句柄，rename 会 EPERM。
+        await reader?.close?.().catch(() => {});
+        reader = undefined;
+        post({ type: 'ack', requestId: msg.requestId });
+        return;
+      }
+      case 'reacquireFile': {
+        reader = await openFileReader(msg.path);
+        post({ type: 'ack', requestId: msg.requestId });
+        return;
+      }
       case 'cancel': {
         cancelled.add(msg.requestId);
         // 兜底剪枝：取消请求可能在结果已发出之后才到达，仅靠各请求的 finally 无法清理这些残留。

@@ -57,6 +57,15 @@ export interface WorkerLike {
     maxResults: number,
     shouldCancel?: () => boolean
   ): Promise<FilterLinesResult>;
+  /**
+   * 临时关闭底层文件句柄，**保留索引**。
+   *
+   * 批量替换走「写临时文件 + 原子 rename」，而 Windows 拒绝 rename 覆盖仍被打开的文件。
+   * 主线程与 worker 各自持有 reader，故重写前两侧都必须松开。
+   */
+  releaseFile(): Promise<void>;
+  /** 重新打开文件句柄（与 `releaseFile` 配对使用；索引继续有效，无需重建）。 */
+  reacquireFile(path: string): Promise<void>;
   /** 释放资源（关闭 reader / 终止 worker）。 */
   dispose(): Promise<void>;
 }
@@ -131,6 +140,15 @@ export class MainThreadIndexHost implements IndexHost {
     shouldCancel?: () => boolean
   ): Promise<FilterLinesResult> {
     return filterLines(this.reader!, this.index!, cond, { maxResults, shouldCancel });
+  }
+
+  async releaseFile(): Promise<void> {
+    if (this.reader && this.reader.close) await this.reader.close().catch(() => {});
+    this.reader = undefined;
+  }
+
+  async reacquireFile(path: string): Promise<void> {
+    if (!this.reader) this.reader = await openFileReader(path);
   }
 
   async dispose(): Promise<void> {
@@ -224,6 +242,15 @@ export class WorkerIndexHost implements IndexHost {
             totalLines: m.totalLines,
           },
         });
+      }
+      return;
+    }
+    if (m.type === 'ack') {
+      const p = this.pending.get(m.requestId);
+      if (p) {
+        p.stop?.();
+        this.pending.delete(m.requestId);
+        p.resolve(undefined);
       }
       return;
     }
@@ -323,6 +350,14 @@ export class WorkerIndexHost implements IndexHost {
     });
   }
 
+  async releaseFile(): Promise<void> {
+    await this.voidRequest((requestId) => ({ type: 'releaseFile', requestId }));
+  }
+
+  async reacquireFile(path: string): Promise<void> {
+    await this.voidRequest((requestId) => ({ type: 'reacquireFile', requestId, path }));
+  }
+
   async dispose(): Promise<void> {
     this.disposing = true; // 先置位：随后的 'exit' 属正常退出，不当作崩溃
     if (!this.released) {
@@ -339,6 +374,15 @@ export class WorkerIndexHost implements IndexHost {
     await this.worker.terminate().catch(() => {});
     // 统一走 settleAll：确保取消轮询定时器一并停止（此前遗漏 → setInterval 泄漏）。
     this.settleAll(new Error('worker disposed'));
+  }
+
+  /** 无载荷请求（releaseFile / reacquireFile）：等一条 `ack` 即算完成。 */
+  private voidRequest(build: (requestId: number) => WorkerRequest): Promise<void> {
+    const requestId = this.nextId++;
+    return new Promise<void>((resolve, reject) => {
+      this.pending.set(requestId, { resolve: () => resolve(), reject });
+      this.post(build(requestId));
+    });
   }
 
   private post(msg: WorkerRequest): void {

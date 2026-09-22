@@ -40,6 +40,29 @@ export const MAX_TAIL_BACKUP_BYTES = 64 * 1024 * 1024;
 /** 尾部备份 sidecar 的后缀（搬移成功即删除；失败时保留以供恢复）。 */
 export const TAIL_BACKUP_SUFFIX = '.jlv-tail-bak';
 
+/**
+ * 批量重写（查找替换）的文件大小上限：1GB。
+ *
+ * 批量替换走「写同目录临时文件 + 原子 rename」，临时空间需求**等于文件大小**。
+ * 超过此值拒绝执行并提示改用单行编辑 —— 为一次替换索要 GB 级临时空间不是合理的默认行为。
+ * （不做逐行倒序搬移的降级路径：那需要 N 次随机搬移，成本 Σ(改动点距 EOF)，
+ *  命中行分散时反而远慢于一次顺序重写，且丧失原子性。）
+ */
+export const MAX_BATCH_REWRITE_BYTES = 1024 * 1024 * 1024;
+
+/** 批量重写临时文件后缀。必须与原文件**同目录**——跨分区 rename 不具原子性。 */
+export const REWRITE_TEMP_SUFFIX = '.jlv-rewrite-tmp';
+
+/**
+ * 「全部替换」纳入撤销栈的上限：2000 行 / 8MB。
+ *
+ * 撤销栈要保存每一行的前后文本，超大替换会把宿主内存与 webview 消息通道一起撑爆。
+ * 超限时替换照常执行，但**如实告知用户「本次未纳入撤销栈」**——
+ * 静默丢弃撤销能力比不做撤销更危险。
+ */
+export const MAX_REPLACE_UNDO_LINES = 2_000;
+export const MAX_REPLACE_UNDO_BYTES = 8 * 1024 * 1024;
+
 /* ---------------------- 协议 & 搜索 ---------------------- */
 
 /** webview → host RPC 默认超时（轻量请求：偏好读写、跳转源码等）。 */

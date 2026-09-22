@@ -28,9 +28,15 @@
  * 约束：仅依赖 `node:fs/promises`，不依赖 `vscode`，可直接用临时文件单测。
  */
 
-import { open, rm } from 'node:fs/promises';
+import { chmod, open, rename, rm } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
-import { WRITE_BLOCK_SIZE, MAX_TAIL_BACKUP_BYTES, TAIL_BACKUP_SUFFIX } from '../constants.ts';
+import {
+  WRITE_BLOCK_SIZE,
+  MAX_TAIL_BACKUP_BYTES,
+  TAIL_BACKUP_SUFFIX,
+  MAX_BATCH_REWRITE_BYTES,
+  REWRITE_TEMP_SUFFIX,
+} from '../constants.ts';
 
 /* ------------------------------ 类型 ------------------------------ */
 
@@ -278,6 +284,212 @@ async function shiftTail(
   }
 }
 
+/* ---------------------------- 批量原子重写 ---------------------------- */
+
+/** 一次区间编辑：用 `replacement` 替换文件中的 `[start, end)`；`start === end` 即纯插入。 */
+export interface ByteEdit {
+  start: number;
+  end: number;
+  replacement: Buffer;
+}
+
+export interface RewriteResult {
+  /** 实际应用的编辑处数。 */
+  edits: number;
+  /** 新文件相对旧文件的字节增量，可为负。 */
+  bytesDelta: number;
+  /** 顺序复制的原文件字节数（不含被替换区间——那部分无需逐字节复制）。 */
+  copiedBytes: number;
+  costMs: number;
+  synced: boolean;
+}
+
+export interface RewriteOpts {
+  /** 复制分块字节数，默认 `WRITE_BLOCK_SIZE`（4MB），保证内存恒定有界。 */
+  blockSize?: number;
+  /** 完成后是否 fsync 落盘，默认 true。 */
+  fsync?: boolean;
+  /** 取消回调：在分块边界中止（抛 `WriteCancelledError`，临时文件被清理）。 */
+  shouldCancel?: () => boolean;
+  /** 复制进度回调（按分块触发；processedBytes 最终等于文件大小）。 */
+  onProgress?: (info: { processedBytes: number; totalBytes: number }) => void;
+  /** 文件大小上限，默认 `MAX_BATCH_REWRITE_BYTES`。 */
+  maxBytes?: number;
+}
+
+/**
+ * 一次性应用多处区间编辑：读原文件 → 写同目录临时文件 → fsync → 原子 rename。
+ *
+ * 为什么是它而不是「逐处倒序 replaceRange」（批量编辑的关键取舍）：
+ *   · **原子性** —— rename 之前目标文件始终原封不动。失败或取消时用户拿到的还是完整旧文件，
+ *     绝不会出现「改了一半」的半成品。批量改写最怕的就是这个，逐处搬移无法给出该保证。
+ *   · **成本可预测** —— O(文件大小)，与编辑处数无关。逐处倒序搬移的成本是
+ *     Σ(每处改动点距 EOF 的字节数)，命中行散落全文件时可达数十倍文件大小。
+ *   · 代价是需要等量临时空间，故以 `maxBytes` 设限，超限直接拒绝（不做无原子性的降级）。
+ *
+ * ⚠️ **调用方须先释放该文件的读取句柄**：Windows 下会拒绝 rename 覆盖一个仍被
+ * 其它句柄打开的文件（EPERM/EBUSY）。`DataService.replaceText` 为此在重写前后
+ * 关闭并重新打开 reader。
+ *
+ * @throws RangeError 编辑区间越界或重叠（在任何写入之前校验）
+ * @throws Error 超过 `maxBytes`、无写权限、空间不足、rename 被占用
+ */
+export async function rewriteWithEdits(
+  path: string,
+  edits: readonly ByteEdit[],
+  opts: RewriteOpts = {}
+): Promise<RewriteResult> {
+  const started = performance.now();
+  const blockSize = opts.blockSize ?? WRITE_BLOCK_SIZE;
+  const maxBytes = opts.maxBytes ?? MAX_BATCH_REWRITE_BYTES;
+
+  let src: FileHandle | undefined;
+  let dst: FileHandle | undefined;
+  let tmpPath: string | undefined;
+  let srcClosed = false;
+
+  try {
+    try {
+      src = await open(path, 'r');
+    } catch (e) {
+      throw friendlyWriteError(e, path);
+    }
+    const st = await src.stat();
+    const fileSize = st.size;
+
+    if (fileSize > maxBytes) {
+      throw new Error(
+        `文件 ${fileSize} 字节超过批量替换上限 ${maxBytes} 字节：` +
+          `批量替换需要等量临时空间。请改用单行编辑，或在外部工具中处理。`
+      );
+    }
+    const ordered = normalizeEdits(edits, fileSize);
+    if (ordered.length === 0) throw new Error('没有需要应用的编辑');
+
+    tmpPath = tempPathFor(path);
+    try {
+      // 'wx' 独占创建：撞名即失败，绝不覆盖他人文件。
+      dst = await open(tmpPath, 'wx', 0o600);
+    } catch (e) {
+      throw friendlyWriteError(e, tmpPath);
+    }
+
+    const srcFh: FileHandle = src;
+    const dstFh: FileHandle = dst;
+    const buf = Buffer.allocUnsafe(Math.max(1, Math.min(blockSize, fileSize || 1)));
+    let copied = 0;
+    let processed = 0;
+    let delta = 0;
+    let srcPos = 0;
+    let dstPos = 0;
+
+    // 进度以「已处理到的原文件偏移」为准 —— 被替换区间本身无需逐字节复制，
+    // 若只按复制量上报则永远到不了 100%。
+    const report = (): void =>
+      opts.onProgress?.({ processedBytes: processed, totalBytes: fileSize });
+
+    const copyInto = async (from: number, length: number, to: number): Promise<void> => {
+      let done = 0;
+      while (done < length) {
+        assertNotCancelled(opts);
+        const chunk = Math.min(buf.length, length - done);
+        await readExact(srcFh, buf, chunk, from + done);
+        await writeAll(dstFh, buf.subarray(0, chunk), to + done);
+        done += chunk;
+        copied += chunk;
+        processed = from + done;
+        report();
+      }
+    };
+
+    for (const e of ordered) {
+      const gap = e.start - srcPos;
+      await copyInto(srcPos, gap, dstPos);
+      srcPos += gap;
+      dstPos += gap;
+
+      if (e.replacement.length > 0) await writeAll(dstFh, e.replacement, dstPos);
+      dstPos += e.replacement.length;
+      delta += e.replacement.length - (e.end - e.start);
+      srcPos = e.end;
+      processed = srcPos;
+      report();
+    }
+    await copyInto(srcPos, fileSize - srcPos, dstPos);
+
+    const synced = await trySync(dstFh, opts.fsync ?? true);
+
+    await dst.close();
+    dst = undefined;
+    await src.close();
+    srcClosed = true;
+
+    // 权限先落到临时文件上再替换，最终文件即继承原权限。
+    await chmod(tmpPath, st.mode).catch(() => {});
+    try {
+      await rename(tmpPath, path);
+    } catch (e) {
+      throw friendlyReplaceError(e, path);
+    }
+    tmpPath = undefined;
+
+    return {
+      edits: ordered.length,
+      bytesDelta: delta,
+      copiedBytes: copied,
+      costMs: performance.now() - started,
+      synced,
+    };
+  } finally {
+    if (dst) await dst.close().catch(() => {});
+    if (src && !srcClosed) await src.close().catch(() => {});
+    // 任何未走到 rename 的路径都必须清掉临时文件，不留垃圾。
+    if (tmpPath) await rm(tmpPath, { force: true }).catch(() => {});
+  }
+}
+
+/** 升序排序并校验编辑列表：越界 / 重叠必须在**任何写入之前**发现。 */
+function normalizeEdits(edits: readonly ByteEdit[], fileSize: number): ByteEdit[] {
+  // 不改动调用方传入的数组（toSorted 返回新数组），并强制按位置升序。
+  const sorted = edits.toSorted((a, b) => a.start - b.start || a.end - b.end);
+  let prevEnd = 0;
+  for (const e of sorted) {
+    if (!Number.isInteger(e.start) || !Number.isInteger(e.end)) {
+      throw new RangeError('编辑区间必须为整数');
+    }
+    if (e.start < 0 || e.end < e.start || e.end > fileSize) {
+      throw new RangeError(`编辑区间 [${e.start}, ${e.end}) 越界（文件大小 ${fileSize}）`);
+    }
+    if (e.start < prevEnd) {
+      throw new RangeError(`编辑区间重叠：[${e.start}, ${e.end}) 与前一区间相交`);
+    }
+    prevEnd = e.end;
+  }
+  return sorted;
+}
+
+/** 临时文件路径：必须与原文件**同目录**，跨分区的 rename 不具备原子性。 */
+function tempPathFor(path: string): string {
+  const rand = Math.random().toString(36).slice(2, 10);
+  return `${path}${REWRITE_TEMP_SUFFIX}-${process.pid}-${rand}`;
+}
+
+/** rename 阶段的 errno 翻译（与写入阶段的成因不同，需分别给出可操作提示）。 */
+function friendlyReplaceError(e: unknown, path: string): Error {
+  const code = (e as NodeJS.ErrnoException | undefined)?.code;
+  if (code === 'EPERM' || code === 'EBUSY') {
+    return new Error(
+      `无法替换目标文件（可能仍被其它程序占用，Windows 下需先关闭读取句柄）：${path}`,
+      { cause: e }
+    );
+  }
+  if (code === 'EACCES') return new Error(`无权限替换目标文件：${path}`, { cause: e });
+  if (code === 'EXDEV') {
+    return new Error(`临时文件与目标不在同一分区，无法原子替换：${path}`, { cause: e });
+  }
+  return e instanceof Error ? e : new Error(String(e));
+}
+
 /* ---------------------------- IO 原语 ---------------------------- */
 
 /** 全量写入：循环处理部分写，写满或抛错为止。 */
@@ -340,7 +552,7 @@ function assertRange(range: ByteRange, fileSize: number): void {
   }
 }
 
-function assertNotCancelled(opts: ReplaceLineOpts): void {
+function assertNotCancelled(opts: { shouldCancel?: () => boolean }): void {
   if (opts.shouldCancel?.()) {
     throw new WriteCancelledError('写入已在分块边界被取消');
   }

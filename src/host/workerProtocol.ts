@@ -9,7 +9,10 @@
  *   - 主线程仅拿回「稀疏检查点」重建 LineIndex 用于轻量随机读（详情/虚拟滚动），
  *     不重复扫文件；
  *   - 取消：主线程把 shouldCancel 经 30ms 轮询转发为 `{type:'cancel', requestId}`，
- *     worker 侧以 cancelled 集合驱动 searchLines/filterLines 的 shouldCancel 提前终止。
+ *     worker 侧以 cancelled 集合驱动 searchLines/filterLines 的 shouldCancel 提前终止；
+ *   - **文件句柄可临时释放**（releaseFile/reacquireFile）：批量替换要「写临时文件 +
+ *     原子 rename」，而 Windows 会拒绝 rename 覆盖一个仍被其它句柄打开的文件——
+ *     worker 若不先松手，替换必然 EPERM。索引不受影响，重获句柄只重开 reader。
  */
 
 import type { SearchScope, SearchLinesResult, FilterLinesResult } from './searchEngine.ts';
@@ -27,6 +30,10 @@ export type WorkerRequest =
       maxResults: number;
     }
   | { type: 'filter'; requestId: number; cond: FieldCondition | null; maxResults: number }
+  /** 关闭文件句柄但**保留索引**（批量替换重写文件前的必要动作）。 */
+  | { type: 'releaseFile'; requestId: number }
+  /** 重新打开文件句柄（与 releaseFile 配对；索引继续有效）。 */
+  | { type: 'reacquireFile'; requestId: number; path: string }
   | { type: 'cancel'; requestId: number }
   | { type: 'dispose' };
 
@@ -44,6 +51,8 @@ export type WorkerResponse =
     }
   /** 构建进度（大文件构建期间供宿主反馈，避免用户误判为卡死）。 */
   | { type: 'progress'; requestId: number; bytesRead: number; lines: number }
+  /** 无载荷操作（releaseFile / reacquireFile）的成功回执。 */
+  | { type: 'ack'; requestId: number }
   | { type: 'searchResult'; requestId: number; result: SearchLinesResult }
   | { type: 'filterResult'; requestId: number; result: FilterLinesResult }
   | { type: 'error'; requestId?: number; message: string };
