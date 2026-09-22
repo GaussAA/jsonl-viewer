@@ -196,3 +196,90 @@ test('构建统计：totalLines/totalBytes/eof/buildMs', async () => {
   assert.ok(li.buildMs >= 0);
   assert.deepEqual(li.toStats().totalLines, 2);
 });
+
+/* ------------- applyLineReplace：编辑后的增量索引 ------------- */
+
+/** 造 n 行文本（行号嵌入内容，便于逐行核对）。 */
+function makeLines(n: number): string[] {
+  return Array.from({ length: n }, (_, i) => `line-${i}-${'a'.repeat(i)}`);
+}
+
+test('applyLineReplace：仅目标行之后的检查点平移，行号与行数不变', async () => {
+  const li = await buildFromString(makeLines(10).join('\n') + '\n', 3, { checkpointInterval: 4 });
+  assert.deepEqual(
+    li.checkpoints.map((c) => c.line),
+    [0, 4, 8],
+    '前置：10 行 / interval=4 → 检查点落在 0,4,8'
+  );
+
+  const next = li.applyLineReplace(1, 100);
+
+  assert.deepEqual(
+    next.checkpoints.map((c) => c.line),
+    [0, 4, 8],
+    '替换不改变行号'
+  );
+  assert.equal(next.checkpoints[0].offset, li.checkpoints[0].offset, '目标行之前的检查点不动');
+  assert.equal(next.checkpoints[1].offset, li.checkpoints[1].offset + 100);
+  assert.equal(next.checkpoints[2].offset, li.checkpoints[2].offset + 100);
+  assert.equal(next.totalBytes, li.totalBytes + 100);
+  assert.equal(next.totalLines, li.totalLines);
+});
+
+test('applyLineReplace：目标行本身恰为检查点行时，其偏移不变、其后仍平移', async () => {
+  const li = await buildFromString(makeLines(10).join('\n') + '\n', 3, { checkpointInterval: 4 });
+  const next = li.applyLineReplace(4, 50); // 第 4 行是检查点行
+
+  assert.equal(next.checkpoints[0].offset, li.checkpoints[0].offset);
+  assert.equal(
+    next.checkpoints[1].offset,
+    li.checkpoints[1].offset,
+    '该行起始偏移未变（变的是行内长度）'
+  );
+  assert.equal(next.checkpoints[2].offset, li.checkpoints[2].offset + 50);
+});
+
+test('applyLineReplace：Δ=0 复用同一实例（等长替换无需触碰索引）', async () => {
+  const li = await buildFromString('a\nb\nc\n');
+  assert.equal(li.applyLineReplace(1, 0), li);
+});
+
+test('applyLineReplace：越界行号与非整数 Δ 抛错', async () => {
+  const li = await buildFromString('a\nb\nc\n');
+  assert.throws(() => li.applyLineReplace(3, 5), RangeError);
+  assert.throws(() => li.applyLineReplace(-1, 5), RangeError);
+  assert.throws(() => li.applyLineReplace(1.5, 5), RangeError);
+  assert.throws(() => li.applyLineReplace(0, 1.5), TypeError);
+});
+
+test('applyLineReplace：变长/变短/首行/末行四类编辑的扫描结果均与「重建索引」完全一致', async () => {
+  const base = makeLines(30);
+  const cases = [
+    { line: 0, text: `HEAD-${'z'.repeat(200)}`, desc: '首行变长' },
+    { line: 29, text: 'TAIL', desc: '末行变短' },
+    { line: 15, text: `MID-${'q'.repeat(120)}`, desc: '中间变长' },
+    { line: 7, text: 's', desc: '中间大幅变短' },
+  ];
+
+  for (const c of cases) {
+    const before = base.join('\n') + '\n';
+    const li = await buildFromString(before, 7, { checkpointInterval: 4 });
+
+    const afterLines = [...base.slice(0, c.line), c.text, ...base.slice(c.line + 1)];
+    const after = afterLines.join('\n') + '\n';
+    const delta = Buffer.byteLength(c.text) - Buffer.byteLength(base[c.line]);
+
+    const incremental = li.applyLineReplace(c.line, delta);
+    const rebuilt = await buildFromString(after, 7, { checkpointInterval: 4 });
+    const reader = new MemoryReader(Buffer.from(after));
+
+    assert.equal(incremental.totalBytes, Buffer.byteLength(after), `${c.desc}：字节总数`);
+    assert.equal(incremental.totalLines, rebuilt.totalLines, `${c.desc}：行数`);
+    assert.deepEqual(await scanAll(incremental, reader), afterLines, `${c.desc}：逐行内容`);
+    assert.deepEqual(
+      await scanAll(incremental, reader),
+      await scanAll(rebuilt, reader),
+      `${c.desc}：与重建索引一致`
+    );
+  }
+});

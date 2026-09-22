@@ -268,6 +268,34 @@ export class LineIndex implements LineIndexStats {
     return null;
   }
 
+  /**
+   * 编辑替换后的**增量**索引更新：第 `line` 行长度变化 `deltaBytes`（可负），行数不变。
+   *
+   * 只有起始偏移位于目标行**之后**的检查点需要平移；目标行自身的检查点偏移不变
+   * （仍指向该行起始）。复杂度 O(检查点数) = O(总行数 / interval) —— 千万行文件仅约
+   * 一万次加法，远优于重建索引的 O(文件大小) 全量重扫。
+   *
+   * 返回**新实例**（保持本类不可变语义），未受影响的检查点按引用复用。
+   */
+  applyLineReplace(line: number, deltaBytes: number): LineIndex {
+    if (!Number.isInteger(line) || line < 0 || line >= this.totalLines) {
+      throw new RangeError(`line out of range: ${line} (totalLines=${this.totalLines})`);
+    }
+    if (!Number.isInteger(deltaBytes)) {
+      throw new TypeError(`deltaBytes must be an integer, got ${deltaBytes}`);
+    }
+    if (deltaBytes === 0) return this;
+
+    // map 返回同长新数组；未受影响的检查点按引用复用（不额外分配）。
+    const next = this.checkpoints.map((cp) =>
+      cp.line > line ? { line: cp.line, offset: cp.offset + deltaBytes } : cp
+    );
+    return new LineIndex(next, this.totalBytes + deltaBytes, this.totalLines, this.interval, {
+      buildMs: this.buildMs,
+      eof: this.eof,
+    });
+  }
+
   toStats(): LineIndexStats {
     return {
       totalBytes: this.totalBytes,
