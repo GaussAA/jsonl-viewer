@@ -71,13 +71,23 @@ export interface ReplaceLineOpts {
   maxTailBackupBytes?: number;
   /** 完成后是否 fsync 落盘。默认 true —— 编辑是低频操作，值得用一次 fsync 换数据安全。 */
   fsync?: boolean;
-  /** 取消回调：在分块边界中止搬移（抛 `WriteCancelledError`，sidecar 保留）。 */
+  /**
+   * 取消回调：在分块边界中止搬移（抛 `WriteCancelledError`）。
+   *
+   * 取消会**自动回滚**（用 sidecar 把文件恢复原样后删除备份），故与批量替换一样是
+   * 零风险的 —— 上层可放心让用户看到「已取消，文件未被修改」。
+   */
   shouldCancel?: () => boolean;
   /** 搬移进度回调（仅在需要搬移时触发）。 */
   onProgress?: (info: { movedBytes: number; totalBytes: number }) => void;
 }
 
-/** 写入被主动取消。文件可能处于半搬移状态，尾部 sidecar 备份仍保留。 */
+/**
+ * 写入被主动取消。
+ *
+ * 正常路径下文件已被**自动回滚**为原样（sidecar 随之清理）；仅当回滚本身失败时，
+ * 异常消息会指明备份仍在何处、可如何手动恢复 —— 那时绝不宣称「文件未被修改」。
+ */
 export class WriteCancelledError extends Error {
   constructor(message: string, options?: { cause?: unknown }) {
     super(message, options);
@@ -226,13 +236,30 @@ async function applyVariableLength(
     await writeAll(fh, replacement, range.start);
     await fh.truncate(fileSize + delta);
   } catch (e) {
+    // 取消是「预期内的中止」而非失败：**先把文件恢复原样**，再抛可识别的错误。
+    // 于是单行编辑的取消与批量替换（在 rename 之前中止）一样是**零风险**的 ——
+    // 上层可以让用户看到「已取消，文件未被修改」，而不是「处于半搬移状态、请手动拼接」。
+    if (e instanceof WriteCancelledError) {
+      const restored = await rollbackToBackup(
+        fh,
+        backupPath,
+        tailStart,
+        tailLen,
+        fileSize,
+        blockSize,
+        opts.fsync ?? true
+      );
+      if (restored) {
+        throw new WriteCancelledError('已取消，文件已按备份恢复原样。', { cause: e });
+      }
+      const hint = backupPath
+        ? `取消后的回滚未完成，尾部原始字节仍保留在 ${backupPath}（自偏移 ${tailStart} 起可原样拼回）`
+        : '该行位于文件末尾（无尾部需搬移），文件未被修改';
+      throw new WriteCancelledError(`已取消；${hint}`, { cause: e });
+    }
     const hint = backupPath
       ? `尾部原始字节已保留在 ${backupPath}（自偏移 ${tailStart} 起可原样拼回）`
       : '该行位于文件末尾，尾部为空、无需备份';
-    // 取消是「预期内的中止」而非失败：保持可识别的错误类型，供上层区分处理。
-    if (e instanceof WriteCancelledError) {
-      throw new WriteCancelledError(`${e.message}；${hint}`, { cause: e });
-    }
     throw new Error(`变长替换失败：${describe(e)}；${hint}`, { cause: e });
   }
 
@@ -538,6 +565,66 @@ async function copyRangeToFile(
   } finally {
     await out.close().catch(() => {});
   }
+}
+
+/**
+ * 把备份文件的内容原样写回 `fh` 的指定偏移（与 `copyRangeToFile` 对称）。
+ *
+ * 供回滚使用 —— 见 `rollbackToBackup` 关于「为何整体恢复而非反向搬移」的说明。
+ */
+async function copyRangeFromFile(
+  src: string,
+  fh: FileHandle,
+  destOffset: number,
+  length: number,
+  blockSize: number
+): Promise<void> {
+  const inFh = await open(src, 'r');
+  try {
+    const buf = Buffer.allocUnsafe(Math.max(1, Math.min(blockSize, length)));
+    let done = 0;
+    while (done < length) {
+      const chunk = Math.min(buf.length, length - done);
+      await readExact(inFh, buf, chunk, done);
+      await writeAll(fh, buf.subarray(0, chunk), destOffset + done);
+      done += chunk;
+    }
+  } finally {
+    await inFh.close().catch(() => {});
+  }
+}
+
+/**
+ * 取消后的回滚：用 sidecar 把文件**整体**恢复原样。
+ *
+ * 为何不做「把已搬移的部分按相反方向搬回去」：那要重新推导搬移方向
+ * （Δ>0 倒序 / Δ<0 正序，回滚又各自是它们的逆），而**方向选错会直接写坏文件** ——
+ * `shiftTail` 已把这条列为本模块的最高风险点。用备份整体恢复完全不必推导方向，
+ * 且复用了崩溃恢复的同一套机制：**一条已经验证过的正确路径**，而不是两条各对一半的。
+ *
+ * @returns true = 已恢复；false = 无需恢复（无尾部）或恢复失败（sidecar 因此保留）
+ */
+async function rollbackToBackup(
+  fh: FileHandle,
+  backupPath: string | undefined,
+  tailStart: number,
+  tailLen: number,
+  fileSize: number,
+  blockSize: number,
+  fsync: boolean
+): Promise<boolean> {
+  if (!backupPath || tailLen <= 0) return false;
+  try {
+    await copyRangeFromFile(backupPath, fh, tailStart, tailLen, blockSize);
+    // 搬移中途文件可能已被撑大（写入超出 EOF 会自动扩展），必须截回原大小。
+    await fh.truncate(fileSize);
+    await trySync(fh, fsync);
+  } catch {
+    // 回滚失败：**保留** sidecar（用户仍可手动恢复），并如实告知 —— 绝不假装已恢复。
+    return false;
+  }
+  await rm(backupPath, { force: true }).catch(() => {});
+  return true;
 }
 
 /* ---------------------------- 辅助 ---------------------------- */

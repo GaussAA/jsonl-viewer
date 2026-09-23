@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
-import { createReadStream, existsSync } from 'node:fs';
+import { createReadStream, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { LineIndex } from '../../indexer/lineIndex.ts';
@@ -204,8 +204,11 @@ test('replaceLine：尾部超过备份上限时拒绝执行，且文件原样不
   }
 });
 
-test('replaceLine：搬移途中取消 → 抛 WriteCancelledError 且保留 sidecar 供恢复', async () => {
-  const { dir, path } = await scaffold('a\n' + 'x'.repeat(100) + '\n');
+test('replaceLine：搬移途中取消 → **零风险**（文件恢复原样 + sidecar 已清理）', async () => {
+  // 语义变更：此前取消只保留 sidecar 让用户手动拼接（文件处于半搬移状态）。
+  // 现在改为自动回滚 —— 与批量替换（rename 之前中止）一致，取消即「什么都没发生过」。
+  const original = 'a\n' + 'x'.repeat(100) + '\n';
+  const { dir, path } = await scaffold(original);
   try {
     const loc = await locate(path, 0);
     await assert.rejects(
@@ -216,9 +219,57 @@ test('replaceLine：搬移途中取消 → 抛 WriteCancelledError 且保留 sid
         }),
       WriteCancelledError
     );
+    assert.equal(await readFile(path, 'utf8'), original, '取消后文件必须逐字节原样');
+    assert.equal((await stat(path)).size, Buffer.byteLength(original), '大小也要回到原样');
+    assert.equal(
+      existsSync(path + TAIL_BACKUP_SUFFIX),
+      false,
+      '回滚成功后 sidecar 随之清理（不留垃圾）'
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('replaceLine：Δ<0（变短）搬移途中取消同样恢复原样', async () => {
+  // 变短时搬移方向相反（正序），回滚用的是同一份备份，故无需区分方向 ——
+  // 这正是选「整体恢复」而非「反向搬移」的收益。
+  const original = 'aaa\n' + 'x'.repeat(100) + '\n';
+  const { dir, path } = await scaffold(original);
+  try {
+    const loc = await locate(path, 0);
+    await assert.rejects(
+      () =>
+        replaceLine(path, loc.range, Buffer.from('a'), 'lf', {
+          blockSize: 4,
+          shouldCancel: () => true,
+        }),
+      WriteCancelledError
+    );
+    assert.equal(await readFile(path, 'utf8'), original);
+    assert.equal(existsSync(path + TAIL_BACKUP_SUFFIX), false);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('replaceLine：回滚失败时如实告知，绝不假装已恢复', async () => {
+  const { dir, path } = await scaffold('a\n' + 'x'.repeat(100) + '\n');
+  try {
+    const loc = await locate(path, 0);
     const side = path + TAIL_BACKUP_SUFFIX;
-    assert.equal(existsSync(side), true, '取消后 sidecar 必须保留');
-    assert.equal((await readFile(side, 'utf8')).length, 101, 'sidecar 应完整保存原始尾部');
+    await assert.rejects(
+      () =>
+        replaceLine(path, loc.range, Buffer.from('aaa'), 'lf', {
+          blockSize: 4,
+          // 回滚前备份被外部移除 → 回滚无法完成，必须说出来而不是报「已恢复」
+          shouldCancel: () => {
+            rmSync(side, { force: true });
+            return true;
+          },
+        }),
+      (e: unknown) => e instanceof WriteCancelledError && /回滚未完成/.test((e as Error).message)
+    );
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
