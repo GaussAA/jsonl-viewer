@@ -212,6 +212,13 @@ export interface EditResultPayload {
   conflict?: boolean;
   /** 是否因 JSON 校验未通过而拒绝（前端可据此提示语法错误）。 */
   invalid?: boolean;
+  /**
+   * 是否被主动取消（此时 `ok` 为 false，但**文件未被修改**）。
+   *
+   * 取消与失败必须分开报：变长编辑的取消会自动回滚（零风险），把它报成「失败」
+   * 会让用户以为文件可能损坏 —— 那是与事实相反的恐慌。
+   */
+  cancelled?: boolean;
   /** 被替换掉的旧行文本（ok=true 时提供，供撤销/重做使用）。 */
   beforeText?: string;
 }
@@ -361,7 +368,7 @@ export interface EditProgressPayload {
    * 之所以复用同一个推送通道：它表达的本就是「长任务的字节级进度」，
    * 与任务语义无关；新增一种长任务时不该再造一条推送链路。
    */
-  kind: 'replace' | 'scanBadLines';
+  kind: 'replace' | 'scanBadLines' | 'edit';
   /** 已处理的原始文件字节数（批量替换时不含被替换区间，它们无需逐字节复制）。 */
   processedBytes: number;
   /** 原始文件总字节数（进度分母）。 */

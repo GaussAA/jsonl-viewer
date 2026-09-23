@@ -1708,3 +1708,81 @@ test('getBadLines：写操作后完整性降级为 partial（列表保留，结�
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+/* ============================ 单行编辑的进度与取消 ============================ */
+
+test('editRecord：取消 → cancelled 标记 + 文件逐字节原样 + 不入历史', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const file = await makeFile(dir, ['{"a":1}', '{"b":2}', '{"c":3}']);
+    const original = await readFile(file, 'utf8');
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    // 让新行更长 → 需要搬移尾部，取消才有意义
+    const res = await ds.editRecord(0, `{"a":"${'x'.repeat(50)}"}`, undefined, {
+      shouldCancel: () => true,
+    });
+
+    assert.equal(res.ok, false);
+    assert.equal(res.cancelled, true, '取消必须可识别 —— 不得混作失败');
+    assert.equal(await readFile(file, 'utf8'), original, '取消是零风险的：文件逐字节原样');
+    assert.equal(ds.getHistory().entries.length, 0, '取消的操作不该进入历史');
+
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('editRecord：进度终态必达 100%（停在 96% 比没有进度条更糟）', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const file = await makeFile(dir, ['{"a":1}', '{"b":2}', '{"c":3}']);
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    const ticks: { processedBytes: number; totalBytes: number }[] = [];
+    const res = await ds.editRecord(0, `{"a":"${'x'.repeat(50)}"}`, undefined, {
+      onProgress: (i) => ticks.push({ ...i }),
+    });
+
+    assert.equal(res.ok, true);
+    assert.ok(ticks.length >= 1, '有搬移就该有进度');
+    const last = ticks[ticks.length - 1];
+    assert.equal(last.processedBytes, last.totalBytes, '终态必须等于总字节数');
+    assert.ok(last.totalBytes > 0);
+
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('editRecord：等长替换不轮询取消（无搬移即无取消可言）', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const file = await makeFile(dir, ['{"a":1}']);
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    let checks = 0;
+    const res = await ds.editRecord(0, '{"a":2}', undefined, {
+      shouldCancel: () => {
+        checks++;
+        return false;
+      },
+      onProgress: () => {
+        throw new Error('等长替换不该上报进度');
+      },
+    });
+
+    assert.equal(res.ok, true);
+    assert.equal(res.inPlace, true, '等长走原位覆写');
+    assert.equal(checks, 0, '单次 IO 的路径不该轮询取消');
+
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

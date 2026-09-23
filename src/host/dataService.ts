@@ -150,6 +150,27 @@ function countLessThan(sorted: readonly number[], x: number): number {
   return lo;
 }
 
+/**
+ * 把宿主侧的编辑选项适配成写入层选项。
+ *
+ * 顺带做字段名映射：写入层上报的是「已搬移字节」（movedBytes），而协议层统一用
+ * 「已处理字节」（processedBytes）—— 三者（替换/扫描/编辑）在前端是同一条进度通道。
+ */
+function toReplaceOpts(opts: EditRecordOpts): {
+  shouldCancel?: () => boolean;
+  onProgress?: (info: { movedBytes: number; totalBytes: number }) => void;
+} {
+  return {
+    ...(opts.shouldCancel ? { shouldCancel: opts.shouldCancel } : {}),
+    ...(opts.onProgress
+      ? {
+          onProgress: (info: { movedBytes: number; totalBytes: number }) =>
+            opts.onProgress?.({ processedBytes: info.movedBytes, totalBytes: info.totalBytes }),
+        }
+      : {}),
+  };
+}
+
 /** 检测文件是否已变更（size/mtime）的最小快照。 */
 export interface FileSnapshot {
   size: number;
@@ -275,6 +296,24 @@ export interface ScanBadLinesOpts {
    *
    * 扫描是**纯读**操作，取消的代价只是白读了一些字节 —— 且取消时**不**替换已发现的
    * 坏行集合（半份扫描结果比没有结果更容易误导）。
+   */
+  shouldCancel?: () => boolean;
+}
+
+/**
+ * 单行编辑的可选行为。
+ *
+ * 只有「需要搬移尾部」的变长编辑才会用到它们：等长替换是单次 IO、末尾行无需搬移，
+ * 两者都在毫秒级完成，轮询取消与上报进度都只是噪音。
+ */
+export interface EditRecordOpts {
+  /** 搬移进度回调（仅在真有搬移时触发）。 */
+  onProgress?: (info: { processedBytes: number; totalBytes: number }) => void;
+  /**
+   * 取消回调：在分块边界中止搬移。
+   *
+   * 取消会**自动回滚**（用备份把文件恢复原样），故与批量替换一样是零风险的 ——
+   * 上层可放心让用户看到「已取消，文件未被修改」。
    */
   shouldCancel?: () => boolean;
 }
@@ -546,7 +585,12 @@ export class DataService {
    *   5. **索引与基线同步**：写盘成功后先换上新索引，再立刻刷新基线快照。二者若不同步，
    *      5s 轮询的 `checkStale` 会把「自写」误判为外部变更并弹「重新加载」横幅。
    */
-  async editRecord(line: number, text: string, expectedBytes?: number): Promise<EditResultPayload> {
+  async editRecord(
+    line: number,
+    text: string,
+    expectedBytes?: number,
+    opts: EditRecordOpts = {}
+  ): Promise<EditResultPayload> {
     const li = await this.ensureIndex();
     const reader = this.reader!;
 
@@ -591,7 +635,8 @@ export class DataService {
         this.path,
         range,
         Buffer.from(text, 'utf8'),
-        detectLineEnding(range, oldContentBytes)
+        detectLineEnding(range, oldContentBytes),
+        toReplaceOpts(opts)
       );
       this.index = li.applyLineReplace(line, res.bytesDelta);
       await this.refreshSnapshot();
@@ -607,6 +652,11 @@ export class DataService {
         beforeText,
       };
     } catch (e) {
+      // 取消与失败必须分开报：取消会自动回滚（文件原样），报成「失败」会让用户
+      // 以为文件可能损坏 —— 那是与事实相反的恐慌。
+      if (e instanceof WriteCancelledError) {
+        return DataService.editFailure(line, e.message, { cancelled: true });
+      }
       return DataService.editFailure(line, e instanceof Error ? e.message : String(e));
     } finally {
       this.editing = false;
@@ -665,7 +715,7 @@ export class DataService {
    * 前置保护与 `editRecord` 一致（写前冲突检测）；落盘复用写入层同一原语
    * `replaceRange`（空 replacement 即区间删除），随后同步索引与基线快照。
    */
-  async deleteRecord(line: number): Promise<EditResultPayload> {
+  async deleteRecord(line: number, opts: EditRecordOpts = {}): Promise<EditResultPayload> {
     const li = await this.ensureIndex();
     const reader = this.reader!;
 
@@ -688,7 +738,8 @@ export class DataService {
       const res = await replaceRange(
         this.path,
         { start: probed.start, end: probed.end },
-        Buffer.alloc(0)
+        Buffer.alloc(0),
+        toReplaceOpts(opts)
       );
       this.index = li.applyLineDelete(line, removedBytes);
       await this.refreshSnapshot();
@@ -704,6 +755,9 @@ export class DataService {
         beforeText: removedText,
       };
     } catch (e) {
+      if (e instanceof WriteCancelledError) {
+        return DataService.editFailure(line, e.message, { cancelled: true });
+      }
       return DataService.editFailure(line, e instanceof Error ? e.message : String(e));
     } finally {
       this.editing = false;
@@ -716,7 +770,11 @@ export class DataService {
    * 新行的行尾风格取「参考行」——优先前一行，其次插入点所在行；二者皆无（空文件）用 LF。
    * 这样在 CRLF 文件里插入的行同样是 CRLF，不会把行尾风格搅乱。
    */
-  async insertRecord(at: number, text: string): Promise<EditResultPayload> {
+  async insertRecord(
+    at: number,
+    text: string,
+    opts: EditRecordOpts = {}
+  ): Promise<EditResultPayload> {
     const li = await this.ensureIndex();
     const reader = this.reader!;
 
@@ -748,7 +806,12 @@ export class DataService {
 
     this.editing = true;
     try {
-      const res = await replaceRange(this.path, { start: insertAt, end: insertAt }, newLineBytes);
+      const res = await replaceRange(
+        this.path,
+        { start: insertAt, end: insertAt },
+        newLineBytes,
+        toReplaceOpts(opts)
+      );
       this.index = li.applyLineInsert(at, newLineBytes.length);
       await this.refreshSnapshot();
       this.shiftKnownBadLinesAfterInsert(at);
@@ -762,6 +825,9 @@ export class DataService {
         costMs: Math.round(res.costMs * 100) / 100,
       };
     } catch (e) {
+      if (e instanceof WriteCancelledError) {
+        return DataService.editFailure(at, e.message, { cancelled: true });
+      }
       return DataService.editFailure(at, e instanceof Error ? e.message : String(e));
     } finally {
       this.editing = false;

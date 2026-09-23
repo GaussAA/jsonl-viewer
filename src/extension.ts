@@ -288,6 +288,20 @@ interface HostHandlerDeps {
 function registerHostHandlers(deps: HostHandlerDeps): vscode.Disposable {
   const { webview, data, uri, context, cancel, post, reportEdit } = deps;
 
+  /**
+   * 执行一个可取消的编辑动作，并在收尾时**必定**摘除取消标记。
+   *
+   * 之所以抽出来：替换 / 插入 / 删除三个端点都需要「驱动取消 + finally 摘除」，
+   * 各写一遍迟早漏一处，而漏掉的后果是 cancel 集合随编辑次数无界增长。
+   */
+  const runCancellableEdit = async <T>(requestId: string, run: () => Promise<T>): Promise<T> => {
+    try {
+      return await run();
+    } finally {
+      cancel.delete(requestId);
+    }
+  };
+
   // 点击坏行→在磁盘文件中定位该行（超大文件降级为提示，不抛错致面板崩溃）。
   const jumpToSource = async (line: number): Promise<void> => {
     try {
@@ -333,14 +347,22 @@ function registerHostHandlers(deps: HostHandlerDeps): vscode.Disposable {
             [HostEndpoint.READ_RECORD]: async (req) =>
               okReply(HostReply.RESULT, req.requestId, await data.readRecord(req.line)),
             // 在第 at 行之前插入一行（编辑能力 M2）。
+            // 插入/删除同样会搬移其后所有字节，故与编辑替换共用同一套进度与取消：
+            // 否则同一个浮层里的取消按钮时灵时不灵，用户无从判断。
             [HostEndpoint.INSERT_RECORD]: async (req) => {
-              const result = await data.insertRecord(req.at, req.text);
+              const result = await runCancellableEdit(req.requestId, () =>
+                data.insertRecord(req.at, req.text, {
+                  shouldCancel: () => cancel.has(req.requestId),
+                })
+              );
               if (result.ok && reportEdit) reportEdit(data);
               return okReply(HostReply.EDIT_RESULT, req.requestId, result);
             },
             // 删除第 line 行（编辑能力 M2）。
             [HostEndpoint.DELETE_RECORD]: async (req) => {
-              const result = await data.deleteRecord(req.line);
+              const result = await runCancellableEdit(req.requestId, () =>
+                data.deleteRecord(req.line, { shouldCancel: () => cancel.has(req.requestId) })
+              );
               if (result.ok && reportEdit) reportEdit(data);
               return okReply(HostReply.EDIT_RESULT, req.requestId, result);
             },
@@ -395,16 +417,33 @@ function registerHostHandlers(deps: HostHandlerDeps): vscode.Disposable {
             // 就地替换某一行（编辑能力）。业务失败（冲突 / JSON 校验不过 / 无权限）同样
             // 走 EDIT_RESULT 回执，便于前端结构化提示；只有宿主内部异常才由
             // dispatchMessage 兜底成 ERROR 回执。
+            // 就地替换某一行（编辑能力 M1）。
+            // 绝大多数是毫秒级完成；只有「需要搬移尾部」的变长编辑（如改大文件首行）
+            // 才谈得上进度与取消 —— 故此处统一接线，是否真有回调由写入层决定
+            // （无搬移即不轮询取消、不上报进度），前端据是否有推送自行决定是否弹横幅。
             [HostEndpoint.EDIT_RECORD]: async (req) => {
-              const result = await data.editRecord(req.line, req.text, req.expectedBytes);
+              const result = await (async () => {
+                try {
+                  return await data.editRecord(req.line, req.text, req.expectedBytes, {
+                    onProgress: (info) =>
+                      post({
+                        type: HostReply.EDIT_PROGRESS,
+                        payload: { kind: 'edit', ...info },
+                      }),
+                    // 取消走既有 cancel 集合（webview 发 CANCEL 端点置位）。
+                    shouldCancel: () => cancel.has(req.requestId),
+                  });
+                } finally {
+                  // 与 REPLACE_TEXT / SCAN_BAD_LINES 同理：摘除标记，否则 cancel 集合
+                  // 会随编辑次数无界增长。
+                  cancel.delete(req.requestId);
+                }
+              })();
               // 成功即通知 VS Code（自定义编辑器路径），使其进入撤销栈。
               // 回退数据由宿主随操作一并记入会话历史，此处无需重复上报。
               if (result.ok && reportEdit) reportEdit(data);
               return okReply(HostReply.EDIT_RESULT, req.requestId, result);
             },
-            // 全文查找替换（编辑能力 M2）：批量改写命中行，一次性原子落盘。
-            // 仅当本批替换具备撤销能力时才上报 —— 超限时如实告知（undoable=false），
-            // 而不是静默地让用户以为 Ctrl+Z 能救回来。
             // 坏行诊断（M3 收尾）：查询「已发现」集合。
             // 语义上**不等价于全量**（只含用户读过/抽样过的范围），故回执带 partial 标记 ——
             // 把它当全量会得出「文件挺干净」这种与事实相反的结论。
@@ -430,6 +469,9 @@ function registerHostHandlers(deps: HostHandlerDeps): vscode.Disposable {
               })();
               return okReply(HostReply.BAD_LINES, req.requestId, result);
             },
+            // 全文查找替换（编辑能力 M2）：批量改写命中行，一次性原子落盘。
+            // 仅当本批替换具备撤销能力时才上报 —— 超限时如实告知（undoable=false），
+            // 而不是静默地让用户以为 Ctrl+Z 能救回来。
             [HostEndpoint.REPLACE_TEXT]: async (req) => {
               const result = await (async () => {
                 try {
