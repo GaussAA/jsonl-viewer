@@ -46,11 +46,13 @@ import {
   COPY_MAX_BYTES,
   MAX_HISTORY_ENTRIES,
   MAX_HISTORY_BYTES,
+  MAX_BAD_LINES,
   PROGRESS_THROTTLE_MS,
 } from '../constants.ts';
 import { buildIndexWithFallback, type IndexHost } from './indexHost.ts';
 import { buildRecordsPayload } from '../protocol/rpc.ts';
 import type {
+  BadLinesPayload,
   CopyLinesResultPayload,
   DeleteManyResultPayload,
   DeletedRange,
@@ -264,6 +266,19 @@ export interface ReplaceOpts {
   shouldCancel?: () => boolean;
 }
 
+/** 坏行全文件扫描的可选行为。 */
+export interface ScanBadLinesOpts {
+  /** 进度回调（已按 `PROGRESS_THROTTLE_MS` 节流，终态必发）。 */
+  onProgress?: (info: { processedBytes: number; totalBytes: number }) => void;
+  /**
+   * 取消回调：返回 true 则中止本次扫描。
+   *
+   * 扫描是**纯读**操作，取消的代价只是白读了一些字节 —— 且取消时**不**替换已发现的
+   * 坏行集合（半份扫描结果比没有结果更容易误导）。
+   */
+  shouldCancel?: () => boolean;
+}
+
 export class DataService {
   private index: LineIndex | undefined;
   private reader: ByteReader | undefined;
@@ -272,8 +287,22 @@ export class DataService {
   private host: IndexHost | undefined;
   /** 构建统计（来自 host.build，供 getOverview/reload）。 */
   private buildStats: { buildMs: number; eof: boolean } | undefined;
-  /** 已检查范围中的坏行 lineId 集合（内存只与「已确认的坏行数」成正比）。 */
+  /**
+   * 已检查范围中的坏行 lineId 集合（内存只与「已确认的坏行数」成正比）。
+   *
+   * **它不是全文件坏行集**：只覆盖用户读过/抽样过的行。要拿全量必须显式
+   * `scanBadLines()`。二者在前端必须可区分（`BadLinesPayload.partial`）——
+   * 把「已发现 3 个坏行」当成「文件只有 3 个坏行」，在数据清洗场景下是危险的误判。
+   */
   private readonly knownBadLines = new Set<number>();
+  /**
+   * `knownBadLines` 是否已是**全文件全量**（最近一次 `scanBadLines` 成功、且之后
+   * 没有任何改变文件内容的操作）。
+   *
+   * 为何写操作后要降级：行号与行内容都变了，「全量」这一结论不再有依据。但已发现的
+   * 坏行列表仍有价值（行号已同步位移），故只降级完整性标记、不清空列表。
+   */
+  private badLinesComplete = false;
   /** 构建索引时的文件快照（用来检测文件是否已变更）。 */
   private snapshot: FileSnapshot | undefined;
   /**
@@ -603,6 +632,11 @@ export class DataService {
   private async refreshSnapshot(): Promise<void> {
     const after = await this.currentSnapshot();
     if (after) this.snapshot = after;
+    // 文件内容已变 ⇒「坏行已全量扫过」这一结论不再有依据（行号与内容都动了）。
+    // 放在这个统一收口点而非 7 个写方法里各写一遍 —— 漏掉任何一处都会让前端
+    // 拿一份过期的「全量」结论去说服用户，那比不支持扫描更危险。
+    // 注意只降级完整性标记，**不清空**已发现列表（其行号位移已被各处正确维护）。
+    this.badLinesComplete = false;
   }
 
   /** 删除行之后：行号整体前移，坏行集合里的行号必须同步位移，否则红标会错位。 */
@@ -1586,6 +1620,105 @@ export class DataService {
     return { fields: res.fields, total: res.total, scanned: res.scanned };
   }
 
+  /* ------------------------- 坏行诊断（M3 收尾） ------------------------- */
+
+  /**
+   * 读取「已发现」的坏行集合。
+   *
+   * 该集合只覆盖宿主**已检查过**的范围（用户读过的行 + 抽样行 + 上次扫描结果），
+   * 故未完成全量扫描时 `partial` 恒为 true —— 前端据此决定文案，绝不把它说成
+   * 「文件共有 N 个坏行」。把它当全量用在数据清洗里会得出相反结论（「文件挺干净」）。
+   */
+  getBadLines(): BadLinesPayload {
+    const all = [...this.knownBadLines].toSorted((a, b) => a - b);
+    const truncated = all.length > MAX_BAD_LINES;
+    return {
+      lines: truncated ? all.slice(0, MAX_BAD_LINES) : all,
+      partial: !this.badLinesComplete,
+      // 未做过范围扫描时无「已扫描行数」可言，填 0（与 partial=true 一致）。
+      scanned: this.badLinesComplete ? (this.index?.totalLines ?? 0) : 0,
+      totalLines: this.index?.totalLines ?? 0,
+      truncated,
+      costMs: 0,
+    };
+  }
+
+  /**
+   * 全文件扫描坏行（流式、可取消、带进度）。
+   *
+   * 为何需要：`knownBadLines` 只覆盖已检查范围，据它判断「文件干净与否」是危险误判；
+   * 而数据清洗的第一步恰恰是「这文件到底有多少坏行、都在哪」。
+   *
+   * 判定口径**必须与列表红标完全一致**，否则会出现「列表说好、扫描说坏」这种
+   * 最难解释的不一致：超长行按 `isOversized` 视作合法（列表同样不解析它），
+   * 只有 scan 的 `error`（触到 maxLineBytes）与 JSON 解析失败才算坏行。
+   *
+   * 位置选择：与 `getSampleFields` 一样在主线程做（只读流式扫描，逐行 await 让出
+   * 事件循环，webview 在独立进程不受影响）。未下沉 worker 是因为那要扩 worker
+   * 协议，而扫描是低频的显式用户动作；若日后成为瓶颈，可平移至 `IndexHost`
+   * （接口形状已与 search/filter 一致）。
+   */
+  async scanBadLines(opts: ScanBadLinesOpts = {}): Promise<BadLinesPayload> {
+    const li = await this.ensureIndex();
+    const reader = this.reader!;
+    const started = performance.now();
+    const totalBytes = li.totalBytes;
+    const lines: number[] = [];
+    let scanned = 0;
+    let truncated = false;
+    let processedBytes = 0;
+    let lastTick = 0;
+
+    for await (const r of li.scan(reader, 0, li.totalLines)) {
+      if (opts.shouldCancel?.()) {
+        // 取消即**不**替换已发现集合：半份结果看起来像「文件很干净」，比没有结果更糟。
+        return {
+          lines: [],
+          partial: true,
+          scanned,
+          totalLines: li.totalLines,
+          truncated: false,
+          cancelled: true,
+          costMs: Math.round(performance.now() - started),
+        };
+      }
+      scanned++;
+      processedBytes += r.end - r.start;
+
+      // 进度按字节节流；**终态必发**（停在 96% 的进度条比没有进度条更糟）。
+      const now = performance.now();
+      if (scanned >= li.totalLines || now - lastTick >= PROGRESS_THROTTLE_MS) {
+        lastTick = now;
+        opts.onProgress?.({ processedBytes, totalBytes });
+      }
+
+      const bad = r.error
+        ? true
+        : isOversized(r.bytes.length)
+          ? false // 与列表口径一致：超大行不解析，视作合法
+          : !parseJsonLine(r.bytes.toString('utf8')).ok;
+      if (!bad) continue;
+
+      // 超上限后只标记不记录 —— 载荷与前端 DOM 都不该随坏行数无界增长。
+      if (lines.length >= MAX_BAD_LINES) truncated = true;
+      else lines.push(r.line);
+    }
+
+    // 扫描成功即权威全量，**整体替换**而非合并：合并会让「已被改好的行」永远留在列表里。
+    this.knownBadLines.clear();
+    for (const l of lines) this.knownBadLines.add(l);
+    this.badLinesComplete = true;
+
+    return {
+      lines,
+      partial: false,
+      scanned,
+      totalLines: li.totalLines,
+      truncated,
+      costMs: Math.round(performance.now() - started),
+    };
+  }
+
   /**
    * Task 6 全文/字段搜索：委托 IndexHost（worker 或主线程）流式顺序扫描匹配行。
    * - 全文搜索不做 JSON.parse（纯文本匹配，大文件成本可控）；
@@ -1660,6 +1793,7 @@ export class DataService {
     this.buildStats = undefined;
     this.snapshot = undefined;
     this.knownBadLines.clear();
+    this.badLinesComplete = false;
     // 会话编辑历史必须一并作废：行号与偏移在重载后已整体失效，用旧历史回退
     // 会**改到错误的行**上 —— 这比「不能撤销」危险得多。
     this.history.length = 0;

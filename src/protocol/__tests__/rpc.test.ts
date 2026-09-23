@@ -110,6 +110,22 @@ const baseHandlers: HostHandlerMap = {
     okReply(HostReply.HISTORY_RESULT, r.requestId, { ok: true, steps: 1, cursor: 1, total: 1 }),
   [HostEndpoint.REVERT_TO]: (r) =>
     okReply(HostReply.HISTORY_RESULT, r.requestId, { ok: true, steps: 1, cursor: 0, total: 1 }),
+  [HostEndpoint.GET_BAD_LINES]: (r) =>
+    okReply(HostReply.BAD_LINES, r.requestId, {
+      lines: [],
+      partial: true,
+      scanned: 0,
+      totalLines: 0,
+      truncated: false,
+    }),
+  [HostEndpoint.SCAN_BAD_LINES]: (r) =>
+    okReply(HostReply.BAD_LINES, r.requestId, {
+      lines: [],
+      partial: false,
+      scanned: 0,
+      totalLines: 0,
+      truncated: false,
+    }),
   [HostEndpoint.CANCEL]: () => undefined,
 };
 

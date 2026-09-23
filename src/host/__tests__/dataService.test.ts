@@ -13,7 +13,7 @@ import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DataService } from '../dataService.ts';
-import { MAX_SELECTION_LINES, MAX_HISTORY_ENTRIES } from '../../constants.ts';
+import { MAX_SELECTION_LINES, MAX_HISTORY_ENTRIES, MAX_BAD_LINES } from '../../constants.ts';
 
 async function makeFile(dir: string, lines: string[]): Promise<string> {
   const file = join(dir, 'data.jsonl');
@@ -1446,6 +1446,262 @@ test('history：五种操作混合后一路撤销到底，再一路重做，两�
     assert.equal(fwd.ok, true);
     assert.equal(fwd.steps, 5);
     assert.equal(await readFile(file, 'utf8'), finalState, '回到当初，逐字节一致');
+
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+/* ============================ 坏行诊断（M3 收尾） ============================ */
+
+test('getBadLines：未扫描时 partial=true，且不等于全量结论', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const file = await makeFile(dir, ['{"a":1}', 'not-json', '{"c":3}']);
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    // 尚未读过任何行 → 空集合，且明确是「部分」
+    const before = ds.getBadLines();
+    assert.deepEqual(before.lines, []);
+    assert.equal(before.partial, true, '未做范围扫描，绝不能声称是全量');
+
+    // 读一读，坏行才被发现（惰性发现语义）
+    await ds.readRecord(1);
+    const after = ds.getBadLines();
+    assert.deepEqual(after.lines, [1]);
+    assert.equal(after.partial, true, '读了几行仍不是全量');
+
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('scanBadLines：全好行 → 空结果且 partial=false（权威全量）', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const file = await makeFile(dir, ['{"a":1}', '[1,2]', '"str"', 'null']);
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    const res = await ds.scanBadLines();
+    assert.deepEqual(res.lines, []);
+    assert.equal(res.partial, false, '全文件扫过，结论是权威的');
+    assert.equal(res.scanned, 4);
+    assert.equal(res.totalLines, 4);
+    assert.equal(res.truncated, false);
+    assert.ok((res.costMs ?? -1) >= 0, '回传耗时');
+
+    assert.equal(ds.getBadLines().partial, false, '查询接口同步为全量');
+
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('scanBadLines：坏行行号升序、空行也算坏行', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const file = join(dir, 'data.jsonl');
+    // 空行不是合法 JSON —— 与列表红标口径一致
+    await writeFile(file, '{"a":1}\nnot-json\n\n{"d":4}\n{bad}\n');
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    const res = await ds.scanBadLines();
+    assert.deepEqual(res.lines, [1, 2, 4], '升序且含空行');
+    assert.equal(res.scanned, 5);
+    assert.deepEqual(ds.getBadLines().lines, [1, 2, 4], '已发现集合被整体替换');
+
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('scanBadLines：超大行不判坏（口径必须与列表红标一致）', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    // 300KB > RECORD_INLINE_MAX_BYTES(256KB)：列表对它走 summarizeRawLine、不解析，
+    // 同样视作合法。若扫描这里判坏，就会出现「列表显示正常、扫描说它是坏行」的
+    // 矛盾结论 —— 这类不一致最耗排查时间。
+    const huge = 'x'.repeat(300 * 1024);
+    const file = await makeFile(dir, [huge, '{"a":1}']);
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    const res = await ds.scanBadLines();
+    assert.deepEqual(res.lines, [], '超大行与列表口径一致：不判坏');
+
+    // 对照：列表读同一行也不是坏行
+    const batch = await ds.readRecords(0, 1);
+    assert.equal(batch.items[0].ok, true, '列表同样认为它不是坏行');
+
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('scanBadLines：进度终态必达 100%（停在 96% 比没有进度条更糟）', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const file = await makeFile(dir, ['{"a":1}', '{"b":2}', '{"c":3}']);
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    const ticks: { processedBytes: number; totalBytes: number }[] = [];
+    await ds.scanBadLines({ onProgress: (i) => ticks.push({ ...i }) });
+
+    assert.ok(ticks.length >= 1, '至少上报一次进度');
+    const last = ticks[ticks.length - 1];
+    assert.equal(last.processedBytes, last.totalBytes, '终态字节数必须等于总字节数');
+    assert.ok(last.totalBytes > 0);
+
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('scanBadLines：取消 → cancelled 标记、结果为空、已发现集合不被替换', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const file = await makeFile(dir, ['not-json', '{"b":2}', 'not-json-2']);
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    // 先发现第 0 行是坏行
+    await ds.readRecord(0);
+    assert.deepEqual(ds.getBadLines().lines, [0]);
+
+    let calls = 0;
+    const res = await ds.scanBadLines({ shouldCancel: () => calls++ >= 1 });
+
+    assert.equal(res.cancelled, true, '取消必须可识别，不得混作失败');
+    assert.equal(res.scanned, 1, '扫了 1 行即中止');
+    assert.deepEqual(res.lines, [], '取消不交回半份结果');
+    assert.equal(res.partial, true, '取消后仍不是全量');
+
+    // 关键：半份扫描**不**替换已发现集合。若替换成空，前端会以为「文件干净了」——
+    // 那比没有这个功能更糟。
+    assert.deepEqual(ds.getBadLines().lines, [0], '已发现集合保持原样');
+    assert.equal(ds.getBadLines().partial, true, '完整性未升级');
+
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('scanBadLines：坏行超上限时截断并如实标记', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const file = await makeFile(
+      dir,
+      Array.from({ length: MAX_BAD_LINES + 1 }, () => 'bad')
+    );
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    const res = await ds.scanBadLines();
+    assert.equal(res.truncated, true, '必须如实标记，静默截断会让用户以为文件只有这些坏行');
+    assert.equal(res.lines.length, MAX_BAD_LINES);
+    assert.equal(res.scanned, MAX_BAD_LINES + 1, '扫描本身仍然走完全文件');
+    assert.equal(res.partial, false, '截断是容量问题，与「是否扫完」是两回事');
+
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('scanBadLines：空文件不崩，返回空结果', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    // 真正的 0 字节文件（注意 makeFile([]) 生成的是「含一个空行的文件」，不是空文件）
+    const file = join(dir, 'data.jsonl');
+    await writeFile(file, '');
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    const res = await ds.scanBadLines();
+    assert.deepEqual(res.lines, []);
+    assert.equal(res.scanned, 0);
+    assert.equal(res.totalLines, 0);
+    assert.equal(res.partial, false);
+
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('scanBadLines：只含换行的文件 = 1 个空行 = 1 个坏行（口径一致，非缺陷）', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const file = join(dir, 'data.jsonl');
+    await writeFile(file, '\n');
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    // 空行不是合法 JSON，故算坏行 —— 这与列表红标口径一致。之所以单列一条测试，
+    // 是因为「空文件显示 1 个坏行」看着像 bug，实际是有意为之：真实 JSONL 里
+    // 的空行往往是导出工具的残留，用户恰恰需要看见它。
+    const res = await ds.scanBadLines();
+    assert.deepEqual(res.lines, [0]);
+    assert.equal(res.scanned, 1);
+
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('scanBadLines：扫描结果整体替换（被改好的行不再出现）', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const file = await makeFile(dir, ['not-json', '{"b":2}']);
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    await ds.readRecord(0);
+    assert.deepEqual(ds.getBadLines().lines, [0]);
+
+    // 把它改好 —— 之后扫描就该看不见它（合并式更新会让它永远留在列表里）
+    await ds.editRecord(0, '{"a":1}');
+    assert.deepEqual(ds.getBadLines().lines, [], '编辑已摘除该坏行');
+
+    const res = await ds.scanBadLines();
+    assert.deepEqual(res.lines, []);
+
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('getBadLines：写操作后完整性降级为 partial（列表保留，结论作废）', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const file = await makeFile(dir, ['{"a":1}', 'not-json', '{"c":3}']);
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    const scanned = await ds.scanBadLines();
+    assert.equal(scanned.partial, false);
+    assert.deepEqual(scanned.lines, [1]);
+
+    // 任何改动文件内容的操作都会让「已全量扫过」这一结论失去依据：
+    // 行号与内容都变了，据此声称「文件只有 1 个坏行」就是误导。
+    await ds.insertRecord(0, '{"new":0}');
+
+    const after = ds.getBadLines();
+    assert.equal(after.partial, true, '写操作后必须降级');
+    assert.deepEqual(after.lines, [2], '但已发现列表保留（行号已正确位移）');
 
     await ds.dispose();
   } finally {

@@ -48,6 +48,15 @@ export const HostEndpoint = {
   COPY_LINES: 'copyLines',
   /** 读取会话内的编辑历史（不含回退所需的原文，那是宿主内部事务）。 */
   GET_HISTORY: 'getHistory',
+  /**
+   * 读取「已发现」的坏行集合。
+   *
+   * **语义警告**：该集合只覆盖宿主已检查过的范围（用户读过/抽样过的行），
+   * 不是全文件坏行集。前端必须如实标注，否则用户会误判「文件基本干净」。
+   */
+  GET_BAD_LINES: 'getBadLines',
+  /** 全文件扫描坏行（耗时只读操作，可取消、带进度）。扫描结果是权威全量。 */
+  SCAN_BAD_LINES: 'scanBadLines',
   /** 撤销一步（与 VS Code 的 Ctrl+Z 走同一光标，二者不会各说各话）。 */
   UNDO_EDIT: 'undoEdit',
   /** 重做一步。 */
@@ -90,6 +99,8 @@ export const HostReply = {
   HISTORY: 'history',
   /** 撤销 / 重做 / 回退的结果。 */
   HISTORY_RESULT: 'historyResult',
+  /** 坏行查询 / 扫描的结果。 */
+  BAD_LINES: 'badLines',
   /**
    * host 主动推送：耗时写操作的进度（批量重写的全文件重写阶段）。
    *
@@ -345,12 +356,46 @@ export interface HistoryResultPayload {
 
 /** 耗时写操作的进度（host → webview 主动推送）。 */
 export interface EditProgressPayload {
-  /** 操作类型；目前仅批量替换会推送。 */
-  kind: 'replace';
-  /** 已处理的原始文件字节数（不含被替换区间，它们无需逐字节复制）。 */
+  /**
+   * 任务类型 —— 决定前端展示什么文案。
+   * 之所以复用同一个推送通道：它表达的本就是「长任务的字节级进度」，
+   * 与任务语义无关；新增一种长任务时不该再造一条推送链路。
+   */
+  kind: 'replace' | 'scanBadLines';
+  /** 已处理的原始文件字节数（批量替换时不含被替换区间，它们无需逐字节复制）。 */
   processedBytes: number;
   /** 原始文件总字节数（进度分母）。 */
   totalBytes: number;
+}
+
+/**
+ * 坏行查询 / 扫描的结果。
+ *
+ * 两个「完整性」字段必须分开表达，不可合成一个布尔：
+ * - `partial`：结果是否只覆盖部分范围（未扫描全文件）。这是**语义**上的不完整。
+ * - `truncated`：结果是否因超出 MAX_BAD_LINES 被砍掉。这是**容量**上的不完整。
+ * 二者可同时为真，且给用户的提示完全不同（「去扫描」 vs 「坏行太多」）。
+ */
+export interface BadLinesPayload {
+  /** 坏行行号（升序）。 */
+  lines: number[];
+  /** 是否只覆盖部分范围（查询已发现集合时恒为 true；全文件扫描后为 false）。 */
+  partial: boolean;
+  /** 已检查/已扫描的行数。 */
+  scanned: number;
+  /** 文件总行数（partial 为 true 时可据此估出未覆盖比例）。 */
+  totalLines: number;
+  /** 是否因超出上限被截断（lines 不是范围内的全部坏行）。 */
+  truncated: boolean;
+  /**
+   * 扫描被主动取消（此时 `lines` 为空、`partial` 为 true、`scanned` 为已扫行数）。
+   *
+   * 取消与失败必须分开报：取消是零风险的（纯读操作），报成「失败」会让用户以为
+   * 文件或索引出了问题。
+   */
+  cancelled?: boolean;
+  /** 扫描耗时（毫秒）；查询已发现集合时为 0。 */
+  costMs?: number;
 }
 
 /** 一次被改写的行：行号 + 前后文本（撤销时按行号升序写回 before）。 */
@@ -441,6 +486,8 @@ export type HostRequest =
       lines: number[];
     }
   | { type: typeof HostEndpoint.GET_HISTORY; requestId: string }
+  | { type: typeof HostEndpoint.GET_BAD_LINES; requestId: string }
+  | { type: typeof HostEndpoint.SCAN_BAD_LINES; requestId: string }
   | { type: typeof HostEndpoint.UNDO_EDIT; requestId: string }
   | { type: typeof HostEndpoint.REDO_EDIT; requestId: string }
   | {
@@ -473,7 +520,8 @@ export type HostResponse =
     }
   | { type: typeof HostReply.COPY_RESULT; requestId: string; payload: CopyLinesResultPayload }
   | { type: typeof HostReply.HISTORY; requestId: string; payload: HistoryPayload }
-  | { type: typeof HostReply.HISTORY_RESULT; requestId: string; payload: HistoryResultPayload };
+  | { type: typeof HostReply.HISTORY_RESULT; requestId: string; payload: HistoryResultPayload }
+  | { type: typeof HostReply.BAD_LINES; requestId: string; payload: BadLinesPayload };
 
 export type RpcMessage = HostRequest | HostResponse;
 
@@ -595,6 +643,12 @@ export type HostHandlerMap = {
   ) => Promise<HostResponse> | HostResponse;
   [HostEndpoint.GET_HISTORY]: (
     req: Extract<HostRequest, { type: typeof HostEndpoint.GET_HISTORY }>
+  ) => Promise<HostResponse> | HostResponse;
+  [HostEndpoint.GET_BAD_LINES]: (
+    req: Extract<HostRequest, { type: typeof HostEndpoint.GET_BAD_LINES }>
+  ) => Promise<HostResponse> | HostResponse;
+  [HostEndpoint.SCAN_BAD_LINES]: (
+    req: Extract<HostRequest, { type: typeof HostEndpoint.SCAN_BAD_LINES }>
   ) => Promise<HostResponse> | HostResponse;
   [HostEndpoint.UNDO_EDIT]: (
     req: Extract<HostRequest, { type: typeof HostEndpoint.UNDO_EDIT }>

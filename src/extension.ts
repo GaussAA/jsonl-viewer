@@ -405,6 +405,31 @@ function registerHostHandlers(deps: HostHandlerDeps): vscode.Disposable {
             // 全文查找替换（编辑能力 M2）：批量改写命中行，一次性原子落盘。
             // 仅当本批替换具备撤销能力时才上报 —— 超限时如实告知（undoable=false），
             // 而不是静默地让用户以为 Ctrl+Z 能救回来。
+            // 坏行诊断（M3 收尾）：查询「已发现」集合。
+            // 语义上**不等价于全量**（只含用户读过/抽样过的范围），故回执带 partial 标记 ——
+            // 把它当全量会得出「文件挺干净」这种与事实相反的结论。
+            [HostEndpoint.GET_BAD_LINES]: async (req) =>
+              okReply(HostReply.BAD_LINES, req.requestId, data.getBadLines()),
+            // 全文件扫描坏行：耗时只读操作，推进度并支持取消。
+            // 取消时宿主**不**替换已发现集合（半份结果比没有结果更容易误导）。
+            [HostEndpoint.SCAN_BAD_LINES]: async (req) => {
+              const result = await (async () => {
+                try {
+                  return await data.scanBadLines({
+                    onProgress: (info) =>
+                      post({
+                        type: HostReply.EDIT_PROGRESS,
+                        payload: { kind: 'scanBadLines', ...info },
+                      }),
+                    shouldCancel: () => cancel.has(req.requestId),
+                  });
+                } finally {
+                  // 与 REPLACE_TEXT 同理：摘除标记，否则 cancel 集合随请求次数无界增长。
+                  cancel.delete(req.requestId);
+                }
+              })();
+              return okReply(HostReply.BAD_LINES, req.requestId, result);
+            },
             [HostEndpoint.REPLACE_TEXT]: async (req) => {
               const result = await (async () => {
                 try {
