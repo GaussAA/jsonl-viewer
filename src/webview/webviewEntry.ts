@@ -20,6 +20,7 @@ import type { ToolbarInfo } from './toolbar.ts';
 import { createDetailTree, type DetailTreeNavHandlers } from './detailTree.ts';
 import { createEditPanel } from './editPanel.ts';
 import { createHistoryPanel } from './historyPanel.ts';
+import { createBadLinesPanel, scanProgressText } from './badLinesPanel.ts';
 import { describeEditFailure, replaceConfirmText, replaceProgressText } from './editLogic.ts';
 import { createColumnLayout, type ColumnLayout } from './columnLayout.ts';
 import { createQueryActions, type QueryActions } from './queryActions.ts';
@@ -29,6 +30,7 @@ import { mergePersistedState, summarizeWithLayout } from './queryLogic.ts';
 import type { FieldCondition, FieldLayout } from './queryLogic.ts';
 import { HostEndpoint } from '../protocol/rpc.ts';
 import type {
+  BadLinesPayload,
   CopyLinesResultPayload,
   DeleteManyResultPayload,
   EditResultPayload,
@@ -39,7 +41,12 @@ import type {
 import type { InitPayload, OverviewPayload, RecordsPayload } from '../protocol/rpc.ts';
 import { CSS_TEXT } from './styles.ts';
 import { describeReplaceOutcome } from '../core/replaceLogic.ts';
-import { INIT_TIMEOUT_MS, MAX_SELECTION_LINES, RPC_HEAVY_TIMEOUT_MS } from '../constants.ts';
+import {
+  BAD_LINES_REFRESH_DEBOUNCE_MS,
+  INIT_TIMEOUT_MS,
+  MAX_SELECTION_LINES,
+  RPC_HEAVY_TIMEOUT_MS,
+} from '../constants.ts';
 
 /** 渲染用的记录形状（与 LRUCache 值一致）。 */
 export type CachedRecord = RecordEntry & { value?: unknown };
@@ -267,6 +274,7 @@ export function main(): void {
     onSearchNext: () => actions.stepSearch(1),
     onReplaceAll: (query, replacement) => replaceAll(query, replacement),
     onOpenHistory: () => historyPanel.open(),
+    onOpenBadLines: () => badLinesPanel.open(),
     onApplyFilter: (cond) => actions.runFilter(cond),
     onApplyLayout: (layout) => actions.applyLayout(layout),
   });
@@ -321,10 +329,23 @@ export function main(): void {
    */
   let activeReplace: { requestId: string } | null = null;
 
-  /** 写操作进度 → 横幅（只换文字，不得触碰「取消」按钮）。 */
+  /** 正在执行的坏行全文件扫描（null = 无）。 */
+  let activeScan: { requestId: string } | null = null;
+
+  /**
+   * 长任务进度 → 横幅（只换文字，不得触碰「取消」按钮）。
+   *
+   * 按 `kind` 分派而非各订阅一次：进度通道本就是「长任务的字节级进度」，
+   * 与任务语义无关；加一种长任务不该再造一条推送链路。
+   */
   bus.onEditProgress((info) => {
-    if (!activeReplace || info.kind !== 'replace') return;
-    banner.setText(replaceProgressText(info.processedBytes, info.totalBytes));
+    if (info.kind === 'replace' && activeReplace) {
+      banner.setText(replaceProgressText(info.processedBytes, info.totalBytes));
+      return;
+    }
+    if (info.kind === 'scanBadLines' && activeScan) {
+      banner.setText(scanProgressText(info.processedBytes, info.totalBytes));
+    }
   });
 
   // 宿主返回的通用错误（如 init/索引构建失败）当前无 requestId 关联，
@@ -424,6 +445,8 @@ export function main(): void {
       list.refresh();
       if (state.selectedLine !== undefined) void showDetailForLine(state.selectedLine);
       updateToolbar();
+      // 编辑可能把坏行改好（也可能因行增删而位移）→ 徽章要跟上。
+      scheduleBadLinesRefresh();
     },
   });
   rootEl.appendChild(editPanel.root);
@@ -465,10 +488,114 @@ export function main(): void {
       list.refresh();
       updateToolbar();
       if (state.selectedLine !== undefined) void showDetailForLine(state.selectedLine);
+      // 撤销/重做可能把行改回来、也可能删掉一批 → 徽章须重算。
+      scheduleBadLinesRefresh();
     },
     notify: (message) => banner.show(message, undefined),
   });
   rootEl.appendChild(historyPanel.root);
+
+  /* ---------------- 坏行诊断浮层（惰性发现 + 显式全量扫描） ---------------- */
+
+  /** 扫描是否在进行中（浮层据此禁用按钮 —— 也是「不允许并发第二次扫描」的闸门）。 */
+  let scanningBadLines = false;
+  /** 读批后的刷新防抖句柄：滚动会连续读批，逐次拉取只是无意义的 IPC 压力。 */
+  let badLinesRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+
+  /** 宿主无响应时的兜底：标记为 partial —— 不假装是权威全量。 */
+  function emptyBadLines(): BadLinesPayload {
+    return { lines: [], partial: true, scanned: 0, totalLines: 0, truncated: false };
+  }
+
+  /** 拉取坏行计数并更新徽章。失败静默：它只是辅助提示，不该打断主流程。 */
+  async function refreshBadLines(): Promise<void> {
+    try {
+      const res = await bus.request<BadLinesPayload>(HostEndpoint.GET_BAD_LINES, {}).promise;
+      if (res) toolbar.update({ badLines: { count: res.lines.length, partial: res.partial } });
+    } catch {
+      // 取不到就不显示徽章 —— 为一条辅助信息弹错误横幅只会打扰用户。
+    }
+  }
+
+  /** 防抖刷新（滚动浏览会连续触发读批）。 */
+  function scheduleBadLinesRefresh(): void {
+    if (badLinesRefreshTimer) clearTimeout(badLinesRefreshTimer);
+    badLinesRefreshTimer = setTimeout(() => {
+      badLinesRefreshTimer = undefined;
+      void refreshBadLines();
+    }, BAD_LINES_REFRESH_DEBOUNCE_MS);
+  }
+
+  /** 跳转到某行（坏行定位）：选中 + 滚动 + 详情，走单一入口保证视觉与选区一致。 */
+  function jumpToLine(line: number): void {
+    selectSingle(line);
+    list.scrollToLine(line);
+    void showDetailForLine(line);
+    updateNavEnabled();
+  }
+
+  /**
+   * 把坏行写入选区，返回实际选中数。
+   *
+   * 超上限**拒绝而非截断**：静默截断会让用户以为「坏行都选上了」，随后一次删除
+   * 删掉的可就不只是坏行 —— 这类后果不可逆。
+   */
+  function selectBadLines(lines: readonly number[]): number {
+    if (lines.length === 0) return 0;
+    if (lines.length > MAX_SELECTION_LINES) {
+      banner.show(
+        `坏行过多（${lines.length} 行，超过单次选择上限 ${MAX_SELECTION_LINES}）——` +
+          '请分批处理，或改用外部清洗工具。',
+        undefined
+      );
+      return 0;
+    }
+    selectedLines.clear();
+    for (const l of lines) selectedLines.add(l);
+    selAnchor = lines[0];
+    state.selectedLine = lines[0];
+    list.select(lines[0]);
+    syncSelection();
+    return selectedLines.size;
+  }
+
+  const badLinesPanel = createBadLinesPanel({
+    fetchBadLines: async () => {
+      const res = await bus.request<BadLinesPayload>(HostEndpoint.GET_BAD_LINES, {}).promise;
+      return res ?? emptyBadLines();
+    },
+    scanBadLines: async () => {
+      scanningBadLines = true;
+      try {
+        const { requestId, promise } = bus.request<BadLinesPayload>(
+          HostEndpoint.SCAN_BAD_LINES,
+          {},
+          { timeoutMs: RPC_HEAVY_TIMEOUT_MS }
+        );
+        // 扫描大文件要数秒：横幅给进度与取消。取消**只发 CANCEL、不 settle 本地
+        // Promise** —— 要等宿主回执才能如实说「坏行集合未被改动」，本地草草收尾
+        // 会让用户不确定文件到底动了没有。
+        activeScan = { requestId };
+        banner.show(scanProgressText(0, 0), '取消', () => {
+          bus.post(HostEndpoint.CANCEL, { requestId });
+        });
+        const res = await promise;
+        // 直接用扫描结果更新徽章，省一次往返。
+        if (res && !res.cancelled) {
+          toolbar.update({ badLines: { count: res.lines.length, partial: res.partial } });
+        }
+        return res ?? emptyBadLines();
+      } finally {
+        activeScan = null;
+        scanningBadLines = false;
+      }
+    },
+    isScanning: () => scanningBadLines,
+    jumpTo: (line) => jumpToLine(line),
+    selectLines: (lines) => selectBadLines(lines),
+    notify: (message) => banner.show(message, undefined),
+  });
+  rootEl.appendChild(badLinesPanel.root);
 
   /**
    * 打开编辑浮层：先按需拉取该行的磁盘原文（列表缓存里只有解析后的 value，不能当原文用），
@@ -610,6 +737,8 @@ export function main(): void {
           // 重跑搜索刷新命中计数（原本命中的行可能已经不匹配）。
           actions.runSearch(query);
           if (state.selectedLine !== undefined) void showDetailForLine(state.selectedLine);
+          // 批量替换可能把成片的坏行改好 → 徽章要随之下降。
+          scheduleBadLinesRefresh();
           const suffix = res.undoable ? '' : '；（改动量较大，本次未纳入撤销栈）';
           banner.show(describeReplaceOutcome(res) + suffix, undefined);
         } catch (e) {
@@ -642,6 +771,8 @@ export function main(): void {
     detail.clear();
     list.refresh();
     updateToolbar();
+    // 删掉的可能正是一批坏行（「全选坏行 → 删除」正是本功能的主用途）→ 徽章必须降下来。
+    scheduleBadLinesRefresh();
   }
 
   /* ---------------- 多选：选区状态 + 浮动操作条 ---------------- */
@@ -1061,6 +1192,9 @@ export function main(): void {
       }
       // 可视区已有真实数据，重绘展示。
       list.refresh();
+      // 这一轮可能刚发现新的坏行（宿主集合是惰性积累的）→ 防抖刷新徽章，
+      // 让用户滚动浏览时就能看见「原来这里有几行是坏的」。
+      scheduleBadLinesRefresh();
       return true;
     } catch {
       // 被 supersede 取消或超时：忽略（已有更新的窗口请求接手），避免 unhandled rejection。
@@ -1132,6 +1266,8 @@ export function main(): void {
     list.setTotalRows(payload.totalLines);
     updateToolbar();
     updateNavEnabled();
+    // reload 会清空宿主侧的坏行集合，从零重新积累 —— 徽章须同步（否则会残留旧数字）。
+    void refreshBadLines();
 
     // 打开文件默认选中第一条并展示其 JSON；右侧细节树已内置「仅展开顶层、嵌套折叠」的默认态。
     if (state.selectedLine === undefined && payload.totalLines > 0) {
@@ -1327,7 +1463,7 @@ export function main(): void {
   const onKeyDown = (e: KeyboardEvent): void => {
     if (e.key !== 'Escape') return;
     // 浮层打开时让位给它们（各自的 Esc 负责关闭自身）
-    if (editPanel.isOpen() || historyPanel.isOpen()) return;
+    if (editPanel.isOpen() || historyPanel.isOpen() || badLinesPanel.isOpen()) return;
     if (selectedLines.size > 0) {
       clearSelection();
       e.preventDefault();
@@ -1346,6 +1482,8 @@ export function main(): void {
     detail.dispose();
     editPanel.dispose();
     historyPanel.dispose();
+    badLinesPanel.dispose();
+    if (badLinesRefreshTimer) clearTimeout(badLinesRefreshTimer);
     toolbar.destroy();
     document.removeEventListener('keydown', onKeyDown);
   };

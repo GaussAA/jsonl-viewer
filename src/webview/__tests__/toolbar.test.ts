@@ -28,6 +28,8 @@ interface Harness {
     layout: FieldLayout[];
     /** 「全部替换」收到的 (查询, 替换文本)。 */
     replace: [string, string][];
+    /** 「坏行诊断」打开次数。 */
+    badLines: number;
   };
 }
 
@@ -44,6 +46,7 @@ function makeToolbar(): Harness {
     filter: [] as (FieldCondition | null)[],
     layout: [] as FieldLayout[],
     replace: [] as [string, string][],
+    badLines: 0,
   };
   const host = doc.createElement('div');
   doc.body.append(host);
@@ -56,6 +59,9 @@ function makeToolbar(): Harness {
       calls.next += 1;
     },
     onReplaceAll: (q, r) => calls.replace.push([q, r]),
+    onOpenBadLines: () => {
+      calls.badLines += 1;
+    },
     onApplyFilter: (c) => calls.filter.push(c),
     onApplyLayout: (l) => calls.layout.push(l),
   });
@@ -311,5 +317,53 @@ describe('createToolbar（视图层覆盖率补强）', () => {
     assert.doesNotThrow(() => h.tb.refresh());
     assert.doesNotThrow(() => h.tb.destroy());
     assert.doesNotThrow(() => byTitle(h, '下一个匹配').click(), 'destroy 后点击安全');
+  });
+
+  /* ------------------------- 坏行徽章 ------------------------- */
+
+  const chipEl = (h: Harness): HTMLButtonElement =>
+    h.tb.root.querySelector<HTMLButtonElement>('.jlv-bad-chip')!;
+
+  it('坏行徽章：默认与 0 坏行时都隐藏（常驻只会是噪音）', () => {
+    const h = makeToolbar();
+    const chip = chipEl(h);
+    assert.ok(chip, '徽章节点存在');
+    assert.strictEqual(chip.hidden, true, '默认隐藏');
+
+    h.tb.update({ badLines: { count: 0, partial: true } });
+    assert.strictEqual(chip.hidden, true, '0 坏行仍隐藏');
+  });
+
+  it('坏行徽章：partial 用「N+」下界写法，全量才是确数', () => {
+    const h = makeToolbar();
+    const chip = chipEl(h);
+
+    h.tb.update({ badLines: { count: 3, partial: true } });
+    assert.strictEqual(chip.hidden, false);
+    assert.match(chip.textContent ?? '', /3\+ 坏行/, '未扫描时是下界，写成确数会误导');
+    assert.strictEqual(chip.classList.contains('partial'), true, '虚线边框提示「未查全」');
+    assert.match(chip.title, /仅在已浏览范围内/);
+
+    h.tb.update({ badLines: { count: 3, partial: false } });
+    assert.match(chip.textContent ?? '', /3 坏行/);
+    assert.strictEqual(chip.classList.contains('partial'), false, '全量后不再是下界');
+    assert.match(chip.title, /共 3 个坏行/);
+  });
+
+  it('坏行徽章：点击回调 onOpenBadLines', () => {
+    const h = makeToolbar();
+    h.tb.update({ badLines: { count: 1, partial: false } });
+    chipEl(h).click();
+    assert.strictEqual(h.calls.badLines, 1);
+  });
+
+  it('坏行徽章：常规 update 不带 badLines 时不得被清掉', () => {
+    const h = makeToolbar();
+    h.tb.update({ badLines: { count: 2, partial: false } });
+    // updateToolbar() 会被频繁调用且不携带 badLines —— 若它顺手重置徽章，
+    // 用户每次滚动都会看到徽章闪一下。
+    h.tb.update({ totalLines: 100, loadedLines: 20, range: [0, 19], status: 'ready' });
+    assert.strictEqual(chipEl(h).hidden, false, '常规刷新不得改动徽章');
+    assert.match(chipEl(h).textContent ?? '', /2 坏行/);
   });
 });

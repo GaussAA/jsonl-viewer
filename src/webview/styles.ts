@@ -918,6 +918,83 @@ body {
   .jlv-hist-backdrop { padding: 12px; }
 }
 
+/* ---------------------------- 坏行诊断 ---------------------------- */
+/* 徽章：工具栏状态行里的坏行计数（无坏行时整体隐藏）。 */
+.jlv-bad-chip {
+  margin-left: 4px; padding: 0 6px;
+  background: color-mix(in srgb, var(--jlv-warn) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--jlv-warn) 30%, transparent);
+  border-radius: var(--jlv-radius-full);
+  color: var(--jlv-warn);
+  font-family: inherit; font-size: 10px; line-height: 16px;
+  cursor: pointer;
+  transition: background var(--jlv-transition);
+}
+.jlv-bad-chip:hover { background: color-mix(in srgb, var(--jlv-warn) 26%, transparent); }
+/* 未做过全文件扫描：虚线边框提示「这是下界，不是确数」 */
+.jlv-bad-chip.partial { border-style: dashed; }
+
+.jlv-bad-backdrop {
+  position: fixed; inset: 0; z-index: 80;
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, .45);
+  opacity: 0;
+  transition: opacity var(--jlv-dur-fast) ease-in;
+}
+.jlv-bad-backdrop.open { opacity: 1; }
+.jlv-bad {
+  display: flex; flex-direction: column; gap: 10px;
+  width: min(480px, 100%); max-height: 100%;
+  padding: 16px;
+  background: var(--jlv-panel-bg);
+  border: 1px solid rgba(255, 255, 255, .1);
+  border-radius: var(--jlv-radius-4);
+  box-shadow: var(--jlv-shadow-2);
+  color: var(--jlv-fg); font-size: var(--jlv-font-size-sm);
+  transform: scale(.96) translateY(6px); opacity: 0;
+  transition: transform var(--jlv-dur-base) var(--jlv-ease), opacity var(--jlv-dur-base) var(--jlv-ease);
+}
+.jlv-bad.open { transform: none; opacity: 1; }
+
+.jlv-bad-status {
+  padding: 0 2px;
+  font-size: 10px; font-family: var(--jlv-mono);
+  color: var(--jlv-dim);
+}
+/* 语义提示（「这不是全量结论」）：必须显眼，否则用户会据一个偏小的数字下结论 */
+.jlv-bad-note { padding: 4px 2px; font-size: 10px; color: var(--jlv-warn); }
+
+.jlv-bad-list {
+  display: flex; flex-direction: column; gap: 2px;
+  overflow-y: auto; min-height: 60px; max-height: 46vh;
+  padding-right: 2px;
+}
+.jlv-bad-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 8px;
+  background: transparent; border: none; border-radius: 6px;
+  color: var(--jlv-fg); font-family: inherit; font-size: var(--jlv-font-size-sm);
+  text-align: left; cursor: pointer;
+  transition: background var(--jlv-transition);
+}
+.jlv-bad-row:hover { background: var(--jlv-card-hover); }
+.jlv-bad-lno { font-family: var(--jlv-mono); }
+.jlv-bad-hint {
+  margin-left: auto;
+  font-size: 9px; color: var(--jlv-info);
+  opacity: 0;
+  transition: opacity var(--jlv-transition);
+}
+.jlv-bad-row:hover .jlv-bad-hint { opacity: 1; }
+.jlv-bad-empty {
+  padding: 18px 8px; text-align: center;
+  color: var(--jlv-dim); font-size: var(--jlv-font-size-sm);
+}
+@media (max-width: 700px) {
+  .jlv-bad-backdrop { padding: 12px; }
+}
+
 .jlv-edit-head { display: flex; align-items: center; gap: 8px; }
 .jlv-edit-title { font-size: var(--jlv-font-size-md); font-weight: 600; }
 .jlv-edit-close {

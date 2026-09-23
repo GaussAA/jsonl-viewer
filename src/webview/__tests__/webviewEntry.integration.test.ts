@@ -3,6 +3,7 @@ import assert from 'node:assert';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { setupWebviewDom, type FakeHost } from './domHarness.ts';
 import { HostEndpoint, HostReply } from '../../protocol/rpc.ts';
+import type { BadLinesPayload } from '../../protocol/rpc.ts';
 import { main } from '../webviewEntry.ts';
 
 /**
@@ -1421,6 +1422,105 @@ describe('webviewEntry 装配层（集成）', () => {
       const msg = text(app.querySelector('.jlv-banner')?.querySelector('.jlv-banner-text') ?? null);
       assert.match(msg, /文件已被外部修改/);
       assert.ok(!/已撤销/.test(msg), '失败不得报成撤销成功');
+    });
+  });
+
+  describe('坏行诊断（M3 收尾）', () => {
+    const badPayload = (over: Partial<BadLinesPayload> = {}): BadLinesPayload => ({
+      lines: [],
+      partial: true,
+      scanned: 0,
+      totalLines: 500,
+      truncated: false,
+      ...over,
+    });
+
+    const chip = (app: HTMLElement): HTMLButtonElement =>
+      app.querySelector<HTMLButtonElement>('.jlv-bad-chip')!;
+
+    /** 浮层里按 title 找按钮 —— 扫描按钮的文案在扫描期间会变，不能按文案找。 */
+    const panelAction = (app: HTMLElement, title: RegExp): HTMLButtonElement =>
+      Array.from(app.querySelectorAll<HTMLButtonElement>('.jlv-bad button')).find((b) =>
+        title.test(b.title)
+      )!;
+
+    it('init 后自动查询坏行；回执后徽章出现且未扫描时写「N+」下界', async () => {
+      const { host, app } = await bootWithRecords();
+      const req = lastReq(host, HostEndpoint.GET_BAD_LINES);
+      assert.ok(req, 'init 后应自动查询坏行（宿主集合是惰性积累的，需要主动同步）');
+
+      host.receive({
+        type: HostReply.BAD_LINES,
+        requestId: req!.requestId,
+        payload: badPayload({ lines: [3], partial: true }),
+      });
+      await sleep(20);
+
+      assert.strictEqual(chip(app).hidden, false);
+      assert.match(
+        chip(app).textContent ?? '',
+        /1\+ 坏行/,
+        '未扫描时是下界 —— 写成确数会让用户以为文件只有 1 个坏行'
+      );
+    });
+
+    it('点击徽章打开浮层并渲染宿主返回的坏行', async () => {
+      const { host, app } = await bootWithRecords();
+      const payload = badPayload({ lines: [3], partial: false, scanned: 500 });
+      host.receive({
+        type: HostReply.BAD_LINES,
+        requestId: lastReq(host, HostEndpoint.GET_BAD_LINES)!.requestId,
+        payload,
+      });
+      await sleep(20);
+
+      chip(app).click();
+      await sleep(30);
+      assert.ok(app.querySelector<HTMLElement>('.jlv-bad'), '浮层已打开');
+
+      // 打开浮层会**重新拉取**（宿主是唯一真源）→ 断言必须在其回执之后，
+      // 否则读到的是尚未渲染的空状态。
+      const onOpen = lastReq(host, HostEndpoint.GET_BAD_LINES);
+      assert.ok(onOpen, '打开浮层应重新拉取一次');
+      host.receive({ type: HostReply.BAD_LINES, requestId: onOpen!.requestId, payload });
+      await sleep(20);
+
+      const panel = app.querySelector<HTMLElement>('.jlv-bad')!;
+      assert.match(panel.querySelector('.jlv-bad-status')!.textContent ?? '', /共 1 个坏行/);
+      assert.strictEqual(app.querySelectorAll('.jlv-bad-row').length, 1);
+    });
+
+    it('「全选坏行」写入选区并出现选区操作条（发现 → 一键清除的完整链路）', async () => {
+      const { host, app } = await bootWithRecords();
+      const payload = badPayload({ lines: [1, 5], partial: false, scanned: 10, totalLines: 10 });
+      host.receive({
+        type: HostReply.BAD_LINES,
+        requestId: lastReq(host, HostEndpoint.GET_BAD_LINES)!.requestId,
+        payload,
+      });
+      await sleep(20);
+
+      chip(app).click();
+      await sleep(30);
+      const onOpen = lastReq(host, HostEndpoint.GET_BAD_LINES);
+      assert.ok(onOpen, '打开浮层应重新拉取一次');
+      host.receive({ type: HostReply.BAD_LINES, requestId: onOpen!.requestId, payload });
+      await sleep(20);
+
+      panelAction(app, /写入选区/).click();
+      await sleep(30);
+
+      const selbar = app.querySelector<HTMLElement>('.jlv-selbar')!;
+      assert.strictEqual(selbar.hidden, false, '出现选区操作条');
+      assert.match(
+        selbar.querySelector('.jlv-selbar-text')!.textContent ?? '',
+        /已选中 2 行/,
+        '坏行被写进选区，用户可直接点「删除」清除'
+      );
+      assert.strictEqual(
+        app.querySelector<HTMLElement>('.jlv-bad')!.classList.contains('open'),
+        false
+      );
     });
   });
 });

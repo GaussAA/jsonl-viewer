@@ -16,6 +16,13 @@ export interface ToolbarInfo {
   buildMs: number | undefined;
   status: 'connecting' | 'indexing' | 'ready' | 'error';
   statusText?: string;
+  /**
+   * 坏行计数。
+   *
+   * `partial` 表示这只是**已发现**的下界（未做过全文件扫描）—— 界面上必须与
+   * 「共 N 个」区分开，否则用户会据一个偏小的数字认定文件基本干净。
+   */
+  badLines?: { count: number; partial: boolean };
 }
 
 export interface ToolbarHandlers {
@@ -26,6 +33,8 @@ export interface ToolbarHandlers {
   onReplaceAll?: (query: string, replacement: string) => void;
   /** 「编辑历史」：打开会话历史浮层（撤销/重做/回退到某一步）。 */
   onOpenHistory?: () => void;
+  /** 「坏行诊断」：打开坏行浮层（查看 / 扫描 / 全选清除）。 */
+  onOpenBadLines?: () => void;
   onApplyFilter?: (cond: FieldCondition | null) => void;
   onApplyLayout?: (layout: FieldLayout) => void;
 }
@@ -38,6 +47,8 @@ export interface ToolbarStatsEls {
   buildMsEl: HTMLElement;
   statusEl: HTMLElement;
   statusRootEl: HTMLElement;
+  /** 坏行徽章（无坏行时隐藏）。 */
+  badLinesBtn: HTMLButtonElement;
 }
 
 interface FieldOption {
@@ -113,7 +124,13 @@ export function createToolbar(
   const loadedEl = document.createElement('span');
   loadedEl.hidden = true;
   const buildMsEl = document.createElement('span');
-  statusRootEl.append(statusDot, statusEl, totalLinesEl, loadedEl, buildMsEl);
+  // 坏行徽章：只在确有坏行时出现（常驻一个「0 坏行」只是噪音）。
+  const badLinesBtn = document.createElement('button');
+  badLinesBtn.type = 'button';
+  badLinesBtn.className = 'jlv-bad-chip';
+  badLinesBtn.hidden = true;
+  badLinesBtn.addEventListener('click', () => handlers.onOpenBadLines?.());
+  statusRootEl.append(statusDot, statusEl, totalLinesEl, badLinesBtn, loadedEl, buildMsEl);
 
   titleBox.append(fileNameEl, statusRootEl);
   header.append(icon, titleBox);
@@ -649,6 +666,7 @@ export function createToolbar(
     buildMsEl,
     statusEl,
     statusRootEl,
+    badLinesBtn,
   };
 
   const update = (info: Partial<ToolbarInfo> & { fileName?: string }): void => {
@@ -657,6 +675,17 @@ export function createToolbar(
       totalLinesEl.textContent = ` · ${formatCount(info.totalLines)} 行`;
     if (info.buildMs !== undefined) buildMsEl.textContent = ` · ${formatBuildMs(info.buildMs)}`;
     if (info.range) rangeEl.textContent = `${info.range[0] + 1}–${info.range[1] + 1}`;
+    if (info.badLines) {
+      const { count, partial } = info.badLines;
+      badLinesBtn.hidden = count === 0;
+      // 未扫描时用「N+」而非确数 —— 它只是已发现的下界。写成确数会让用户
+      // 据一个偏小的数字认定「文件基本干净」，那是最危险的误判。
+      badLinesBtn.textContent = partial ? `⚠ ${count}+ 坏行` : `⚠ ${count} 坏行`;
+      badLinesBtn.classList.toggle('partial', partial);
+      badLinesBtn.title = partial
+        ? `已发现 ${count} 个坏行（仅在已浏览范围内，未扫描整个文件）—— 点击查看`
+        : `共 ${count} 个坏行 —— 点击查看`;
+    }
     if (info.status) {
       statusRootEl.className = `jlv-sub ${info.status === 'ready' ? 'ready' : info.status === 'error' ? 'error' : ''}`;
       statusEl.textContent = info.statusText ?? statusText(info.status);
