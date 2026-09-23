@@ -14,7 +14,6 @@ import {
   RpcMessage,
 } from './protocol/rpc.ts';
 import type { FieldCondition } from './core/query.ts';
-import type { DeletedRange, ReplaceChange } from './protocol/rpc.ts';
 import { FILE_STALE_POLL_MS } from './constants.ts';
 
 /** The `viewType` used by the standalone webview panel (命令 / 资源管理器右键菜单路径). */
@@ -134,45 +133,21 @@ function notLocalHtml(rawScheme: string): string {
   });
 }
 
-/**
- * 一次成功编辑的记录（供自定义编辑器上报撤销/重做）。
- *
- * 用联合类型而非「一堆可选字段」：`replaceAll` 根本没有单一行号语义，
- * 强行塞进 `line/beforeText/afterText` 只会制造「字段存不存在看 kind」的隐式约定。
- */
-type JsonlEditRecord =
-  | {
-      /** 单行操作 —— 三者互为不同的逆操作。 */
-      kind: 'replace' | 'insert' | 'delete';
-      /** 操作所在的行号（insert 为「插入位置」，delete 为「被删行」）。 */
-      line: number;
-      /** 被移除的旧行文本（替换 / 删除时提供；插入为空串）。 */
-      beforeText: string;
-      /** 写入的新行文本（替换 / 插入时提供；删除为空串）。 */
-      afterText: string;
-    }
-  | {
-      /** 批量查找替换：一次操作改写多行，撤销须**一次性**还原整批。 */
-      kind: 'replaceAll';
-      changes: ReplaceChange[];
-    }
-  | {
-      /** 批量删除：撤销 = 在同一组区间插回原内容（与删除共用同一组偏移）。 */
-      kind: 'deleteMany';
-      changes: DeletedRange[];
-    };
-
 /** viewer 挂载目标：普通 WebviewPanel 与自定义编辑器面板的 webview 语义一致，统一抽象。 */
 interface ViewerTarget {
   webview: vscode.Webview;
   /** 目标销毁时回调（用于清理 DataService / 定时器 / 消息订阅）。 */
   onDispose(cb: () => void): void;
   /**
-   * 编辑成功后上报（**仅自定义编辑器路径**提供）。
-   * 独立 WebviewPanel 路径（命令 / 右键菜单）没有对应 document，故为 undefined ——
-   * 此时编辑照旧落盘，只是不进入 VS Code 的撤销栈。
+   * 写操作成功后通知（**仅自定义编辑器路径**提供）：把这一步接到 VS Code 的撤销栈。
+   *
+   * 刻意**不传编辑详情** —— 宿主（DataService）已把该操作连回退数据一起记入会话历史，
+   * 这里只需唤醒撤销栈；撤销/重做本身也一律委托给宿主的同一光标。
+   *
+   * 独立 WebviewPanel 路径（命令 / 右键菜单）没有对应 document，故为 undefined：
+   * 编辑照旧落盘，只是不进 VS Code 撤销栈（仍可由历史浮层回溯）。
    */
-  reportEdit?: (edit: JsonlEditRecord, data: DataService) => void;
+  reportEdit?: (data: DataService) => void;
 }
 
 /**
@@ -301,8 +276,8 @@ interface HostHandlerDeps {
   context: vscode.ExtensionContext;
   cancel: Set<string>;
   post: (msg: RpcMessage) => void;
-  /** 编辑成功后上报（仅自定义编辑器路径有值）。data 由调用方注入，避免依赖挂载结果。 */
-  reportEdit?: (edit: JsonlEditRecord, data: DataService) => void;
+  /** 写操作成功后通知（仅自定义编辑器路径有值）。data 由调用方注入，避免依赖挂载结果。 */
+  reportEdit?: (data: DataService) => void;
 }
 
 /**
@@ -360,28 +335,13 @@ function registerHostHandlers(deps: HostHandlerDeps): vscode.Disposable {
             // 在第 at 行之前插入一行（编辑能力 M2）。
             [HostEndpoint.INSERT_RECORD]: async (req) => {
               const result = await data.insertRecord(req.at, req.text);
-              if (result.ok && reportEdit) {
-                reportEdit(
-                  { kind: 'insert', line: req.at, beforeText: '', afterText: req.text },
-                  data
-                );
-              }
+              if (result.ok && reportEdit) reportEdit(data);
               return okReply(HostReply.EDIT_RESULT, req.requestId, result);
             },
             // 删除第 line 行（编辑能力 M2）。
             [HostEndpoint.DELETE_RECORD]: async (req) => {
               const result = await data.deleteRecord(req.line);
-              if (result.ok && reportEdit) {
-                reportEdit(
-                  {
-                    kind: 'delete',
-                    line: req.line,
-                    beforeText: result.beforeText ?? '',
-                    afterText: '',
-                  },
-                  data
-                );
-              }
+              if (result.ok && reportEdit) reportEdit(data);
               return okReply(HostReply.EDIT_RESULT, req.requestId, result);
             },
             [HostEndpoint.CANCEL]: (req) => {
@@ -437,18 +397,9 @@ function registerHostHandlers(deps: HostHandlerDeps): vscode.Disposable {
             // dispatchMessage 兜底成 ERROR 回执。
             [HostEndpoint.EDIT_RECORD]: async (req) => {
               const result = await data.editRecord(req.line, req.text, req.expectedBytes);
-              // 成功即上报给 VS Code（自定义编辑器路径），使其进入撤销栈。
-              if (result.ok && reportEdit) {
-                reportEdit(
-                  {
-                    kind: 'replace',
-                    line: req.line,
-                    beforeText: result.beforeText ?? '',
-                    afterText: req.text,
-                  },
-                  data
-                );
-              }
+              // 成功即通知 VS Code（自定义编辑器路径），使其进入撤销栈。
+              // 回退数据由宿主随操作一并记入会话历史，此处无需重复上报。
+              if (result.ok && reportEdit) reportEdit(data);
               return okReply(HostReply.EDIT_RESULT, req.requestId, result);
             },
             // 全文查找替换（编辑能力 M2）：批量改写命中行，一次性原子落盘。
@@ -473,9 +424,9 @@ function registerHostHandlers(deps: HostHandlerDeps): vscode.Disposable {
                   cancel.delete(req.requestId);
                 }
               })();
-              if (result.ok && result.undoable && reportEdit && result.changes?.length) {
-                reportEdit({ kind: 'replaceAll', changes: result.changes }, data);
-              }
+              // 无论是否可撤销都通知撤销栈：宿主已把该操作记入历史，
+              // 撤销仍可走历史光标（只是超出撤销数据上限时那一步回退可能失败并如实报错）。
+              if (result.ok && reportEdit) reportEdit(data);
               return okReply(HostReply.REPLACE_RESULT, req.requestId, result);
             },
             // 批量删除多行（编辑能力 M2）：相邻行合并成连续区间后一次原子重写；
@@ -495,9 +446,7 @@ function registerHostHandlers(deps: HostHandlerDeps): vscode.Disposable {
                   cancel.delete(req.requestId);
                 }
               })();
-              if (result.ok && result.changes?.length && reportEdit) {
-                reportEdit({ kind: 'deleteMany', changes: result.changes }, data);
-              }
+              if (result.ok && reportEdit) reportEdit(data);
               return okReply(HostReply.DELETE_MANY_RESULT, req.requestId, result);
             },
             // 批量复制：宿主读取磁盘原文后由扩展侧写入剪贴板（vscode.env.clipboard
@@ -523,6 +472,16 @@ function registerHostHandlers(deps: HostHandlerDeps): vscode.Disposable {
               // 正文不回传：它已是剪贴板内容，MB 级文本再经 RPC 传一遍纯属浪费。
               return okReply(HostReply.COPY_RESULT, req.requestId, payload);
             },
+            // 会话编辑历史：读取快照 / 单步撤销重做 / 回退到某点。
+            // 三者共用宿主的**同一光标**，故历史面板与 Ctrl+Z 不会各说各话。
+            [HostEndpoint.GET_HISTORY]: (req) =>
+              okReply(HostReply.HISTORY, req.requestId, data.getHistory()),
+            [HostEndpoint.UNDO_EDIT]: async (req) =>
+              okReply(HostReply.HISTORY_RESULT, req.requestId, await data.undoStep()),
+            [HostEndpoint.REDO_EDIT]: async (req) =>
+              okReply(HostReply.HISTORY_RESULT, req.requestId, await data.redoStep()),
+            [HostEndpoint.REVERT_TO]: async (req) =>
+              okReply(HostReply.HISTORY_RESULT, req.requestId, await data.revertTo(req.id)),
           })
         ).response;
       } catch (e) {
@@ -725,7 +684,7 @@ class JsonlCustomEditorProvider
         {
           webview: panel.webview,
           onDispose: (cb) => panel.onDidDispose(cb),
-          reportEdit: (edit, ds) => this.reportEdit(document, ds, edit),
+          reportEdit: (ds) => this.reportEdit(document, ds),
         },
         document.uri,
         this.context,
@@ -789,92 +748,34 @@ class JsonlCustomEditorProvider
   }
 
   /**
-   * 把一次成功编辑包装成可撤销的 document 编辑事件。
+   * 把一步成功的写操作接到 VS Code 的撤销栈上。
    *
-   * 三种操作互为不同的逆操作，故按 kind 分派：
-   *   · replace —— 撤销写回旧文本，重做写回新文本；
-   *   · insert  —— 撤销删除该行，重做再次插入；
-   *   · delete  —— 撤销把被删文本插回原行号，重做再次删除。
+   * **收敛为委托**：撤销/重做一律走宿主的 `undoStep` / `redoStep`（**同一光标**），
+   * 而不是在此按操作类型自建逆操作。理由：两套撤销机制并存**必然不一致** ——
+   * 用户按 Ctrl+Z 撤销了，历史浮层却仍标着「已应用」。
    *
-   * 行号在增删下**并非不变量**，但 VS Code 以 LIFO 调用 undo/redo，且每次撤销/重做
-   * 都紧接其对应的正向操作，故操作时的行号语义始终成立，无需额外记录字节偏移。
+   * 由于 VS Code 以 LIFO 调用、宿主的 `historyCursor` 也是 LIFO，两者天然同步；
+   * 描述文案直接取宿主记录的最新一条，无需在此重复推导。
+   *
+   * 已知限制：若用户先在历史浮层里跳着回退了若干步，VS Code 撤销栈的深度会与光标
+   * 错位 —— 状态仍然一致（都以宿主为准），只是 VS Code 显示的 label 可能对不上。
    */
-  private reportEdit(document: JsonlDocument, data: DataService, edit: JsonlEditRecord): void {
-    // 批量删除：撤销与删除**完全对称** —— 删除是把区间清空，撤销是在同一组 start 处插回
-    // 原内容（删除不改变删除点之前的偏移）。故两者都是一次原子重写，而非 N 次逐行操作。
-    if (edit.kind === 'deleteMany') {
-      const ranges = edit.changes;
-      const total = ranges.reduce((a, r) => a + r.lines.length, 0);
-      const remove = async (): Promise<void> => {
-        const r = await data.deleteRecords(ranges.flatMap((x) => x.lines));
-        if (!r.ok) throw new Error(r.error ?? '批量删除失败');
-      };
-      const restore = async (): Promise<void> => {
-        const r = await data.insertRanges(ranges);
-        if (!r.ok) throw new Error(r.error ?? '撤销批量删除失败');
-      };
-      this.editEmitter.fire({
-        document,
-        label: `删除 ${total} 行`,
-        undo: restore,
-        redo: remove,
-      });
-      return;
-    }
-
-    // 批量替换：撤销必须一次性还原整批 —— 逐行撤销会让用户在 N 次 Ctrl+Z 之间
-    // 看到「改了一半」的中间态，那比不支持撤销更令人困惑。
-    if (edit.kind === 'replaceAll') {
-      const list = edit.changes;
-      const write = async (pick: (c: ReplaceChange) => string): Promise<void> => {
-        const r = await data.applyLineTexts(list.map((c) => ({ line: c.line, text: pick(c) })));
-        if (!r.ok) throw new Error(r.error ?? '批量改写失败');
-      };
-      this.editEmitter.fire({
-        document,
-        label: `替换 ${list.length} 行`,
-        undo: () => write((c) => c.before),
-        redo: () => write((c) => c.after),
-      });
-      return;
-    }
-
-    const insert = async (): Promise<void> => {
-      const r = await data.insertRecord(edit.line, edit.afterText);
-      if (!r.ok) throw new Error(r.error ?? '插入失败');
-    };
-    const remove = async (): Promise<void> => {
-      const r = await data.deleteRecord(edit.line);
-      if (!r.ok) throw new Error(r.error ?? '删除失败');
-    };
-    const replace = async (text: string): Promise<void> => {
-      const r = await data.editRecord(edit.line, text);
-      if (!r.ok) throw new Error(r.error ?? '编辑失败');
-    };
-
-    const label =
-      edit.kind === 'insert'
-        ? `在第 ${edit.line + 1} 行前插入`
-        : edit.kind === 'delete'
-          ? `删除第 ${edit.line + 1} 行`
-          : `编辑第 ${edit.line + 1} 行`;
-
-    const apply = async (): Promise<void> => {
-      if (edit.kind === 'insert') return insert();
-      if (edit.kind === 'delete') return remove();
-      return replace(edit.afterText);
-    };
-    const revert = async (): Promise<void> => {
-      if (edit.kind === 'insert') return remove();
-      if (edit.kind === 'delete') {
-        const r = await data.insertRecord(edit.line, edit.beforeText);
-        if (!r.ok) throw new Error(r.error ?? '撤销删除失败');
-        return;
-      }
-      return replace(edit.beforeText);
-    };
-
-    this.editEmitter.fire({ document, label, undo: revert, redo: apply });
+  private reportEdit(document: JsonlDocument, data: DataService): void {
+    const h = data.getHistory();
+    const latest = h.entries[h.cursor - 1];
+    const label = latest?.label ?? '编辑';
+    this.editEmitter.fire({
+      document,
+      label,
+      undo: async () => {
+        const r = await data.undoStep();
+        if (!r.ok) throw new Error(r.error ?? '撤销失败');
+      },
+      redo: async () => {
+        const r = await data.redoStep();
+        if (!r.ok) throw new Error(r.error ?? '重做失败');
+      },
+    });
   }
 
   dispose(): void {

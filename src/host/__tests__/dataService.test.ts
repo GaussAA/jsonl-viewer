@@ -13,7 +13,7 @@ import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DataService } from '../dataService.ts';
-import { MAX_SELECTION_LINES } from '../../constants.ts';
+import { MAX_SELECTION_LINES, MAX_HISTORY_ENTRIES } from '../../constants.ts';
 
 async function makeFile(dir: string, lines: string[]): Promise<string> {
   const file = join(dir, 'data.jsonl');
@@ -1116,6 +1116,336 @@ test('insertRanges：偏移越界时拒绝（文件已被其它编辑改动过�
     assert.equal(res.conflict, true);
     assert.match(res.error ?? '', /失效/);
     assert.equal(await readFile(file, 'utf8'), '{"a":1}\n{"b":2}\n', '拒绝时文件必须原样');
+
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+/* --------------------- 会话编辑历史（M3） --------------------- */
+
+test('history：每次写操作入栈，快照反映类型与行数', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const file = await makeFile(dir, ['{"a":1}', '{"b":2}', '{"c":3}', '{"d":4}']);
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    await ds.editRecord(0, '{"a":11}');
+    await ds.insertRecord(1, '{"x":9}');
+    await ds.deleteRecord(2);
+    await ds.replaceText('11', '12');
+    await ds.deleteRecords([0, 1]);
+
+    const h = ds.getHistory();
+    assert.equal(h.entries.length, 5);
+    assert.equal(h.cursor, 5, '全部已应用');
+    assert.equal(h.dropped, false);
+    assert.deepEqual(
+      h.entries.map((e) => e.kind),
+      ['edit', 'insert', 'delete', 'replaceAll', 'deleteMany'],
+      '五种写操作都被记录且类型正确'
+    );
+    assert.match(h.entries[0].label, /编辑第 1 行/);
+    assert.match(h.entries[4].label, /删除 2 行/);
+
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('history：undoStep / redoStep 逐步往返，文件逐字节还原', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const original = '{"a":1}\n{"b":2}\n';
+    const file = join(dir, 'data.jsonl');
+    await writeFile(file, original);
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    await ds.editRecord(0, '{"a":99}');
+    const edited = await readFile(file, 'utf8');
+
+    const u = await ds.undoStep();
+    assert.equal(u.ok, true);
+    assert.equal(u.steps, 1);
+    assert.equal(u.cursor, 0, '光标回到起点');
+    assert.equal(await readFile(file, 'utf8'), original, '撤销后逐字节还原');
+
+    const r = await ds.redoStep();
+    assert.equal(r.ok, true);
+    assert.equal(r.cursor, 1);
+    assert.equal(await readFile(file, 'utf8'), edited, '重做后回到编辑态');
+
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('history：撤销/重做自身不产生新记录', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const file = await makeFile(dir, ['{"a":1}', '{"b":2}']);
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    await ds.editRecord(0, '{"a":2}');
+    assert.equal(ds.getHistory().entries.length, 1);
+
+    await ds.undoStep();
+    assert.equal(ds.getHistory().entries.length, 1, '撤销不得追加记录（否则栈会无限增长）');
+    await ds.redoStep();
+    assert.equal(ds.getHistory().entries.length, 1, '重做同样不得追加');
+
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('history：新操作截断「已撤销」的重做分支', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const file = await makeFile(dir, ['{"a":1}', '{"b":2}']);
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    await ds.editRecord(0, '{"a":2}');
+    await ds.editRecord(0, '{"a":3}');
+    await ds.undoStep(); // 回到 a:2，光标 1
+    assert.equal(ds.getHistory().cursor, 1);
+
+    await ds.editRecord(0, '{"a":9}'); // 在光标处发生新操作
+    const h = ds.getHistory();
+    assert.equal(h.entries.length, 2, '被撤销的分支作废（标准撤销栈语义）');
+    assert.equal(h.cursor, 2);
+    assert.equal((await ds.redoStep()).ok, false, '已无可重做');
+    assert.equal(await readFile(file, 'utf8'), '{"a":9}\n{"b":2}\n');
+
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('history：setHistoryCursor 后退多步 / 前进多步', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const original = '{"a":1}\n{"b":2}\n';
+    const file = join(dir, 'data.jsonl');
+    await writeFile(file, original);
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    await ds.editRecord(0, '{"a":2}');
+    await ds.editRecord(0, '{"a":3}');
+    await ds.editRecord(0, '{"a":4}');
+
+    const back = await ds.setHistoryCursor(0);
+    assert.equal(back.ok, true);
+    assert.equal(back.steps, 3, '逐条走完三步');
+    assert.equal(back.cursor, 0);
+    assert.equal(await readFile(file, 'utf8'), original, '退回原点即逐字节还原');
+
+    const fwd = await ds.setHistoryCursor(2);
+    assert.equal(fwd.ok, true);
+    assert.equal(fwd.steps, 2);
+    assert.equal(await readFile(file, 'utf8'), '{"a":3}\n{"b":2}\n');
+
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('history：revertTo 让该条成为最新已应用（其后的被撤销）', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const file = await makeFile(dir, ['{"a":1}', '{"b":2}']);
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    await ds.editRecord(0, '{"a":2}');
+    await ds.editRecord(0, '{"a":3}');
+    const first = ds.getHistory().entries[0].id; // 第 1 条
+
+    const res = await ds.revertTo(first);
+    assert.equal(res.ok, true);
+    assert.equal(res.cursor, 1, '第 1 条成为最新已应用 → 第 2 条被撤销');
+    assert.equal(await readFile(file, 'utf8'), '{"a":2}\n{"b":2}\n', '只剩第 1 次编辑的效果');
+
+    // 点最新的那条：从第 1 步重做回第 2 步
+    const latest = ds.getHistory().entries[1].id;
+    const fwd = await ds.revertTo(latest);
+    assert.equal(fwd.ok, true);
+    assert.equal(fwd.steps, 1, '从第 1 步重做回第 2 步');
+    assert.equal(await readFile(file, 'utf8'), '{"a":3}\n{"b":2}\n', '回到最新状态');
+
+    // 已在最新一步时再点它 → 无任何动作（这正是「停在这一步」语义的价值）
+    const noop = await ds.revertTo(latest);
+    assert.equal(noop.ok, true);
+    assert.equal(noop.steps, 0, '已在最新一步，点它不产生动作');
+    assert.equal(await readFile(file, 'utf8'), '{"a":3}\n{"b":2}\n');
+
+    // 已丢弃的 id：如实报错而不是静默无操作
+    const gone = await ds.revertTo('h-不存在');
+    assert.equal(gone.ok, false);
+    assert.match(gone.error ?? '', /已不存在/);
+
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('history：空历史时撤销/重做如实报错', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const file = await makeFile(dir, ['{"a":1}']);
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    const u = await ds.undoStep();
+    assert.equal(u.ok, false);
+    assert.match(u.error ?? '', /没有可撤销/);
+    const r = await ds.redoStep();
+    assert.equal(r.ok, false);
+    assert.match(r.error ?? '', /没有可重做/);
+
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('history：超过条数上限时丢弃最旧并标记 dropped', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const file = await makeFile(dir, ['{"a":1}', '{"b":2}']);
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    for (let i = 0; i < MAX_HISTORY_ENTRIES + 3; i++) {
+      await ds.editRecord(0, `{"a":${i + 2}}`);
+    }
+
+    const h = ds.getHistory();
+    assert.equal(h.entries.length, MAX_HISTORY_ENTRIES, '只保留最近的 N 条');
+    assert.equal(h.dropped, true, '必须如实标记「更早的记录已丢弃」');
+    assert.equal(h.cursor, MAX_HISTORY_ENTRIES, '光标同步调整');
+
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('history：撤销失败时如实报错且光标不动（不假装成功）', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const file = await makeFile(dir, ['{"a":1}', '{"b":2}']);
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    await ds.editRecord(0, '{"a":2}');
+
+    // 外部改动文件 → 撤销会命中冲突检测
+    const external = '{"z":9}\n{"b":2}\n';
+    await writeFile(file, external);
+
+    const u = await ds.undoStep();
+    assert.equal(u.ok, false);
+    assert.equal(u.steps, 0);
+    assert.equal(u.cursor, 1, '失败时光标保持不动');
+    assert.equal(await readFile(file, 'utf8'), external, '冲突时绝不写盘');
+
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('history：reload 后历史作废（行号与偏移已整体失效）', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const file = await makeFile(dir, ['{"a":1}', '{"b":2}']);
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    await ds.editRecord(0, '{"a":2}');
+    assert.equal(ds.getHistory().entries.length, 1);
+
+    await ds.reload();
+    assert.equal(ds.getHistory().entries.length, 0, '重载后旧历史必须作废');
+    assert.equal((await ds.undoStep()).ok, false, '不能再拿旧行号去撤销');
+
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('history：批量删除可整体撤销（与单步撤销共用同一套数据）', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const original = '{"a":1}\n{"b":2}\n{"c":3}\n{"d":4}\n';
+    const file = join(dir, 'data.jsonl');
+    await writeFile(file, original);
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    await ds.deleteRecords([1, 2]);
+    assert.equal(await readFile(file, 'utf8'), '{"a":1}\n{"d":4}\n');
+
+    const u = await ds.undoStep();
+    assert.equal(u.ok, true);
+    assert.equal(u.label, '删除 2 行');
+    assert.equal(await readFile(file, 'utf8'), original, '批量删除一步撤销即完整还原');
+
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * 五种写操作各自的双向执行，以及**整条链的完整可逆性**。
+ *
+ * 这是本功能最有价值的不变式：把每一种操作的「正向 + 反向」都走一遍，
+ * 且验证「一路撤销到底 = 回到最初」「再一路重做 = 回到当初」。
+ * 任何一处反向实现写错（行号、区间、字节），这条链都会对不上。
+ */
+test('history：五种操作混合后一路撤销到底，再一路重做，两个端点都逐字节一致', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const original = '{"a":1}\n{"b":2}\n{"c":3}\n{"d":4}\n';
+    const file = join(dir, 'data.jsonl');
+    await writeFile(file, original);
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    await ds.editRecord(0, '{"a":11}');
+    await ds.insertRecord(1, '{"x":9}');
+    await ds.deleteRecord(2);
+    await ds.replaceText('11', '12');
+    await ds.deleteRecords([0, 1]);
+    const finalState = await readFile(file, 'utf8');
+    assert.equal(ds.getHistory().entries.length, 5);
+
+    // 一路撤销到底：五种操作的反向各执行一次
+    const back = await ds.setHistoryCursor(0);
+    assert.equal(back.ok, true);
+    assert.equal(back.steps, 5, '五步全部走完');
+    assert.equal(await readFile(file, 'utf8'), original, '回到最初，逐字节一致');
+
+    // 再一路重做到底：五种操作的正向各执行一次
+    const fwd = await ds.setHistoryCursor(5);
+    assert.equal(fwd.ok, true);
+    assert.equal(fwd.steps, 5);
+    assert.equal(await readFile(file, 'utf8'), finalState, '回到当初，逐字节一致');
 
     await ds.dispose();
   } finally {

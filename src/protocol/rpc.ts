@@ -46,6 +46,14 @@ export const HostEndpoint = {
   DELETE_RECORDS: 'deleteRecords',
   /** 读取多行原文并复制到剪贴板（剪贴板由宿主侧写入，比 webview 的 clipboard 可靠）。 */
   COPY_LINES: 'copyLines',
+  /** 读取会话内的编辑历史（不含回退所需的原文，那是宿主内部事务）。 */
+  GET_HISTORY: 'getHistory',
+  /** 撤销一步（与 VS Code 的 Ctrl+Z 走同一光标，二者不会各说各话）。 */
+  UNDO_EDIT: 'undoEdit',
+  /** 重做一步。 */
+  REDO_EDIT: 'redoEdit',
+  /** 把光标移到指定历史条目（历史浮层的「回退到此处」）。 */
+  REVERT_TO: 'revertTo',
 } as const;
 
 /** O(1) 查找表：把 HostEndpoint 所有值预编译成 Set，isHostEndpoint 每次调用不再 O(n) 遍历。 */
@@ -78,6 +86,10 @@ export const HostReply = {
   DELETE_MANY_RESULT: 'deleteManyResult',
   /** 批量复制结果（是否截断必须如实回报）。 */
   COPY_RESULT: 'copyResult',
+  /** 会话编辑历史快照。 */
+  HISTORY: 'history',
+  /** 撤销 / 重做 / 回退的结果。 */
+  HISTORY_RESULT: 'historyResult',
   /**
    * host 主动推送：耗时写操作的进度（批量重写的全文件重写阶段）。
    *
@@ -288,6 +300,49 @@ export interface CopyLinesResultPayload {
   error?: string;
 }
 
+/** 一条历史记录的**对外视图**（供 UI 渲染）。 */
+export interface HistoryEntryView {
+  id: string;
+  /** 操作类型（驱动图标与配色）。 */
+  kind: 'edit' | 'insert' | 'delete' | 'deleteMany' | 'replaceAll';
+  /** 人类可读描述，如「替换 3 行」。 */
+  label: string;
+  /** 影响的行数（插入/删除为 1，批量为 N）。 */
+  lines: number;
+  /** 字节增量（可为负）。 */
+  bytesDelta: number;
+  /** 时间戳（毫秒）。 */
+  at: number;
+}
+
+/** 会话编辑历史快照。 */
+export interface HistoryPayload {
+  /** 按时间升序；「光标」之前的为**已应用**，之后的为**已撤销**。 */
+  entries: HistoryEntryView[];
+  /** 已应用条数（0 表示全部已撤销）。 */
+  cursor: number;
+  /**
+   * 是否因超出上限丢弃过更早的记录。
+   * 必须如实告知 —— 否则用户会以为看到的是完整历史。
+   */
+  dropped: boolean;
+}
+
+/** 撤销 / 重做 / 回退的结果。 */
+export interface HistoryResultPayload {
+  ok: boolean;
+  /** 本次实际执行的步数（回退跨多条时为多步）。 */
+  steps: number;
+  /** 执行后的光标位置。 */
+  cursor: number;
+  /** 历史总条数。 */
+  total: number;
+  /** 被操作条目的描述（单步时给出，便于提示）。 */
+  label?: string;
+  /** 失败原因（中途失败时 steps 表示已成功回退的步数，便于如实告知）。 */
+  error?: string;
+}
+
 /** 耗时写操作的进度（host → webview 主动推送）。 */
 export interface EditProgressPayload {
   /** 操作类型；目前仅批量替换会推送。 */
@@ -384,6 +439,15 @@ export type HostRequest =
       requestId: string;
       /** 要复制的行号（0 基）。 */
       lines: number[];
+    }
+  | { type: typeof HostEndpoint.GET_HISTORY; requestId: string }
+  | { type: typeof HostEndpoint.UNDO_EDIT; requestId: string }
+  | { type: typeof HostEndpoint.REDO_EDIT; requestId: string }
+  | {
+      type: typeof HostEndpoint.REVERT_TO;
+      requestId: string;
+      /** 目标条目 id：光标将移到它**之前**（即回退掉该条及其后的操作）。 */
+      id: string;
     };
 
 /* host -> webview 的具体响应消息。 */
@@ -407,7 +471,9 @@ export type HostResponse =
       requestId: string;
       payload: DeleteManyResultPayload;
     }
-  | { type: typeof HostReply.COPY_RESULT; requestId: string; payload: CopyLinesResultPayload };
+  | { type: typeof HostReply.COPY_RESULT; requestId: string; payload: CopyLinesResultPayload }
+  | { type: typeof HostReply.HISTORY; requestId: string; payload: HistoryPayload }
+  | { type: typeof HostReply.HISTORY_RESULT; requestId: string; payload: HistoryResultPayload };
 
 export type RpcMessage = HostRequest | HostResponse;
 
@@ -526,6 +592,18 @@ export type HostHandlerMap = {
   ) => Promise<HostResponse> | HostResponse;
   [HostEndpoint.COPY_LINES]: (
     req: Extract<HostRequest, { type: typeof HostEndpoint.COPY_LINES }>
+  ) => Promise<HostResponse> | HostResponse;
+  [HostEndpoint.GET_HISTORY]: (
+    req: Extract<HostRequest, { type: typeof HostEndpoint.GET_HISTORY }>
+  ) => Promise<HostResponse> | HostResponse;
+  [HostEndpoint.UNDO_EDIT]: (
+    req: Extract<HostRequest, { type: typeof HostEndpoint.UNDO_EDIT }>
+  ) => Promise<HostResponse> | HostResponse;
+  [HostEndpoint.REDO_EDIT]: (
+    req: Extract<HostRequest, { type: typeof HostEndpoint.REDO_EDIT }>
+  ) => Promise<HostResponse> | HostResponse;
+  [HostEndpoint.REVERT_TO]: (
+    req: Extract<HostRequest, { type: typeof HostEndpoint.REVERT_TO }>
   ) => Promise<HostResponse> | HostResponse;
   [HostEndpoint.CANCEL]: (
     req: Extract<HostRequest, { type: typeof HostEndpoint.CANCEL }>

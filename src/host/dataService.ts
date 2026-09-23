@@ -44,6 +44,8 @@ import {
   MAX_REPLACE_UNDO_BYTES,
   MAX_SELECTION_LINES,
   COPY_MAX_BYTES,
+  MAX_HISTORY_ENTRIES,
+  MAX_HISTORY_BYTES,
   PROGRESS_THROTTLE_MS,
 } from '../constants.ts';
 import { buildIndexWithFallback, type IndexHost } from './indexHost.ts';
@@ -53,6 +55,7 @@ import type {
   DeleteManyResultPayload,
   DeletedRange,
   EditResultPayload,
+  HistoryPayload,
   OverviewPayload,
   RecordsPayload,
   RecordsPayloadItem,
@@ -71,24 +74,46 @@ import {
 /**
  * 探测某行的字节区间与行尾风格。
  *
- * 越界、或该行是超长行（scan 以 error 标记）时返回 undefined —— 调用方据此给出
- * 「无法定位」而**不是**拿一个错误的区间去改文件。
+ * **失败原因必须区分**（越界 / 行过大 / 索引与磁盘不一致）：三者的处置完全不同，
+ * 混成一句「无法定位该行」会让排查走弯路 —— 这正是此前踩过的坑。
  */
 async function probeLine(
   li: LineIndex,
   reader: ByteReader,
   line: number
-): Promise<{ start: number; end: number; ending: LineEnding } | undefined> {
-  if (!Number.isInteger(line) || line < 0 || line >= li.totalLines) return undefined;
+): Promise<
+  | { ok: true; start: number; end: number; ending: LineEnding }
+  | { ok: false; reason: 'out-of-range' | 'too-large' | 'not-found' }
+> {
+  if (!Number.isInteger(line) || line < 0 || line >= li.totalLines) {
+    return { ok: false, reason: 'out-of-range' };
+  }
   for await (const r of li.scan(reader, line, line + 1)) {
-    if (r.error) return undefined;
+    if (r.error) return { ok: false, reason: 'too-large' };
     return {
+      ok: true,
       start: r.start,
       end: r.end,
       ending: detectLineEnding({ start: r.start, end: r.end }, r.bytes.length),
     };
   }
-  return undefined;
+  // scan 未产出任何行：索引与磁盘不一致（索引说该行存在，却读不出来）。
+  return { ok: false, reason: 'not-found' };
+}
+
+/** 探测失败原因 → 可操作的中文提示。 */
+function describeProbeFailure(
+  line: number,
+  reason: 'out-of-range' | 'too-large' | 'not-found'
+): string {
+  switch (reason) {
+    case 'out-of-range':
+      return `行号越界：${line}`;
+    case 'too-large':
+      return `该行过大，暂不支持编辑：${line}`;
+    case 'not-found':
+      return `无法定位该行（索引可能已过期），请重新加载后再试：${line}`;
+  }
 }
 
 /**
@@ -145,6 +170,82 @@ export interface DataServiceOptions {
   workerScriptPath?: string;
 }
 
+/* ---------------------- 会话编辑历史 ---------------------- */
+
+/**
+ * 一次可撤销的写操作。
+ *
+ * 每条都能**双向**执行：`forward` 是用户当初做的操作，反向即回退 —— 这正是
+ * 「Ctrl+Z 单步撤销」与「历史面板回退到某点」能共用同一份数据的原因。
+ */
+type HistoryOp =
+  | { kind: 'edit'; line: number; before: string; after: string }
+  | { kind: 'insert'; line: number; text: string }
+  | { kind: 'delete'; line: number; before: string }
+  | { kind: 'deleteMany'; ranges: DeletedRange[] }
+  | { kind: 'replaceAll'; changes: ReplaceChange[] };
+
+/** 历史条目（含回退数据，仅供宿主内部使用）。 */
+interface HistoryEntry {
+  id: string;
+  op: HistoryOp;
+  label: string;
+  /** 影响的行数。 */
+  lines: number;
+  bytesDelta: number;
+  at: number;
+  /** 该条目占用的近似字节数（用于总体积上限）。 */
+  bytes: number;
+}
+
+/** 单步 / 多步历史操作的结果。 */
+export interface HistoryStepResult {
+  ok: boolean;
+  /** 本次实际执行的步数（回退跨多条时为多步）。 */
+  steps: number;
+  /** 执行后的光标位置。 */
+  cursor: number;
+  total: number;
+  /** 被操作条目的描述（单步时给出）。 */
+  label?: string;
+  /** 失败原因（中途失败时 steps 表示已成功的步数，便于如实告知）。 */
+  error?: string;
+}
+
+/** 历史条目占用的近似字节数（正向与反向数据都要留着才能双向执行）。 */
+function historyOpBytes(op: HistoryOp): number {
+  switch (op.kind) {
+    case 'edit':
+      return op.before.length + op.after.length;
+    case 'insert':
+      return op.text.length;
+    case 'delete':
+      return op.before.length;
+    case 'deleteMany':
+      return op.ranges.reduce((a, r) => a + r.content.length, 0);
+    case 'replaceAll':
+      return op.changes.reduce((a, c) => a + c.before.length + c.after.length, 0);
+  }
+}
+
+/** 由操作推出「描述 + 影响行数」。 */
+function historyLabel(op: HistoryOp): { label: string; lines: number } {
+  switch (op.kind) {
+    case 'edit':
+      return { label: `编辑第 ${op.line + 1} 行`, lines: 1 };
+    case 'insert':
+      return { label: `在第 ${op.line + 1} 行前插入`, lines: 1 };
+    case 'delete':
+      return { label: `删除第 ${op.line + 1} 行`, lines: 1 };
+    case 'deleteMany': {
+      const n = op.ranges.reduce((a, r) => a + r.lines.length, 0);
+      return { label: `删除 ${n} 行`, lines: n };
+    }
+    case 'replaceAll':
+      return { label: `替换 ${op.changes.length} 行`, lines: op.changes.length };
+  }
+}
+
 /** 批量改写（查找替换 / 撤销 / 重做）的可选行为。 */
 export interface ReplaceOpts {
   /** 是否大小写不敏感（与搜索保持一致；默认 true）。 */
@@ -185,6 +286,16 @@ export class DataService {
    * 此刻判定只会产生「自己改自己」的误报横幅。
    */
   private editing = false;
+
+  /* ---------- 会话编辑历史（单一光标模型，见 pushHistory 说明） ---------- */
+  private readonly history: HistoryEntry[] = [];
+  /** 已应用条数：之前的为「已应用」，之后的为「已撤销」。 */
+  private historyCursor = 0;
+  private historySeq = 0;
+  /** 是否因超出上限丢弃过更早的记录（UI 需如实告知，否则用户以为看到的是完整历史）。 */
+  private historyDropped = false;
+  /** 正在执行历史回退：期间的写操作**不再入栈**（否则撤销会生成新记录）。 */
+  private applyingHistory = false;
 
   private readonly uri: string;
   private readonly path: string;
@@ -456,6 +567,7 @@ export class DataService {
       this.index = li.applyLineReplace(line, res.bytesDelta);
       await this.refreshSnapshot();
       this.knownBadLines.delete(line);
+      this.pushHistory({ kind: 'edit', line, before: beforeText, after: text }, res.bytesDelta);
       return {
         ok: true,
         line,
@@ -530,7 +642,9 @@ export class DataService {
     if (conflict) return conflict;
 
     const probed = await probeLine(li, reader, line);
-    if (!probed) return DataService.editFailure(line, `无法定位该行（可能过大）：${line}`);
+    if (!probed.ok) {
+      return DataService.editFailure(line, describeProbeFailure(line, probed.reason));
+    }
     const removedBytes = probed.end - probed.start;
     // 旧原文用于撤销：删除的逆操作就是把这段文本插回去。
     const removedText = await readLineAt(reader, probed.start, probed.end).catch(() => '');
@@ -545,6 +659,7 @@ export class DataService {
       this.index = li.applyLineDelete(line, removedBytes);
       await this.refreshSnapshot();
       this.shiftKnownBadLinesAfterDelete(line);
+      this.pushHistory({ kind: 'delete', line, before: removedText }, res.bytesDelta);
       return {
         ok: true,
         line,
@@ -587,12 +702,12 @@ export class DataService {
     let nextEnding: LineEnding | undefined;
     if (at < li.totalLines) {
       const p = await probeLine(li, reader, at);
-      if (!p) return DataService.editFailure(at, `无法定位插入位置：${at}`);
+      if (!p.ok) return DataService.editFailure(at, describeProbeFailure(at, p.reason));
       insertAt = p.start;
       nextEnding = p.ending;
     }
     const prev = at > 0 ? await probeLine(li, reader, at - 1) : undefined;
-    const refEnding = prev?.ending ?? nextEnding ?? 'lf';
+    const refEnding = (prev?.ok ? prev.ending : undefined) ?? nextEnding ?? 'lf';
     // 参考行若位于文件末尾且原本无换行，插入的新行仍须自带行尾（否则会与下一行粘连）。
     const ending: LineEnding = refEnding === 'none' ? 'lf' : refEnding;
     const newLineBytes = Buffer.concat([Buffer.from(text, 'utf8'), lineEndingBytes(ending)]);
@@ -603,6 +718,7 @@ export class DataService {
       this.index = li.applyLineInsert(at, newLineBytes.length);
       await this.refreshSnapshot();
       this.shiftKnownBadLinesAfterInsert(at);
+      this.pushHistory({ kind: 'insert', line: at, text }, res.bytesDelta);
       return {
         ok: true,
         line: at,
@@ -779,6 +895,246 @@ export class DataService {
     );
   }
 
+  /* ---------------------- 会话编辑历史 ---------------------- */
+
+  /**
+   * 记录一次成功的写操作。
+   *
+   * **单一光标模型**：`historyCursor` 之前的条目是「已应用」、之后是「已撤销」。
+   * 于是：
+   *   · Ctrl+Z（`undoStep`）就是光标 −1；
+   *   · 历史面板「回退到此处」（`setHistoryCursor`）就是把光标移到目标位置；
+   *   · 两者**共用同一份状态**，不可能各说各话。
+   *
+   * 之所以不做成「VS Code 撤销栈 + 独立历史面板」两套：那必然不一致 ——
+   * 用户按 Ctrl+Z 撤销了，面板却还标着「已应用」。
+   *
+   * 在光标处发生新操作时，光标之后的记录**作废**（标准撤销栈语义）。
+   */
+  private pushHistory(op: HistoryOp, bytesDelta: number): void {
+    if (this.applyingHistory) return;
+    if (this.historyCursor < this.history.length) {
+      this.history.length = this.historyCursor;
+    }
+    const { label, lines } = historyLabel(op);
+    this.history.push({
+      id: `h${++this.historySeq}`,
+      op,
+      label,
+      lines,
+      bytesDelta,
+      at: Date.now(),
+      bytes: historyOpBytes(op),
+    });
+    this.historyCursor = this.history.length;
+    this.trimHistory();
+  }
+
+  /**
+   * 从**最旧**的一端丢弃，直到条数与总体积都在上限内（丢弃即同步回退光标）。
+   *
+   * 保留「至少一条」：否则一条就超限的巨型操作会被自己的上限立刻丢掉 ——
+   * 那等于刚做的事无法撤销。
+   */
+  private trimHistory(): void {
+    let bytes = this.history.reduce((a, e) => a + e.bytes, 0);
+    while (
+      this.history.length > MAX_HISTORY_ENTRIES ||
+      (bytes > MAX_HISTORY_BYTES && this.history.length > 1)
+    ) {
+      const dropped = this.history.shift();
+      if (!dropped) break;
+      bytes -= dropped.bytes;
+      if (this.historyCursor > 0) this.historyCursor--;
+      this.historyDropped = true;
+    }
+  }
+
+  /** 历史快照（对外视图，**不含**回退数据 —— 那是宿主内部事务）。 */
+  getHistory(): HistoryPayload {
+    return {
+      entries: this.history.map((e) => ({
+        id: e.id,
+        kind: e.op.kind,
+        label: e.label,
+        lines: e.lines,
+        bytesDelta: e.bytesDelta,
+        at: e.at,
+      })),
+      cursor: this.historyCursor,
+      dropped: this.historyDropped,
+    };
+  }
+
+  /** 撤销一步（光标前移）。 */
+  async undoStep(): Promise<HistoryStepResult> {
+    if (this.historyCursor === 0) {
+      return {
+        ok: false,
+        steps: 0,
+        cursor: 0,
+        total: this.history.length,
+        error: '没有可撤销的操作',
+      };
+    }
+    const entry = this.history[this.historyCursor - 1];
+    const applied = await this.runHistoryOp(entry, false);
+    if (!applied.ok) {
+      return {
+        ok: false,
+        steps: 0,
+        cursor: this.historyCursor,
+        total: this.history.length,
+        error: applied.error,
+      };
+    }
+    this.historyCursor--;
+    return {
+      ok: true,
+      steps: 1,
+      cursor: this.historyCursor,
+      total: this.history.length,
+      label: entry.label,
+    };
+  }
+
+  /** 重做一步（光标后移）。 */
+  async redoStep(): Promise<HistoryStepResult> {
+    if (this.historyCursor >= this.history.length) {
+      return {
+        ok: false,
+        steps: 0,
+        cursor: this.historyCursor,
+        total: this.history.length,
+        error: '没有可重做的操作',
+      };
+    }
+    const entry = this.history[this.historyCursor];
+    const applied = await this.runHistoryOp(entry, true);
+    if (!applied.ok) {
+      return {
+        ok: false,
+        steps: 0,
+        cursor: this.historyCursor,
+        total: this.history.length,
+        error: applied.error,
+      };
+    }
+    this.historyCursor++;
+    return {
+      ok: true,
+      steps: 1,
+      cursor: this.historyCursor,
+      total: this.history.length,
+      label: entry.label,
+    };
+  }
+
+  /**
+   * 把光标移到指定位置（历史浮层的「回退到此处」）。
+   *
+   * **逐条执行**而非「一步到位」：写操作之间有依赖（行号与偏移），跳着回退会让中间
+   * 条目的回退数据失效。只能沿着历史一步步走 —— 这正是它们被记成一条链的原因。
+   * 中途失败即停，并如实报告已走了几步（不假装全部成功）。
+   */
+  async setHistoryCursor(target: number): Promise<HistoryStepResult> {
+    const clamped = Math.max(0, Math.min(target, this.history.length));
+    const shrinking = clamped < this.historyCursor;
+    let steps = 0;
+    let error: string | undefined;
+
+    while (this.historyCursor > clamped) {
+      const r = await this.undoStep();
+      if (!r.ok) {
+        error = r.error;
+        break;
+      }
+      steps++;
+    }
+    while (this.historyCursor < clamped) {
+      const r = await this.redoStep();
+      if (!r.ok) {
+        error = r.error;
+        break;
+      }
+      steps++;
+    }
+
+    return {
+      ok: this.historyCursor === clamped,
+      steps,
+      cursor: this.historyCursor,
+      total: this.history.length,
+      ...(error ? { error: `${error}（已${shrinking ? '撤销' : '重做'} ${steps} 步后中止）` } : {}),
+    };
+  }
+
+  /**
+   * 让某条历史成为**最新已应用**的操作（光标移到它之后）。
+   *
+   * 语义选「停在这一步」而非「撤销该条本身」：后者会让「点最新那一条」变成一次撤销，
+   * 与直觉相反 —— 点最上面那条应该什么都不发生。UI 的文案、按钮禁用态都依赖这个语义，
+   * 宿主与前端必须一致（差一步就会「想保留的那步被撤掉」）。
+   */
+  async revertTo(id: string): Promise<HistoryStepResult> {
+    const idx = this.history.findIndex((e) => e.id === id);
+    if (idx < 0) {
+      return {
+        ok: false,
+        steps: 0,
+        cursor: this.historyCursor,
+        total: this.history.length,
+        error: '该历史记录已不存在（可能因超出上限被丢弃）',
+      };
+    }
+    return this.setHistoryCursor(idx + 1);
+  }
+
+  /** 执行一条历史操作的正向或反向；期间 `pushHistory` 自动失效。 */
+  private async runHistoryOp(
+    entry: HistoryEntry,
+    forward: boolean
+  ): Promise<{ ok: boolean; error?: string }> {
+    this.applyingHistory = true;
+    try {
+      return await this.applyHistoryOp(entry.op, forward);
+    } finally {
+      this.applyingHistory = false;
+    }
+  }
+
+  /** 历史操作的双向执行（正向 = 用户当初的操作，反向 = 回退）。 */
+  private async applyHistoryOp(
+    op: HistoryOp,
+    forward: boolean
+  ): Promise<{ ok: boolean; error?: string }> {
+    const wrap = (r: { ok: boolean; error?: string }): { ok: boolean; error?: string } =>
+      r.ok ? { ok: true } : { ok: false, ...(r.error ? { error: r.error } : {}) };
+
+    switch (op.kind) {
+      case 'edit':
+        return wrap(await this.editRecord(op.line, forward ? op.after : op.before));
+      case 'insert':
+        return wrap(
+          forward ? await this.insertRecord(op.line, op.text) : await this.deleteRecord(op.line)
+        );
+      case 'delete':
+        return wrap(
+          forward ? await this.deleteRecord(op.line) : await this.insertRecord(op.line, op.before)
+        );
+      case 'deleteMany': {
+        const lines = op.ranges.flatMap((r) => r.lines);
+        return wrap(forward ? await this.deleteRecords(lines) : await this.insertRanges(op.ranges));
+      }
+      case 'replaceAll':
+        return wrap(
+          await this.applyLineTexts(
+            op.changes.map((c) => ({ line: c.line, text: forward ? c.after : c.before }))
+          )
+        );
+    }
+  }
+
   /* ------------------------- 多选批量操作（M2） ------------------------- */
 
   /**
@@ -877,6 +1233,7 @@ export class DataService {
       this.index = idx;
       this.remapBadLinesAfterDeletes(wanted);
       await this.refreshSnapshot();
+      this.pushHistory({ kind: 'deleteMany', ranges }, res.bytesDelta);
 
       return {
         ok: true,
@@ -1128,6 +1485,10 @@ export class DataService {
       const undoable =
         changes.length <= MAX_REPLACE_UNDO_LINES && undoBytes <= MAX_REPLACE_UNDO_BYTES;
 
+      // 注：本方法也被 applyLineTexts 调用（历史回退的原语），那时的 `applyingHistory`
+      // 为真，pushHistory 会自动跳过 —— 否则每撤销一次就会生成一条新记录。
+      this.pushHistory({ kind: 'replaceAll', changes }, res.bytesDelta);
+
       return {
         ok: true,
         replaced: edits.length,
@@ -1299,5 +1660,10 @@ export class DataService {
     this.buildStats = undefined;
     this.snapshot = undefined;
     this.knownBadLines.clear();
+    // 会话编辑历史必须一并作废：行号与偏移在重载后已整体失效，用旧历史回退
+    // 会**改到错误的行**上 —— 这比「不能撤销」危险得多。
+    this.history.length = 0;
+    this.historyCursor = 0;
+    this.historyDropped = false;
   }
 }

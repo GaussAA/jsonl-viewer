@@ -102,6 +102,14 @@ const baseHandlers: HostHandlerMap = {
       truncated: false,
       skipped: 0,
     }),
+  [HostEndpoint.GET_HISTORY]: (r) =>
+    okReply(HostReply.HISTORY, r.requestId, { entries: [], cursor: 0, dropped: false }),
+  [HostEndpoint.UNDO_EDIT]: (r) =>
+    okReply(HostReply.HISTORY_RESULT, r.requestId, { ok: true, steps: 1, cursor: 0, total: 1 }),
+  [HostEndpoint.REDO_EDIT]: (r) =>
+    okReply(HostReply.HISTORY_RESULT, r.requestId, { ok: true, steps: 1, cursor: 1, total: 1 }),
+  [HostEndpoint.REVERT_TO]: (r) =>
+    okReply(HostReply.HISTORY_RESULT, r.requestId, { ok: true, steps: 1, cursor: 0, total: 1 }),
   [HostEndpoint.CANCEL]: () => undefined,
 };
 
