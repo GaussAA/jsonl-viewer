@@ -1146,12 +1146,19 @@ describe('webviewEntry 装配层（集成）', () => {
       )!;
     const bannerText = (app: HTMLElement): string =>
       text(app.querySelector('.jlv-banner')?.querySelector('.jlv-banner-text') ?? null);
-    /** jsdom 的 KeyboardEvent 构造器（Window 类型未声明它，需从窗口对象取）。 */
-    const KE = (
-      win() as unknown as {
-        KeyboardEvent: new (t: string, o?: { key?: string }) => KeyboardEvent;
-      }
-    ).KeyboardEvent;
+    /**
+     * jsdom 的 KeyboardEvent 构造器。
+     *
+     * 必须是**惰性函数**：`describe` 回调在「收集用例」阶段就执行，那时 `before`
+     * 钩子还没跑、`globalThis.window` 尚未由 domHarness 注入 —— 在描述体里直接求值
+     * 会抛错并让整组用例静默消失（表现为「测试通过但根本没跑」）。
+     */
+    const KE = (): new (t: string, o?: { key?: string }) => KeyboardEvent =>
+      (
+        win() as unknown as {
+          KeyboardEvent: new (t: string, o?: { key?: string }) => KeyboardEvent;
+        }
+      ).KeyboardEvent;
 
     it('单选不显示操作条；Ctrl 点击累加选中并显示「已选中 N 行」', async () => {
       const { app } = await bootWithRecords();
@@ -1212,7 +1219,7 @@ describe('webviewEntry 装配层（集成）', () => {
 
       clickCard(app, 0);
       clickCard(app, 1, { ctrl: true });
-      globalThis.document.dispatchEvent(new KE('keydown', { key: 'Escape' }));
+      globalThis.document.dispatchEvent(new (KE())('keydown', { key: 'Escape' }));
       assert.strictEqual(selBar(app).hidden, true, 'Esc 同样清空');
     });
 
@@ -1278,5 +1285,142 @@ describe('webviewEntry 装配层（集成）', () => {
     // 注：右键菜单里的批量项改在 virtualScroll 的单元测试里覆盖 —— 菜单容器是
     // virtualScroll 的**模块级单例**（仅首次创建时挂入当时的 document），
     // 在集成测试里只有全文件第一个右键用例能查到，硬塞进来只会得到一个假失败。
+  });
+
+  describe('编辑历史：入口与单步撤销', () => {
+    const histBtn = (app: HTMLElement): HTMLButtonElement | null =>
+      byTitle(app, '编辑历史（撤销 / 重做 / 回退到某一步）');
+    const panelBtn = (app: HTMLElement, label: string): HTMLButtonElement | undefined =>
+      Array.from(app.querySelectorAll<HTMLButtonElement>('.jlv-hist button')).find(
+        (b) => b.textContent === label
+      );
+
+    it('工具栏「历史」按钮打开浮层并拉取快照；点「撤销一步」发起 UNDO_EDIT', async () => {
+      const { host, app } = await bootWithRecords();
+
+      const btn = histBtn(app);
+      assert.ok(btn, '存在历史入口');
+      btn!.click();
+      await sleep(20);
+
+      const backdrop = app.querySelector<HTMLElement>('.jlv-hist-backdrop');
+      assert.ok(backdrop, '浮层已挂载');
+      assert.strictEqual(backdrop!.hidden, false, '浮层可见');
+
+      const req = lastReq(host, HostEndpoint.GET_HISTORY);
+      assert.ok(req, '已拉取历史快照');
+      host.receive({
+        type: HostReply.HISTORY,
+        requestId: req!.requestId,
+        payload: {
+          entries: [
+            {
+              id: 'h1',
+              kind: 'edit',
+              label: '编辑第 1 行',
+              lines: 1,
+              bytesDelta: 5,
+              at: 1758600000000,
+            },
+          ],
+          cursor: 1,
+          dropped: false,
+        },
+      });
+      await sleep(20);
+
+      assert.match(text(app.querySelector('.jlv-hist-label')), /编辑第 1 行/, '条目已渲染');
+
+      panelBtn(app, '撤销一步')!.click();
+      await sleep(20);
+      assert.ok(lastReq(host, HostEndpoint.UNDO_EDIT), '已发起撤销（走宿主同一光标）');
+    });
+
+    it('撤销回执后如实提示，并刷新主视图', async () => {
+      const { host, app } = await bootWithRecords();
+      histBtn(app)!.click();
+      await sleep(20);
+      const getReq = lastReq(host, HostEndpoint.GET_HISTORY)!;
+      host.receive({
+        type: HostReply.HISTORY,
+        requestId: getReq.requestId,
+        payload: {
+          entries: [
+            {
+              id: 'h1',
+              kind: 'delete',
+              label: '删除 2 行',
+              lines: 2,
+              bytesDelta: -30,
+              at: 1758600000000,
+            },
+          ],
+          cursor: 1,
+          dropped: false,
+        },
+      });
+      await sleep(20);
+
+      panelBtn(app, '撤销一步')!.click();
+      await sleep(20);
+      const undoReq = lastReq(host, HostEndpoint.UNDO_EDIT)!;
+      host.receive({
+        type: HostReply.HISTORY_RESULT,
+        requestId: undoReq.requestId,
+        payload: { ok: true, steps: 1, cursor: 0, total: 1, label: '删除 2 行' },
+      });
+      await sleep(40);
+
+      const bannerText2 = text(
+        app.querySelector('.jlv-banner')?.querySelector('.jlv-banner-text') ?? null
+      );
+      assert.match(bannerText2, /已撤销：删除 2 行/, '如实提示撤销了哪一步');
+    });
+
+    it('撤销失败时横幅显示宿主给出的原因', async () => {
+      const { host, app } = await bootWithRecords();
+      histBtn(app)!.click();
+      await sleep(20);
+      const getReq = lastReq(host, HostEndpoint.GET_HISTORY)!;
+      host.receive({
+        type: HostReply.HISTORY,
+        requestId: getReq.requestId,
+        payload: {
+          entries: [
+            {
+              id: 'h1',
+              kind: 'edit',
+              label: '编辑第 1 行',
+              lines: 1,
+              bytesDelta: 1,
+              at: 1758600000000,
+            },
+          ],
+          cursor: 1,
+          dropped: false,
+        },
+      });
+      await sleep(20);
+
+      panelBtn(app, '撤销一步')!.click();
+      await sleep(20);
+      const undoReq = lastReq(host, HostEndpoint.UNDO_EDIT)!;
+      host.receive({
+        type: HostReply.HISTORY_RESULT,
+        requestId: undoReq.requestId,
+        payload: {
+          ok: false,
+          steps: 0,
+          cursor: 1,
+          total: 1,
+          error: '文件已被外部修改，请先重新加载再编辑。',
+        },
+      });
+      await sleep(40);
+
+      const msg = text(app.querySelector('.jlv-banner')?.querySelector('.jlv-banner-text') ?? null);
+      assert.match(msg, /文件已被外部修改/);
+      assert.ok(!/已撤销/.test(msg), '失败不得报成撤销成功');
+    });
   });
 });

@@ -846,6 +846,78 @@ body {
 }
 .jlv-edit-panel.open { transform: none; opacity: 1; }
 
+/* 会话编辑历史浮层（结构复刻编辑浮层，仅列表部分不同） */
+.jlv-hist-backdrop {
+  position: fixed; inset: 0; z-index: 80;
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, .45);
+  opacity: 0;
+  transition: opacity var(--jlv-dur-fast) ease-in;
+}
+.jlv-hist-backdrop.open { opacity: 1; }
+.jlv-hist {
+  display: flex; flex-direction: column; gap: 10px;
+  width: min(560px, 100%); max-height: 100%;
+  padding: 16px;
+  background: var(--jlv-panel-bg);
+  border: 1px solid rgba(255, 255, 255, .1);
+  border-radius: var(--jlv-radius-4);
+  box-shadow: var(--jlv-shadow-2);
+  color: var(--jlv-fg); font-size: var(--jlv-font-size-sm);
+  transform: scale(.96) translateY(6px); opacity: 0;
+  transition: transform var(--jlv-dur-base) var(--jlv-ease), opacity var(--jlv-dur-base) var(--jlv-ease);
+}
+.jlv-hist.open { transform: none; opacity: 1; }
+.jlv-edit-head-actions { display: flex; align-items: center; gap: 6px; margin-left: auto; }
+
+.jlv-hist-list {
+  display: flex; flex-direction: column; gap: 2px;
+  overflow-y: auto; min-height: 60px; max-height: 46vh;
+  padding-right: 2px;
+}
+.jlv-hist-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 8px;
+  background: transparent; border: none; border-radius: 6px;
+  color: var(--jlv-fg); font-family: inherit; font-size: var(--jlv-font-size-sm);
+  text-align: left; cursor: pointer;
+  transition: background var(--jlv-transition);
+}
+.jlv-hist-row:hover { background: var(--jlv-card-hover); }
+/* 已撤销的条目：降低存在感但仍可点击（点它即「停在这一步」= 重做到该条） */
+.jlv-hist-row.undone { opacity: .45; }
+.jlv-hist-row.undone .jlv-hist-label { text-decoration: line-through; }
+.jlv-hist-badge {
+  flex: none; min-width: 34px; text-align: center;
+  padding: 1px 6px; border-radius: var(--jlv-radius-full);
+  font-size: 9px; font-family: var(--jlv-mono);
+  background: color-mix(in srgb, var(--jlv-info) 16%, transparent);
+  color: var(--jlv-info);
+}
+.jlv-hist-badge.kind-delete,
+.jlv-hist-badge.kind-deleteMany {
+  background: color-mix(in srgb, var(--jlv-error-fg) 14%, transparent);
+  color: var(--jlv-error-fg);
+}
+.jlv-hist-badge.kind-insert {
+  background: color-mix(in srgb, var(--jlv-good) 16%, transparent);
+  color: var(--jlv-good);
+}
+.jlv-hist-label {
+  flex: 1 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.jlv-hist-meta { flex: none; font-size: 9px; font-family: var(--jlv-mono); color: var(--jlv-dim); }
+.jlv-hist-note { font-size: 10px; color: var(--jlv-warn); padding: 4px 2px; }
+.jlv-hist-empty {
+  padding: 18px 8px; text-align: center;
+  color: var(--jlv-dim); font-size: var(--jlv-font-size-sm);
+}
+@media (max-width: 700px) {
+  .jlv-hist-backdrop { padding: 12px; }
+}
+
 .jlv-edit-head { display: flex; align-items: center; gap: 8px; }
 .jlv-edit-title { font-size: var(--jlv-font-size-md); font-weight: 600; }
 .jlv-edit-close {

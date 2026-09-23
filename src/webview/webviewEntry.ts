@@ -19,6 +19,7 @@ import { createToolbar } from './toolbar.ts';
 import type { ToolbarInfo } from './toolbar.ts';
 import { createDetailTree, type DetailTreeNavHandlers } from './detailTree.ts';
 import { createEditPanel } from './editPanel.ts';
+import { createHistoryPanel } from './historyPanel.ts';
 import { describeEditFailure, replaceConfirmText, replaceProgressText } from './editLogic.ts';
 import { createColumnLayout, type ColumnLayout } from './columnLayout.ts';
 import { createQueryActions, type QueryActions } from './queryActions.ts';
@@ -31,6 +32,8 @@ import type {
   CopyLinesResultPayload,
   DeleteManyResultPayload,
   EditResultPayload,
+  HistoryPayload,
+  HistoryResultPayload,
   ReplaceResultPayload,
 } from '../protocol/rpc.ts';
 import type { InitPayload, OverviewPayload, RecordsPayload } from '../protocol/rpc.ts';
@@ -263,6 +266,7 @@ export function main(): void {
     onSearchPrev: () => actions.stepSearch(-1),
     onSearchNext: () => actions.stepSearch(1),
     onReplaceAll: (query, replacement) => replaceAll(query, replacement),
+    onOpenHistory: () => historyPanel.open(),
     onApplyFilter: (cond) => actions.runFilter(cond),
     onApplyLayout: (layout) => actions.applyLayout(layout),
   });
@@ -423,6 +427,48 @@ export function main(): void {
     },
   });
   rootEl.appendChild(editPanel.root);
+
+  /* ---------------- 会话编辑历史（M3） ---------------- */
+
+  /** 宿主无响应时的兜底结果（宁可如实报错，也不要伪造成「成功但没变化」）。 */
+  const historyFailure = (error: string): HistoryResultPayload => ({
+    ok: false,
+    steps: 0,
+    cursor: 0,
+    total: 0,
+    error,
+  });
+
+  /**
+   * 历史浮层。**宿主是唯一状态源**：前端只渲染宿主返回的光标，不自行推算 ——
+   * 前端一旦自己也维护一份「撤销到第几步」，就必然与 Ctrl+Z（同样走宿主光标）打架。
+   */
+  const historyPanel = createHistoryPanel({
+    fetchHistory: async () => {
+      const res = await bus.request<HistoryPayload>(HostEndpoint.GET_HISTORY, {}).promise;
+      return res ?? { entries: [], cursor: 0, dropped: false };
+    },
+    undoStep: async () =>
+      (await bus.request<HistoryResultPayload>(HostEndpoint.UNDO_EDIT, {}).promise) ??
+      historyFailure('宿主无响应'),
+    redoStep: async () =>
+      (await bus.request<HistoryResultPayload>(HostEndpoint.REDO_EDIT, {}).promise) ??
+      historyFailure('宿主无响应'),
+    revertTo: async (id) =>
+      (await bus.request<HistoryResultPayload>(HostEndpoint.REVERT_TO, { id }).promise) ??
+      historyFailure('宿主无响应'),
+    confirm: (message, onConfirm) => banner.show(message, '确认', onConfirm),
+    // 历史回退可能改动任意位置的内容：整体清缓存并重拉（逐行失效没有意义）。
+    onChanged: () => {
+      state.cache.clear();
+      state.maxLoaded = 0;
+      list.refresh();
+      updateToolbar();
+      if (state.selectedLine !== undefined) void showDetailForLine(state.selectedLine);
+    },
+    notify: (message) => banner.show(message, undefined),
+  });
+  rootEl.appendChild(historyPanel.root);
 
   /**
    * 打开编辑浮层：先按需拉取该行的磁盘原文（列表缓存里只有解析后的 value，不能当原文用），
@@ -1280,7 +1326,8 @@ export function main(): void {
    */
   const onKeyDown = (e: KeyboardEvent): void => {
     if (e.key !== 'Escape') return;
-    if (editPanel.isOpen()) return;
+    // 浮层打开时让位给它们（各自的 Esc 负责关闭自身）
+    if (editPanel.isOpen() || historyPanel.isOpen()) return;
     if (selectedLines.size > 0) {
       clearSelection();
       e.preventDefault();
@@ -1298,6 +1345,7 @@ export function main(): void {
     list.dispose();
     detail.dispose();
     editPanel.dispose();
+    historyPanel.dispose();
     toolbar.destroy();
     document.removeEventListener('keydown', onKeyDown);
   };

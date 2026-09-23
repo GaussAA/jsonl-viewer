@@ -24,6 +24,8 @@ export interface ToolbarHandlers {
   onSearchNext?: () => void;
   /** 「全部替换」：查询取自搜索框，替换文本取自替换输入框。 */
   onReplaceAll?: (query: string, replacement: string) => void;
+  /** 「编辑历史」：打开会话历史浮层（撤销/重做/回退到某一步）。 */
+  onOpenHistory?: () => void;
   onApplyFilter?: (cond: FieldCondition | null) => void;
   onApplyLayout?: (layout: FieldLayout) => void;
 }
@@ -225,6 +227,14 @@ export function createToolbar(
   const actions = document.createElement('div');
   actions.className = 'jlv-toolbar-actions';
 
+  const historyBtn = document.createElement('button');
+  historyBtn.type = 'button';
+  historyBtn.className = 'jlv-btn';
+  historyBtn.title = '编辑历史（撤销 / 重做 / 回退到某一步）';
+  historyBtn.appendChild(iconSpan('jlv-btn-ic', ICON_HISTORY));
+  historyBtn.appendChild(document.createTextNode('历史'));
+  historyBtn.addEventListener('click', () => handlers.onOpenHistory?.());
+
   const filterBtn = document.createElement('button');
   filterBtn.type = 'button';
   filterBtn.className = 'jlv-btn';
@@ -249,7 +259,7 @@ export function createToolbar(
   filterNoteEl.setAttribute('aria-live', 'polite');
   filterNoteEl.textContent = '过滤结果较多，已截断（约前 5 万条）';
 
-  actions.append(filterBtn, customizeBtn, rangeEl);
+  actions.append(historyBtn, filterBtn, customizeBtn, rangeEl);
   root.appendChild(actions);
   root.appendChild(filterNoteEl);
 
@@ -793,5 +803,7 @@ const ICON_FILTER =
   '<svg width="12" height="12" viewBox="0 0 16 16"><path d="M2 4h12M5 8h6M8 12h3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>';
 const ICON_REPLACE =
   '<svg width="12" height="12" viewBox="0 0 16 16"><path d="M3 5.5h7.5a2.5 2.5 0 0 1 0 5H6" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><path d="M8 3L5.6 5.5 8 8" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><path d="M13 10.5H9.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>';
+const ICON_HISTORY =
+  '<svg width="12" height="12" viewBox="0 0 16 16"><path d="M8 4v4l2.5 1.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><path d="M2.8 8a5.2 5.2 0 1 1 1.5 3.6" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><path d="M2 5.6v2.6h2.6" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 const ICON_COLUMNS =
   '<svg width="12" height="12" viewBox="0 0 16 16"><rect x="2" y="2" width="5" height="12" rx="1" fill="none" stroke="currentColor" stroke-width="1.2"/><rect x="9" y="2" width="5" height="8" rx="1" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>';
