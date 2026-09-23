@@ -21,6 +21,10 @@ import { createDetailTree, type DetailTreeNavHandlers } from './detailTree.ts';
 import { createEditPanel } from './editPanel.ts';
 import { createHistoryPanel } from './historyPanel.ts';
 import { createBadLinesPanel, scanProgressText } from './badLinesPanel.ts';
+import { createFieldPanel } from './fieldPanel.ts';
+import { toPathParts } from './detailLogic.ts';
+import type { PathSeg } from './detailLogic.ts';
+import { replaceValueAtPath } from '../core/jsonSpan.ts';
 import { describeEditFailure, replaceConfirmText, replaceProgressText } from './editLogic.ts';
 import { createColumnLayout, type ColumnLayout } from './columnLayout.ts';
 import { createQueryActions, type QueryActions } from './queryActions.ts';
@@ -152,6 +156,13 @@ interface AppState {
   selectedLine: number | undefined;
   /** 当前在途 readRecord（详情）请求的 supersede 标记，切换选中行时取消。 */
   detailInFlight: { rid: string } | null;
+  /**
+   * 当前详情所展示行的**磁盘原文**与字节数。
+   *
+   * 字段级编辑必须在原文里定位并只替换目标值那一段（不能用解析后的值重新序列化 ——
+   * 那会重排用户的键序与空白）。`bytes` 同时用作编辑请求的乐观锁断言。
+   */
+  detailRaw: { text: string; bytes: number } | null;
 
   /* Task 6：搜索 / 过滤 / 持久化 */
   searchQuery: string;
@@ -235,6 +246,7 @@ export function main(): void {
     maxLoaded: 0,
     selectedLine: undefined,
     detailInFlight: null,
+    detailRaw: null,
     searchQuery: '',
     searchMatches: [],
     searchTruncated: false,
@@ -767,6 +779,7 @@ export function main(): void {
     }
     clearSelection();
     state.selectedLine = undefined;
+    state.detailRaw = null; // 详情已清空，原文一并作废（避免对已消失的行发起字段编辑）
     list.clearAllSelection();
     detail.clear();
     list.refresh();
@@ -1086,6 +1099,69 @@ export function main(): void {
     void openEditForLine(state.selectedLine);
   };
 
+  /* ---------------- 字段级编辑（详情树上点某个字段的值） ---------------- */
+
+  const fieldPanel = createFieldPanel({
+    submit: (segs, next) => commitFieldEdit(segs, next),
+    notify: (message) => banner.show(message, undefined),
+  });
+  rootEl.appendChild(fieldPanel.root);
+
+  navHandlers.onEditField = (segs, value) => {
+    // 入口侧已按「原文是否可用」判定过，此处再防一层：拿不到原文就无法安全定位，
+    // 与其让用户改完才发现失败，不如当场说清。
+    if (!state.detailRaw) {
+      banner.show('该行的原文不可用，请重新载入该记录后再编辑。', undefined);
+      return;
+    }
+    fieldPanel.open(segs, value);
+  };
+
+  /**
+   * 提交字段编辑：**定位 → 外科式替换 → 走已有的整行编辑链路**。
+   *
+   * 之所以复用 `EDIT_RECORD` 而不为字段编辑新开一条写入路径：冲突检测、乐观锁、
+   * 索引增量、撤销栈、自写基线同步这五件事已经在那里做对了，复制一份必然漂移。
+   * 字段级编辑与整行编辑的差别只在「新文本怎么算出来」——那由 jsonSpan 负责。
+   */
+  async function commitFieldEdit(
+    segs: readonly PathSeg[],
+    next: unknown
+  ): Promise<{ ok: boolean; error?: string }> {
+    const line = state.selectedLine;
+    const raw = state.detailRaw;
+    if (line === undefined) return { ok: false, error: '没有选中的记录。' };
+    if (!raw) return { ok: false, error: '该行的原文不可用，请重新载入该记录后再编辑。' };
+
+    // ① 只在原文里替换目标值那一段字节 —— 键序、空白、其余字段的转义风格逐字节不变。
+    const replaced = replaceValueAtPath(raw.text, toPathParts(segs), next);
+    if (!replaced.ok) return { ok: false, error: replaced.error };
+
+    // ② 走整行编辑：`expectedBytes` 用宿主回传的原文字节数做乐观锁（外部改动即拒绝）。
+    let res: EditResultPayload | null = null;
+    try {
+      res = await bus.request<EditResultPayload>(
+        HostEndpoint.EDIT_RECORD,
+        { line, text: replaced.text, expectedBytes: raw.bytes },
+        { timeoutMs: RPC_HEAVY_TIMEOUT_MS }
+      ).promise;
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+    if (!res?.ok) return { ok: false, error: describeEditFailure(res ?? {}) };
+
+    // ③ 落盘成功：该行缓存失效 → 重绘卡片 → **后台**重拉详情。
+    //    重拉必须 fire-and-forget：它要等宿主回执，若 await 它，保存就会显得卡住，
+    //    而且重拉失败还会被误当成保存失败（两者是两回事）。
+    //    重拉仍然必要 —— 详情树的原文会随之更新，否则下一次字段编辑会基于过期原文定位。
+    state.cache.delete(line);
+    list.refresh();
+    updateToolbar();
+    void showDetailForLine(line);
+    scheduleBadLinesRefresh();
+    return { ok: true };
+  }
+
   /* ---------------- 详情面板：按需请求完整 JSON ---------------- */
 
   function cancelDetailRequest(): void {
@@ -1099,6 +1175,11 @@ export function main(): void {
    * - 坏行（ok=false）直接展示错误信息（此时已是缓存中的汇总值，无需再请求）。
    */
   async function showDetailForLine(line: number): Promise<void> {
+    // 切换行时**立刻**作废上一行的原文：新详情到位前若还留着旧原文，任何字段级编辑
+    // 都会基于它定位，从而把改动写到别的行上 —— 那是最难发现的一类错改。
+    // 放在函数最开头，各条提前返回的分支（坏行 / 异常）也就一并覆盖了。
+    state.detailRaw = null;
+
     const cached = state.cache.get(line);
     if (cached && cached.ok === false) {
       cancelDetailRequest();
@@ -1109,18 +1190,28 @@ export function main(): void {
     cancelDetailRequest();
     detail.showLoading();
 
-    const { requestId, promise } = bus.request<{ value?: unknown; error?: string; ok: boolean }>(
-      HostEndpoint.READ_RECORD,
-      { line },
-      { timeoutMs: RPC_HEAVY_TIMEOUT_MS }
-    );
+    const { requestId, promise } = bus.request<{
+      value?: unknown;
+      error?: string;
+      ok: boolean;
+      rawText?: string;
+      rawBytes?: number;
+    }>(HostEndpoint.READ_RECORD, { line }, { timeoutMs: RPC_HEAVY_TIMEOUT_MS });
     state.detailInFlight = { rid: requestId };
 
     try {
       const res = await promise;
       if (state.detailInFlight?.rid !== requestId) return; // 已被更新的选择取代
-      if (res && res.ok !== false && res.value !== undefined) detail.showRecord(res.value, line);
-      else detail.showError(res?.error ?? '无法解析该记录。');
+      if (res && res.ok !== false && res.value !== undefined) {
+        // 原文可用才记下（字段级编辑要在其中定位），并据此决定是否渲染字段编辑入口。
+        state.detailRaw =
+          res.rawText !== undefined && res.rawBytes !== undefined
+            ? { text: res.rawText, bytes: res.rawBytes }
+            : null;
+        detail.showRecord(res.value, line, state.detailRaw !== null);
+      } else {
+        detail.showError(res?.error ?? '无法解析该记录。');
+      }
     } catch (err) {
       if (state.detailInFlight?.rid === requestId) {
         detail.showError(err instanceof Error ? err.message : String(err));
@@ -1355,6 +1446,8 @@ export function main(): void {
     state.pending.clear();
     state.maxLoaded = 0;
     state.fields = null;
+    // 索引已重建：行号与原文全部失效，详情原文一并作废。
+    state.detailRaw = null;
     state.searchMatches = [];
     state.searchTruncated = false;
     state.filterMap = null;
@@ -1463,7 +1556,13 @@ export function main(): void {
   const onKeyDown = (e: KeyboardEvent): void => {
     if (e.key !== 'Escape') return;
     // 浮层打开时让位给它们（各自的 Esc 负责关闭自身）
-    if (editPanel.isOpen() || historyPanel.isOpen() || badLinesPanel.isOpen()) return;
+    if (
+      editPanel.isOpen() ||
+      historyPanel.isOpen() ||
+      badLinesPanel.isOpen() ||
+      fieldPanel.isOpen()
+    )
+      return;
     if (selectedLines.size > 0) {
       clearSelection();
       e.preventDefault();
@@ -1483,6 +1582,7 @@ export function main(): void {
     editPanel.dispose();
     historyPanel.dispose();
     badLinesPanel.dispose();
+    fieldPanel.dispose();
     if (badLinesRefreshTimer) clearTimeout(badLinesRefreshTimer);
     toolbar.destroy();
     document.removeEventListener('keydown', onKeyDown);

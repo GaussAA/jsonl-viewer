@@ -12,6 +12,9 @@ import {
   clipLabel,
   replaceConfirmText,
   replaceProgressText,
+  isFieldEditableKind,
+  initialFieldText,
+  parseFieldInput,
   EDIT_COST_WARN_BYTES,
 } from '../editLogic.ts';
 
@@ -155,4 +158,72 @@ test('replaceProgressText：百分比与字节数，且不越界', () => {
   assert.equal(replaceProgressText(0, 100), '正在替换… 0%（0 B / 100 B）');
   assert.equal(replaceProgressText(50, 100), '正在替换… 50%（50 B / 100 B）');
   assert.match(replaceProgressText(200, 100), /100%/, '超过总长也封顶 100%');
+});
+
+/* ---------------------------- 字段级编辑 ---------------------------- */
+
+test('isFieldEditableKind：仅 string/number/boolean —— null 刻意不支持', () => {
+  assert.equal(isFieldEditableKind('string'), true);
+  assert.equal(isFieldEditableKind('number'), true);
+  assert.equal(isFieldEditableKind('boolean'), true);
+  // null 没有「同类型的新值」可言；为它引入第二套输入语义只会让浮层的规则随类型漂移。
+  assert.equal(isFieldEditableKind('null'), false);
+  assert.equal(isFieldEditableKind('object'), false);
+  assert.equal(isFieldEditableKind('array'), false);
+});
+
+test('initialFieldText：字符串不带引号（所见即所得）', () => {
+  assert.equal(initialFieldText('abc'), 'abc');
+  assert.equal(initialFieldText('he said "hi"'), 'he said "hi"', '不预先加转义');
+  assert.equal(initialFieldText(''), '');
+  assert.equal(initialFieldText(42), '42');
+  assert.equal(initialFieldText(-1.5e3), '-1500');
+  assert.equal(initialFieldText(true), 'true');
+});
+
+test('parseFieldInput：按原类型解析', () => {
+  assert.deepEqual(parseFieldInput('abc', 'string'), { ok: true, value: 'abc' });
+  assert.deepEqual(parseFieldInput('', 'string'), { ok: true, value: '' }, '空字符串是合法值');
+  assert.deepEqual(parseFieldInput('42', 'number'), { ok: true, value: 42 });
+  assert.deepEqual(parseFieldInput('-1.5e3', 'number'), { ok: true, value: -1500 });
+  assert.deepEqual(parseFieldInput('  7  ', 'number'), { ok: true, value: 7 }, '容忍首尾空白');
+  assert.deepEqual(parseFieldInput('true', 'boolean'), { ok: true, value: true });
+  assert.deepEqual(parseFieldInput(' false ', 'boolean'), { ok: true, value: false });
+});
+
+test('parseFieldInput：拒绝所有「不是 JSON 数字」的写法', () => {
+  // 裸 Number() 会接受其中多数（0x10→16、1_000→1000），于是用户输入的东西与最终
+  // 落盘的东西不是一回事 —— 这种「我明明写的不是这个」的困惑最难排查。
+  for (const bad of [
+    '',
+    '   ',
+    '0x10',
+    '1_000',
+    'Infinity',
+    '-Infinity',
+    'NaN',
+    '1.',
+    '.5',
+    '+1',
+    '01',
+    '1e',
+    '1e+',
+    '1.2.3',
+    'abc',
+    '12px',
+  ]) {
+    const r = parseFieldInput(bad, 'number');
+    assert.equal(r.ok, false, `「${bad}」应被拒绝`);
+    if (r.ok === false) assert.ok(r.error.length > 0, '拒绝时必须给出原因');
+  }
+});
+
+test('parseFieldInput：布尔与数字的错误原因可读，且不含未处理的占位', () => {
+  const bool = parseFieldInput('yes', 'boolean');
+  assert.equal(bool.ok, false);
+  if (bool.ok === false) assert.match(bool.error, /true 或 false/);
+
+  const empty = parseFieldInput('', 'number');
+  assert.equal(empty.ok, false);
+  if (empty.ok === false) assert.match(empty.error, /不能为空/);
 });

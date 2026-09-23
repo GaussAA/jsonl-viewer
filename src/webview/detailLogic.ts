@@ -73,6 +73,18 @@ export function pathToString(segs: PathSeg[]): string {
   return out;
 }
 
+/**
+ * `PathSeg[]` → `core/jsonSpan` 的路径表示（对象键为 string、数组下标为 number）。
+ *
+ * 两套类型各自独立 —— core 层不得依赖 webview 的 `PathSeg`，故此处做一次显式转换。
+ * 下标必须转成数字：`PathSeg.key` 恒为字符串（树上写作 `[3]`），而 jsonSpan 在数组里
+ * 比的是数字下标。若 `key` 不是合法整数，转换得 NaN —— 那会让定位必定失败（拒绝编辑），
+ * 是安全的失败方向。
+ */
+export function toPathParts(segs: readonly PathSeg[]): (string | number)[] {
+  return segs.map((s) => (s.kind === 'index' ? Number(s.key) : s.key));
+}
+
 /* ------------------------------ 折叠状态 ------------------------------ */
 
 export class TreeState {

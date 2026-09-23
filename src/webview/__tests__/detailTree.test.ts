@@ -6,6 +6,7 @@ import {
   type DetailTreeController,
   type DetailTreeNavHandlers,
 } from '../detailTree.ts';
+import type { PathSeg } from '../detailLogic.ts';
 
 /**
  * detailTree 组件测试（覆盖率补强：视图层）。
@@ -25,6 +26,8 @@ interface Harness {
   tree: DetailTreeController;
   host: HTMLElement;
   nav: { prev: number; next: number };
+  /** 字段级编辑回调收到的 (路径, 值)。 */
+  fields: { segs: PathSeg[]; value: unknown }[];
 }
 
 function makeTree(): Harness {
@@ -34,6 +37,7 @@ function makeTree(): Harness {
   const host = doc.createElement('div');
   doc.body.append(host);
   const nav = { prev: 0, next: 0 };
+  const fields: { segs: PathSeg[]; value: unknown }[] = [];
   const handlers: DetailTreeNavHandlers = {
     onPrevRecord: () => {
       nav.prev += 1;
@@ -41,10 +45,13 @@ function makeTree(): Harness {
     onNextRecord: () => {
       nav.next += 1;
     },
+    onEditField: (segs, value) => {
+      fields.push({ segs: [...segs], value });
+    },
   };
   const tree = createDetailTree(host, handlers);
   host.append(tree.root);
-  return { tree, host, nav };
+  return { tree, host, nav, fields };
 }
 
 const rows = (h: Harness): HTMLElement[] =>
@@ -245,5 +252,83 @@ describe('createDetailTree（视图层覆盖率补强）', () => {
     assert.doesNotThrow(() => h.tree.dispose());
     assert.doesNotThrow(() => firstContainerRow(h).click(), 'dispose 后点击安全');
     assert.doesNotThrow(() => h.tree.clear());
+  });
+
+  /* ------------------------- 字段级编辑入口 ------------------------- */
+
+  const entryOf = (row: HTMLElement): HTMLElement | null =>
+    row.querySelector<HTMLElement>('.jlv-field-edit');
+  const rowsWithEntry = (h: Harness): HTMLElement[] => rows(h).filter((r) => entryOf(r));
+  /** 面包屑段数：只有根 `$` 时为 1，选中某字段后会增加。 */
+  const crumbCount = (h: Harness): number => h.tree.root.querySelectorAll('.jlv-crumb-seg').length;
+
+  it('原文可用时标量行才有编辑入口，容器行不给（改整个对象应走整行编辑）', () => {
+    const h = makeTree();
+    h.tree.showRecord({ name: 'bob', tags: ['a', 'b'], n: 1 }, 0, true);
+
+    const withEntry = rowsWithEntry(h);
+    assert.ok(withEntry.length >= 2, '标量行有入口');
+    const containerRow = rows(h).find((r) => r.dataset.container === '1')!;
+    assert.ok(containerRow, '存在容器行');
+    assert.strictEqual(entryOf(containerRow), null, '容器行不给入口');
+  });
+
+  it('原文不可用时不渲染入口（点了必然报错的按钮，不如没有）', () => {
+    const h = makeTree();
+    h.tree.showRecord({ name: 'bob' }, 0, false);
+    assert.strictEqual(rowsWithEntry(h).length, 0);
+
+    // 缺省（不传第三参）同样不给 —— 老调用方不会被"意外"点亮入口
+    h.tree.showRecord({ name: 'bob' });
+    assert.strictEqual(rowsWithEntry(h).length, 0);
+  });
+
+  it('null 字段不给入口（没有「同类型的新值」可言）', () => {
+    const h = makeTree();
+    h.tree.showRecord({ z: null, s: 'x', b: true }, 0, true);
+    assert.strictEqual(rowsWithEntry(h).length, 2, '只有 s 与 b 有入口');
+    assert.deepStrictEqual(
+      rowsWithEntry(h).map((r) => r.querySelector('.jlv-key')?.textContent),
+      ['s', 'b']
+    );
+  });
+
+  it('点击入口回调 (segs, value)，且**不**触发树行选中（阻止冒泡到委托）', () => {
+    const h = makeTree();
+    h.tree.showRecord({ name: 'bob' }, 0, true);
+    const crumbsBefore = crumbCount(h);
+
+    entryOf(rows(h)[0])!.click();
+
+    assert.strictEqual(h.fields.length, 1);
+    assert.deepStrictEqual(h.fields[0].segs, [{ kind: 'key', key: 'name' }]);
+    assert.strictEqual(h.fields[0].value, 'bob');
+    assert.strictEqual(crumbCount(h), crumbsBefore, '不该顺带把面包屑跳到该字段');
+  });
+
+  it('入口的无障碍属性与 tooltip 指明改的是哪个字段', () => {
+    const h = makeTree();
+    h.tree.showRecord({ name: 'bob' }, 0, true);
+    const entry = entryOf(rows(h)[0])!;
+    assert.strictEqual(entry.tagName, 'BUTTON');
+    assert.strictEqual(entry.getAttribute('aria-label'), '编辑 .name');
+    assert.match(entry.title, /编辑 \.name/);
+  });
+
+  it('进入加载态 / 错误态 / 清空后入口消失（原文与行号都可能已变）', () => {
+    const h = makeTree();
+    h.tree.showRecord({ name: 'bob' }, 0, true);
+    assert.ok(h.tree.root.querySelector('.jlv-field-edit'), '前置：有入口');
+
+    h.tree.showLoading();
+    assert.strictEqual(h.tree.root.querySelector('.jlv-field-edit'), null, '加载态无入口');
+
+    h.tree.showRecord({ name: 'bob' }, 0, true);
+    h.tree.showError('不是合法 JSON', 0);
+    assert.strictEqual(h.tree.root.querySelector('.jlv-field-edit'), null, '错误态无入口');
+
+    h.tree.showRecord({ name: 'bob' }, 0, true);
+    h.tree.clear();
+    assert.strictEqual(h.tree.root.querySelector('.jlv-field-edit'), null, '清空后无入口');
   });
 });

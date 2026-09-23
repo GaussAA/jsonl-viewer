@@ -995,6 +995,80 @@ body {
   .jlv-bad-backdrop { padding: 12px; }
 }
 
+/* ---------------------------- 字段级编辑 ---------------------------- */
+/* 树行上的编辑入口：平时隐形，行悬停/按钮聚焦时显形（否则整棵树布满图标） */
+.jlv-field-edit {
+  flex: none;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 18px; height: 18px; margin-left: 6px;
+  padding: 0;
+  background: transparent; border: none; border-radius: 4px;
+  color: var(--jlv-dim);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--jlv-transition), background var(--jlv-transition), color var(--jlv-transition);
+}
+.jlv-field-edit svg { width: 10px; height: 10px; }
+.jlv-tree-row:hover .jlv-field-edit { opacity: 1; }
+/* 键盘用户：聚焦即显形（按钮始终在 tab 序列中，故键盘可达） */
+.jlv-field-edit:focus-visible { opacity: 1; outline: 1px solid var(--jlv-focus); }
+.jlv-field-edit:hover { background: rgba(255, 255, 255, .08); color: var(--jlv-fg); }
+
+.jlv-field-backdrop {
+  position: fixed; inset: 0; z-index: 85;
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, .45);
+  opacity: 0;
+  transition: opacity var(--jlv-dur-fast) ease-in;
+}
+.jlv-field-backdrop.open { opacity: 1; }
+.jlv-field {
+  display: flex; flex-direction: column; gap: 10px;
+  width: min(460px, 100%); max-height: 100%;
+  padding: 16px;
+  background: var(--jlv-panel-bg);
+  border: 1px solid rgba(255, 255, 255, .1);
+  border-radius: var(--jlv-radius-4);
+  box-shadow: var(--jlv-shadow-2);
+  color: var(--jlv-fg); font-size: var(--jlv-font-size-sm);
+  transform: scale(.96) translateY(6px); opacity: 0;
+  transition: transform var(--jlv-dur-base) var(--jlv-ease), opacity var(--jlv-dur-base) var(--jlv-ease);
+}
+.jlv-field.open { transform: none; opacity: 1; }
+/* 原值提示：确认「改的是哪个字段的什么值」，长值换行而非撑破面板 */
+.jlv-field-meta {
+  padding: 6px 8px;
+  background: rgba(255, 255, 255, .04);
+  border-radius: 6px;
+  font-size: 10px; font-family: var(--jlv-mono);
+  color: var(--jlv-dim);
+  overflow-wrap: anywhere;
+}
+.jlv-field-body { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.jlv-field-input {
+  width: 100%; box-sizing: border-box;
+  padding: 8px 10px;
+  background: rgba(0, 0, 0, .25);
+  border: 1px solid rgba(255, 255, 255, .12);
+  border-radius: 6px;
+  color: var(--jlv-fg);
+  font-family: var(--jlv-mono); font-size: var(--jlv-font-size-sm);
+  resize: vertical;
+}
+.jlv-field-input:focus { outline: none; border-color: var(--jlv-focus); }
+.jlv-field-error { padding: 4px 2px; font-size: 10px; color: var(--jlv-error-fg); }
+.jlv-field-actions { display: flex; justify-content: flex-end; }
+.jlv-field-save {
+  background: color-mix(in srgb, var(--jlv-focus) 20%, transparent);
+  border-color: color-mix(in srgb, var(--jlv-focus) 35%, transparent);
+  color: var(--jlv-info);
+}
+.jlv-field-bool { display: flex; gap: 8px; }
+@media (max-width: 700px) {
+  .jlv-field-backdrop { padding: 12px; }
+}
+
 .jlv-edit-head { display: flex; align-items: center; gap: 8px; }
 .jlv-edit-title { font-size: var(--jlv-font-size-md); font-weight: 600; }
 .jlv-edit-close {

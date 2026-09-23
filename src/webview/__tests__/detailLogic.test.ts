@@ -9,6 +9,7 @@ import {
   pathKey,
   pathToString,
   segText,
+  toPathParts,
   TreeState,
 } from '../detailLogic.ts';
 
@@ -178,4 +179,26 @@ test('expandContainer: 对象 key 正确映射为 PathSeg', () => {
   assert.equal(items[0].seg.kind, 'key');
   assert.equal(items[0].seg.key, 'foo');
   assert.equal(items[0].value, 1);
+});
+
+test('toPathParts: 对象键保持字符串、数组下标转为数字', () => {
+  assert.deepStrictEqual(
+    toPathParts([
+      { kind: 'key', key: 'a' },
+      { kind: 'index', key: '3' },
+      { kind: 'key', key: 'b' },
+    ]),
+    ['a', 3, 'b']
+  );
+  assert.deepStrictEqual(toPathParts([]), []);
+});
+
+test('toPathParts: 下标不是整数时转出 NaN（定位必定失败，是安全的失败方向）', () => {
+  const parts = toPathParts([{ kind: 'index', key: 'abc' }]);
+  assert.equal(parts.length, 1);
+  assert.ok(Number.isNaN(parts[0]), 'NaN 而非字符串 —— 不会误匹配任何数组元素');
+});
+
+test('toPathParts: 数字形态的对象键不被误转（键是字符串 "3" 时保持字符串）', () => {
+  assert.deepStrictEqual(toPathParts([{ kind: 'key', key: '3' }]), ['3']);
 });

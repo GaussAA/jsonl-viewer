@@ -20,10 +20,12 @@ import {
   LARGE_ARRAY_PREVIEW,
   MAX_RENDER_DEPTH,
   pathKey,
+  pathToString,
   segText,
   TreeState,
 } from './detailLogic.ts';
 import type { PathSeg } from './detailLogic.ts';
+import { isFieldEditableKind } from './editLogic.ts';
 
 /** 挂在 `.jlv-tree-node` 上的懒展开元数据（替代散落的 as unknown as 链式断言）。 */
 interface TreeNodeMeta {
@@ -55,13 +57,27 @@ export interface DetailTreeNavHandlers {
   onNextRecord?(): void;
   /** 编辑当前显示的记录（打开编辑浮层）。 */
   onEdit?(): void;
+  /**
+   * 编辑某个**字段的值**（仅标量）。
+   *
+   * `segs` 是该字段的路径、`value` 是其当前值。定位与落盘由装配层负责 ——
+   * 本模块只把「用户点了哪个字段」这件事报出去。
+   */
+  onEditField?(segs: PathSeg[], value: unknown): void;
 }
 
 export interface DetailTreeController {
   /** 面板根元素（`.jlv-col-detail`），供宿主放入布局。 */
   readonly root: HTMLElement;
-  /** 展示一条记录的完整 JSON 值（line 用于头部 Record # 展示，可选）。 */
-  showRecord(value: unknown, line?: number): void;
+  /**
+   * 展示一条记录的完整 JSON 值。
+   *
+   * @param line 源行号（头部 Record # 展示）
+   * @param rawTextAvailable 该行在磁盘上的**原文**是否可用。只有在可用时才渲染字段级
+   *   编辑入口 —— 没有原文就无法在文本里安全定位并替换目标值，此时宁可不出按钮，
+   *   也不要给一个点了必然报错的入口。
+   */
+  showRecord(value: unknown, line?: number, rawTextAvailable?: boolean): void;
   /** 加载中占位。 */
   showLoading(): void;
   /** 展示错误行信息。 */
@@ -203,6 +219,8 @@ export function createDetailTree(
   const revealed: Record<string, number> = {}; // 父 pathKey -> 「加载更多」额外项数
   let currentValue: unknown = undefined;
   let currentLine: number | undefined = undefined;
+  /** 当前行原文是否可用（决定是否渲染字段级编辑入口）。 */
+  let rawTextAvailable = false;
   let selectedSegs: PathSeg[] = [];
   let disposed = false;
   /** 最近一次由用户 toggle 展开的路径：重建后仅该节点播抽屉动画（设计体系 §4.1）。 */
@@ -418,6 +436,27 @@ export function createDetailTree(
       v.textContent = text;
       if (title) v.title = title;
       row.appendChild(v);
+
+      // 字段级编辑入口：仅**标量**、且该行原文可用时渲染（平时隐形，悬停显形）。
+      // 容器不给入口 —— 改整个对象/数组应走整行编辑，那是更诚实的入口。
+      // 可编辑类型的判定复用 editLogic 的单一来源：入口显示了而浮层拒绝打开，
+      // 比不显示入口更糟。
+      if (rawTextAvailable && navHandlers.onEditField && isFieldEditableKind(kind)) {
+        const editBtn = document.createElement('button');
+        editBtn.type = 'button';
+        editBtn.className = 'jlv-field-edit';
+        const pathText = pathToString([...segs]) || '$';
+        editBtn.title = `编辑 ${pathText}`;
+        editBtn.setAttribute('aria-label', editBtn.title);
+        editBtn.appendChild(icon('', ICON_EDIT));
+        editBtn.addEventListener('click', (e) => {
+          // 阻止冒泡到 body 的委托：那会把「点编辑」也算作「点行选中」并跳转面包屑，
+          // 而用户此刻要的是改值、不是导航。
+          e.stopPropagation();
+          navHandlers.onEditField?.(segs, value);
+        });
+        row.appendChild(editBtn);
+      }
     } else {
       // 容器：根据展开状态决定「摘要预览」或完整子树
       const expanded = depth < MAX_RENDER_DEPTH && state.isExpanded(segs, depth);
@@ -691,9 +730,10 @@ export function createDetailTree(
 
   const controller: DetailTreeController = {
     root,
-    showRecord(value, line) {
+    showRecord(value, line, rawAvailable = false) {
       currentValue = value;
       currentLine = line;
+      rawTextAvailable = rawAvailable;
       setRecordHeader(line);
       selectedSegs = [];
       // 默认「完全折叠」：所有容器折叠，仅展示顶层字段 + 容器摘要预览。
@@ -706,6 +746,8 @@ export function createDetailTree(
     },
     showLoading() {
       currentValue = undefined;
+      // 占位期间不提供字段编辑：此时树里没有真实字段，原文与行号都可能已变。
+      rawTextAvailable = false;
       setRecordHeader(currentLine);
       render();
       replayRowAnim();
@@ -723,6 +765,8 @@ export function createDetailTree(
     showError(message, line) {
       currentValue = undefined;
       currentLine = line;
+      // 坏行没有可解析的值，自然也没有字段级编辑可言。
+      rawTextAvailable = false;
       // 坏行也更新页头（此前遗漏：页头停留在上一个 Record #N）。
       setRecordHeader(line);
       render();
@@ -734,6 +778,7 @@ export function createDetailTree(
     clear() {
       currentValue = undefined;
       currentLine = undefined;
+      rawTextAvailable = false;
       setRecordHeader(undefined);
       selectedSegs = [];
       render();

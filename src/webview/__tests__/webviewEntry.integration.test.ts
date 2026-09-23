@@ -1523,4 +1523,188 @@ describe('webviewEntry 装配层（集成）', () => {
       );
     });
   });
+
+  describe('字段级编辑（M3 收尾）', () => {
+    /** 回执详情：`rawText` 是字段级编辑的定位依据（缺了它就不该有入口）。 */
+    const replyDetail = (
+      host: FakeHost,
+      value: unknown,
+      rawText?: string,
+      rawBytes?: number
+    ): void => {
+      const req = lastReq(host, HostEndpoint.READ_RECORD);
+      assert.ok(req, '存在未回执的详情请求');
+      host.receive({
+        type: HostReply.RESULT,
+        requestId: req!.requestId,
+        payload:
+          rawText === undefined
+            ? { ok: true, value }
+            : { ok: true, value, rawText, rawBytes: rawBytes ?? rawText.length },
+      });
+    };
+
+    /**
+     * 按**字段名**取该行的编辑入口。
+     *
+     * 不能按「第 N 个入口」取：入口顺序取决于字段在树里的渲染顺序，一处改动就会
+     * 让断言指向别的字段（第一版就因此取到了数字字段的入口）。
+     */
+    const entryFor = (app: HTMLElement, key: string): HTMLButtonElement | null => {
+      const row = Array.from(app.querySelectorAll<HTMLElement>('.jlv-tree-row')).find(
+        (r) => r.querySelector('.jlv-key')?.textContent === key
+      );
+      return row?.querySelector<HTMLButtonElement>('.jlv-field-edit') ?? null;
+    };
+    const hasEntry = (app: HTMLElement): boolean =>
+      app.querySelectorAll('.jlv-field-edit').length > 0;
+    const fieldPanelEl = (app: HTMLElement): HTMLElement =>
+      app.querySelector<HTMLElement>('.jlv-field')!;
+
+    it('原文可用时出现字段编辑入口；点开后浮层标题指明字段路径', async () => {
+      const { host, app } = await bootWithRecords();
+      replyDetail(host, { name: 'bob', n: 1 }, '{"name":"bob","n":1}');
+      await sleep(20);
+
+      const entry = entryFor(app, 'name');
+      assert.ok(entry, '标量行应有字段编辑入口');
+      assert.match(entry!.title, /编辑 \.name/);
+
+      entry!.click();
+      await sleep(30);
+
+      const panel = fieldPanelEl(app);
+      assert.ok(panel.classList.contains('open'), '浮层已打开');
+      assert.strictEqual(
+        text(panel.querySelector('.jlv-edit-title')),
+        '编辑 .name',
+        '标题指明改的是哪个字段'
+      );
+      assert.match(text(panel.querySelector('.jlv-field-meta')), /"bob"/);
+    });
+
+    it('保存后发出 EDIT_RECORD，且新文本**只改了那一段字节**（键序与空白原样保留）', async () => {
+      const { host, app } = await bootWithRecords();
+      // 刻意用「键序 + 空格风格都不常规」的原文：字段级编辑的价值就在不改动它们。
+      const raw = '{ "b" : 2, "name" : "bob" }';
+      replyDetail(host, { b: 2, name: 'bob' }, raw);
+      await sleep(20);
+
+      entryFor(app, 'name')!.click();
+      await sleep(30);
+      const panel = fieldPanelEl(app);
+      const ta = panel.querySelector<HTMLTextAreaElement>('textarea.jlv-field-input')!;
+      assert.strictEqual(ta.value, 'bob', '初值是磁盘原文里的值（不带引号）');
+      ta.value = 'alice';
+      panel.querySelector<HTMLButtonElement>('.jlv-field-save')!.click();
+      await sleep(40);
+
+      const edit = lastReq(host, HostEndpoint.EDIT_RECORD);
+      assert.ok(edit, '已发起整行编辑');
+      assert.strictEqual(edit!.line, 0);
+      assert.strictEqual(
+        edit!.text,
+        '{ "b" : 2, "name" : "alice" }',
+        '只有 name 的值变了 —— 键序、空格、逗号位置逐字节不变'
+      );
+      assert.strictEqual(edit!.expectedBytes, raw.length, '乐观锁用宿主回传的原文长度');
+
+      // 回执成功后浮层才应关闭（未回执时提交必然挂起，那是宿主没响应，不是前端没关）
+      host.receive({
+        type: HostReply.EDIT_RESULT,
+        requestId: edit!.requestId,
+        payload: {
+          ok: true,
+          line: 0,
+          bytesDelta: 3,
+          inPlace: false,
+          movedBytes: 0,
+          costMs: 1,
+        },
+      });
+      await sleep(30);
+      assert.strictEqual(panel.classList.contains('open'), false, '成功后关闭浮层');
+    });
+
+    it('数字字段仍提交数字（类型不随输入漂移）', async () => {
+      const { host, app } = await bootWithRecords();
+      replyDetail(host, { n: 1, s: 'x' }, '{"n":1,"s":"x"}');
+      await sleep(20);
+
+      // 第一个标量行是 n
+      entryFor(app, 'n')!.click();
+      await sleep(30);
+      const panel = fieldPanelEl(app);
+      const inp = panel.querySelector<HTMLInputElement>('input.jlv-field-input')!;
+      assert.ok(inp, '数字用单行输入');
+      inp.value = '42';
+      panel.querySelector<HTMLButtonElement>('.jlv-field-save')!.click();
+      await sleep(40);
+
+      const edit = lastReq(host, HostEndpoint.EDIT_RECORD)!;
+      assert.strictEqual(edit.text, '{"n":42,"s":"x"}', '写成 42 而不是 "42"');
+    });
+
+    it('冲突失败：浮层保持打开并显示原因（用户就在浮层里，不该丢输入）', async () => {
+      const { host, app } = await bootWithRecords();
+      replyDetail(host, { name: 'bob' }, '{"name":"bob"}');
+      await sleep(20);
+      entryFor(app, 'name')!.click();
+      await sleep(30);
+      const panel = fieldPanelEl(app);
+      panel.querySelector<HTMLTextAreaElement>('textarea.jlv-field-input')!.value = 'carol';
+      panel.querySelector<HTMLButtonElement>('.jlv-field-save')!.click();
+      await sleep(30);
+
+      const edit = lastReq(host, HostEndpoint.EDIT_RECORD)!;
+      host.receive({
+        type: HostReply.EDIT_RESULT,
+        requestId: edit.requestId,
+        payload: {
+          ok: false,
+          line: 0,
+          bytesDelta: 0,
+          costMs: 0,
+          conflict: true,
+          error: '文件已被外部修改。',
+        },
+      });
+      await sleep(40);
+
+      assert.strictEqual(panel.classList.contains('open'), true, '失败不关浮层');
+      assert.match(text(panel.querySelector('.jlv-field-error')), /已被外部修改/);
+      assert.strictEqual(
+        panel.querySelector<HTMLTextAreaElement>('textarea.jlv-field-input')!.value,
+        'carol',
+        '输入内容必须保留'
+      );
+    });
+
+    it('宿主未回传原文时不出现入口（没有原文就无法安全定位）', async () => {
+      const { host, app } = await bootWithRecords();
+      replyDetail(host, { name: 'bob' }); // 不带 rawText
+      await sleep(20);
+
+      assert.strictEqual(hasEntry(app), false, '缺原文 → 不给入口');
+    });
+
+    it('切换选中行后入口消失（避免拿上一行的原文改到新行上）', async () => {
+      const { host, app } = await bootWithRecords();
+      replyDetail(host, { name: 'bob' }, '{"name":"bob"}');
+      await sleep(20);
+      assert.ok(hasEntry(app), '前置：有入口');
+
+      // 选另一行 → 详情重新请求（未回执期间不该有入口）
+      const other = card(app, 3);
+      assert.ok(other, '卡片 L3 存在');
+      other!.dispatchEvent(new (win().MouseEvent)('click', { bubbles: true }));
+      await sleep(30);
+      assert.strictEqual(
+        hasEntry(app),
+        false,
+        `新行详情未到位前不得保留入口（树行=${app.querySelectorAll('.jlv-tree-row').length}, ` +
+          `hint=${app.querySelector('.jlv-tree-hint')?.textContent ?? '无'}）`
+      );
+    });
+  });
 });

@@ -183,3 +183,64 @@ export function replaceProgressText(processedBytes: number, totalBytes: number):
   const pct = Math.min(100, Math.max(0, Math.floor((processedBytes / totalBytes) * 100)));
   return `正在替换… ${pct}%（${formatBytes(processedBytes)} / ${formatBytes(totalBytes)}）`;
 }
+
+/* ---------------------------- 字段级编辑（详情树） ---------------------------- */
+
+/**
+ * 支持字段级编辑的值类型。
+ *
+ * **刻意不含 `null`**：null 字段没有「同类型的新值」可言，要给它填值就必须换类型；
+ * 而一旦为了 null 引入「按 JSON 字面量输入」的第二套规则，同一个浮层的输入语义就会
+ * 随类型漂移（改字符串是裸文本、改 null 要带引号）—— 那是很难不被误解的 UX 陷阱。
+ * 填值请走整行编辑（那是填入任意值的通用入口）。这是**有意的能力边界**，不是缺口。
+ */
+export type FieldEditKind = 'string' | 'number' | 'boolean';
+
+/** 该值是否可做字段级编辑（与 detailTree 的入口判定必须一致）。 */
+export function isFieldEditableKind(kind: string): kind is FieldEditKind {
+  return kind === 'string' || kind === 'number' || kind === 'boolean';
+}
+
+/**
+ * 输入框的初始文本。
+ *
+ * 字符串**不带引号**：用户改的是值本身，不是 JSON token（所见即所得）。
+ * 保存时再按原类型序列化并转义。
+ */
+export function initialFieldText(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  return '';
+}
+
+/**
+ * JSON 数字的严格语法（与 core/jsonSpan 的扫描规则一致）。
+ *
+ * 不用裸 `Number()`：它会接受 `0x10`（→16）、`1_000`、`  12  ` 这些**不是 JSON 数字**
+ * 的写法，于是用户输入的东西与最终落盘的东西不是一回事 —— 那种「我明明写的不是这个」
+ * 的困惑最难排查。
+ */
+const JSON_NUMBER_RE = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$/;
+
+/**
+ * 把输入文本按**原类型**解析为新值。
+ *
+ * 类型恒为原类型：用户点的是「编辑这个字段的值」，不是「改字段类型」。若确实要换类型，
+ * 整行编辑才是那个入口 —— 让两种入口各司其职，比让一个输入框猜用户意图可靠得多。
+ */
+export function parseFieldInput(
+  text: string,
+  kind: FieldEditKind
+): { ok: true; value: string | number | boolean } | { ok: false; error: string } {
+  if (kind === 'string') return { ok: true, value: text };
+  if (kind === 'boolean') {
+    const t = text.trim();
+    if (t === 'true') return { ok: true, value: true };
+    if (t === 'false') return { ok: true, value: false };
+    return { ok: false, error: '布尔值只能是 true 或 false。' };
+  }
+  const t = text.trim();
+  if (t === '') return { ok: false, error: '数字不能为空。' };
+  if (!JSON_NUMBER_RE.test(t)) return { ok: false, error: `「${t}」不是合法的 JSON 数字。` };
+  return { ok: true, value: Number(t) };
+}
