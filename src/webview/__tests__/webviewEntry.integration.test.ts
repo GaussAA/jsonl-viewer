@@ -180,6 +180,25 @@ function replyFields(host: FakeHost, keys: string[] = ['a', 'b']): void {
   reply(host, req, { fields: keys.map((key) => ({ key })), total: 3, scanned: 3 });
 }
 
+/**
+ * 回执详情请求。
+ *
+ * `rawText` 既是「字段级编辑」的定位依据，也是行编辑浮层的初始文本 —— 缺了它，
+ * 详情树就不会给出字段编辑入口。
+ */
+function replyDetail(host: FakeHost, value: unknown, rawText?: string, rawBytes?: number): void {
+  const req = lastReq(host, HostEndpoint.READ_RECORD);
+  assert.ok(req, '存在未回执的详情请求');
+  host.receive({
+    type: HostReply.RESULT,
+    requestId: req!.requestId,
+    payload:
+      rawText === undefined
+        ? { ok: true, value }
+        : { ok: true, value, rawText, rawBytes: rawBytes ?? rawText.length },
+  });
+}
+
 describe('webviewEntry 装配层（集成）', () => {
   describe('main() 装配边界', () => {
     it('缺少 acquireVsCodeApi 时给出友好提示且不抛错', () => {
@@ -1525,25 +1544,6 @@ describe('webviewEntry 装配层（集成）', () => {
   });
 
   describe('字段级编辑（M3 收尾）', () => {
-    /** 回执详情：`rawText` 是字段级编辑的定位依据（缺了它就不该有入口）。 */
-    const replyDetail = (
-      host: FakeHost,
-      value: unknown,
-      rawText?: string,
-      rawBytes?: number
-    ): void => {
-      const req = lastReq(host, HostEndpoint.READ_RECORD);
-      assert.ok(req, '存在未回执的详情请求');
-      host.receive({
-        type: HostReply.RESULT,
-        requestId: req!.requestId,
-        payload:
-          rawText === undefined
-            ? { ok: true, value }
-            : { ok: true, value, rawText, rawBytes: rawBytes ?? rawText.length },
-      });
-    };
-
     /**
      * 按**字段名**取该行的编辑入口。
      *
@@ -1705,6 +1705,108 @@ describe('webviewEntry 装配层（集成）', () => {
         `新行详情未到位前不得保留入口（树行=${app.querySelectorAll('.jlv-tree-row').length}, ` +
           `hint=${app.querySelector('.jlv-tree-hint')?.textContent ?? '无'}）`
       );
+    });
+  });
+
+  describe('单行编辑的进度与取消（M3 收尾）', () => {
+    /** 详情工具按钮（按 title 精确匹配）。 */
+    const detailTool = (app: HTMLElement, title: string): HTMLButtonElement => {
+      const btn = Array.from(app.querySelectorAll<HTMLButtonElement>('button')).find(
+        (b) => b.title === title
+      );
+      if (!btn) throw new Error(`未找到详情工具按钮「${title}」`);
+      return btn;
+    };
+    const bannerTextOf = (app: HTMLElement): string => text(app.querySelector('.jlv-banner-text'));
+    const bannerActionOf = (app: HTMLElement): HTMLButtonElement | null =>
+      app.querySelector<HTMLButtonElement>('.jlv-banner-action');
+    const editInput = (app: HTMLElement): HTMLTextAreaElement =>
+      app.querySelector<HTMLTextAreaElement>('textarea.jlv-edit-input')!;
+    const editSave = (app: HTMLElement): HTMLButtonElement =>
+      app.querySelector<HTMLButtonElement>('.jlv-edit-primary')!;
+
+    it('小改动不弹进度横幅（绝大多数编辑是毫秒级，闪一下反而烦）', async () => {
+      const { host, app } = await bootWithRecords();
+      replyDetail(host, { name: 'bob' }, '{"name":"bob"}');
+      await sleep(20);
+
+      detailTool(app, '编辑当前记录的 JSON').click();
+      await sleep(30);
+      // 编辑浮层打开前会**再拉一次**原文（初始文本必须是磁盘原文），回执后才会打开
+      replyDetail(host, { name: 'bob' }, '{"name":"bob"}');
+      await sleep(20);
+      editInput(app).value = '{"name":"carol"}';
+      editSave(app).click();
+      await sleep(30);
+
+      // 小文件（totalBytes=4096）的估算成本远低于阈值 → 不该出现进度横幅
+      assert.ok(!/正在写入/.test(bannerTextOf(app)), '小改动不该打扰用户');
+      assert.ok(lastReq(host, HostEndpoint.EDIT_RECORD), '但请求照常发出');
+    });
+
+    it('大成本编辑：弹可取消的进度横幅，点取消发出 CANCEL（同一 requestId）', async () => {
+      // 64MB 的文件、编辑第 1 行 → 估算搬移成本远超阈值
+      const { host, app } = await bootWithRecords({ totalBytes: 64 * 1024 * 1024 });
+      replyDetail(host, { name: 'bob' }, '{"name":"bob"}');
+      await sleep(20);
+
+      detailTool(app, '编辑当前记录的 JSON').click();
+      await sleep(30);
+      // 编辑浮层打开前会**再拉一次**原文（初始文本必须是磁盘原文），回执后才会打开
+      replyDetail(host, { name: 'bob' }, '{"name":"bob"}');
+      await sleep(20);
+      editInput(app).value = '{"name":"carol"}';
+      editSave(app).click();
+      await sleep(30);
+
+      assert.match(bannerTextOf(app), /正在写入/, '大改动必须让用户看见进度');
+      const cancel = bannerActionOf(app);
+      assert.ok(cancel, '同时提供取消入口');
+      assert.strictEqual(cancel!.textContent, '取消');
+
+      const edit = lastReq(host, HostEndpoint.EDIT_RECORD)!;
+      cancel!.click();
+      await sleep(20);
+      const abort = lastReq(host, HostEndpoint.CANCEL);
+      assert.ok(abort, '已发出取消');
+      assert.strictEqual(abort!.requestId, edit.requestId, '取消的是当前这次编辑');
+    });
+
+    it('取消回执：说「已取消」而**不**说失败（取消会自动回滚）', async () => {
+      const { host, app } = await bootWithRecords({ totalBytes: 64 * 1024 * 1024 });
+      replyDetail(host, { name: 'bob' }, '{"name":"bob"}');
+      await sleep(20);
+
+      detailTool(app, '编辑当前记录的 JSON').click();
+      await sleep(30);
+      // 编辑浮层打开前会**再拉一次**原文（初始文本必须是磁盘原文），回执后才会打开
+      replyDetail(host, { name: 'bob' }, '{"name":"bob"}');
+      await sleep(20);
+      editInput(app).value = '{"name":"carol"}';
+      editSave(app).click();
+      await sleep(30);
+
+      const edit = lastReq(host, HostEndpoint.EDIT_RECORD)!;
+      host.receive({
+        type: HostReply.EDIT_RESULT,
+        requestId: edit.requestId,
+        payload: {
+          ok: false,
+          line: 0,
+          bytesDelta: 0,
+          inPlace: false,
+          movedBytes: 0,
+          costMs: 1,
+          cancelled: true,
+          error: '已取消，文件已按备份恢复原样。',
+        },
+      });
+      await sleep(40);
+
+      const errText = text(app.querySelector('.jlv-edit-error'));
+      assert.match(errText, /已取消/, '取消是可识别的第三态');
+      assert.ok(!/保存失败/.test(errText), '取消不得报成失败');
+      assert.ok(app.querySelector('.jlv-edit-backdrop'), '浮层保持打开，用户可重试');
     });
   });
 });

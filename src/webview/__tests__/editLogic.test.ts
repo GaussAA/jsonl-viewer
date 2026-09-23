@@ -12,6 +12,7 @@ import {
   clipLabel,
   replaceConfirmText,
   replaceProgressText,
+  editProgressText,
   isFieldEditableKind,
   initialFieldText,
   parseFieldInput,
@@ -91,7 +92,29 @@ test('editCostWarning：未超阈值不打扰，超阈值说明「为什么慢�
   assert.match(warn, /64 MB|32 MB/);
 });
 
-test('describeEditFailure：冲突 / 校验 / 通用三类文案可区分', () => {
+test('editProgressText：措辞区别于批量替换，且百分比不越界', () => {
+  assert.equal(editProgressText(0, 0), '正在写入…', '无总长时不显示荒谬的 NaN%');
+  assert.equal(editProgressText(0, 100), '正在写入… 0%（0 B / 100 B）');
+  assert.match(editProgressText(200, 100), /100%/);
+  // 与批量替换分开措辞：用户据此判断「等多久才算不正常」
+  assert.match(editProgressText(50, 100), /正在写入/);
+  assert.ok(!/正在替换/.test(editProgressText(50, 100)));
+});
+
+test('describeEditFailure：取消优先于其余判定，措辞要让人放心', () => {
+  const cancelled = describeEditFailure({
+    cancelled: true,
+    error: '已取消，文件已按备份恢复原样。',
+  });
+  assert.match(cancelled, /已取消/);
+  assert.ok(!/失败/.test(cancelled), '取消绝不能说成失败');
+
+  // 即便同时带着别的标记，取消也优先 —— 它是「用户主动中止」
+  assert.equal(describeEditFailure({ cancelled: true, conflict: true }), '已取消，文件未被修改。');
+  assert.equal(describeEditFailure({ cancelled: true }), '已取消，文件未被修改。');
+});
+
+test('describeEditFailure：失败的三类文案仍互不混淆', () => {
   assert.match(describeEditFailure({ conflict: true, error: '文件已被外部修改' }), /重新加载/);
   assert.match(describeEditFailure({ invalid: true, error: 'JSON 校验未通过：xxx' }), /JSON/);
   assert.equal(describeEditFailure({}), '保存失败');

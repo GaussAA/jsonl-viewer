@@ -25,7 +25,14 @@ import { createFieldPanel } from './fieldPanel.ts';
 import { toPathParts } from './detailLogic.ts';
 import type { PathSeg } from './detailLogic.ts';
 import { replaceValueAtPath } from '../core/jsonSpan.ts';
-import { describeEditFailure, replaceConfirmText, replaceProgressText } from './editLogic.ts';
+import {
+  describeEditFailure,
+  editProgressText,
+  estimateEditCost,
+  replaceConfirmText,
+  replaceProgressText,
+  EDIT_COST_WARN_BYTES,
+} from './editLogic.ts';
 import { createColumnLayout, type ColumnLayout } from './columnLayout.ts';
 import { createQueryActions, type QueryActions } from './queryActions.ts';
 import { createPersistence } from './persistence.ts';
@@ -343,6 +350,8 @@ export function main(): void {
 
   /** 正在执行的坏行全文件扫描（null = 无）。 */
   let activeScan: { requestId: string } | null = null;
+  /** 正在执行的单行编辑（仅当成本足够大、真的会等待时才置位）。 */
+  let activeEdit: { requestId: string } | null = null;
 
   /**
    * 长任务进度 → 横幅（只换文字，不得触碰「取消」按钮）。
@@ -357,6 +366,10 @@ export function main(): void {
     }
     if (info.kind === 'scanBadLines' && activeScan) {
       banner.setText(scanProgressText(info.processedBytes, info.totalBytes));
+      return;
+    }
+    if (info.kind === 'edit' && activeEdit) {
+      banner.setText(editProgressText(info.processedBytes, info.totalBytes));
     }
   });
 
@@ -434,18 +447,46 @@ export function main(): void {
       state.overview
         ? { totalBytes: state.overview.totalBytes, totalLines: state.overview.totalLines }
         : undefined,
-    submit: (info) =>
-      info.mode === 'insert'
-        ? bus.request<EditResultPayload>(
-            HostEndpoint.INSERT_RECORD,
-            { at: info.line, text: info.text },
-            { timeoutMs: RPC_HEAVY_TIMEOUT_MS }
-          ).promise
-        : bus.request<EditResultPayload>(
-            HostEndpoint.EDIT_RECORD,
-            { line: info.line, text: info.text, expectedBytes: editExpectedBytes },
-            { timeoutMs: RPC_HEAVY_TIMEOUT_MS }
-          ).promise,
+    /**
+     * 提交编辑。
+     *
+     * 绝大多数编辑是毫秒级完成，故**只在预估搬移成本超过阈值时**才弹进度横幅 ——
+     * 否则每次保存都闪一下横幅，比不显示更烦。而真到「改大文件首行」这种要搬移
+     * 几百 MB 的场景，用户必须能看到进度并且能中止，而不是猜程序是不是死了。
+     */
+    submit: async (info) => {
+      const req =
+        info.mode === 'insert'
+          ? bus.request<EditResultPayload>(
+              HostEndpoint.INSERT_RECORD,
+              { at: info.line, text: info.text },
+              { timeoutMs: RPC_HEAVY_TIMEOUT_MS }
+            )
+          : bus.request<EditResultPayload>(
+              HostEndpoint.EDIT_RECORD,
+              { line: info.line, text: info.text, expectedBytes: editExpectedBytes },
+              { timeoutMs: RPC_HEAVY_TIMEOUT_MS }
+            );
+
+      const ov = state.overview;
+      const cost = ov === null ? 0 : estimateEditCost(ov.totalBytes, ov.totalLines, info.line);
+      const showProgress = cost >= EDIT_COST_WARN_BYTES;
+      if (showProgress) {
+        activeEdit = { requestId: req.requestId };
+        banner.show(editProgressText(0, 0), '取消', () => {
+          // 只发 CANCEL、不 settle 本地 Promise —— 要等宿主回执才能如实说
+          // 「文件未被修改」，本地草草收尾会让用户不确定文件到底动了没有。
+          bus.post(HostEndpoint.CANCEL, { requestId: req.requestId });
+        });
+      }
+
+      try {
+        return await req.promise;
+      } finally {
+        activeEdit = null;
+        if (showProgress) banner.hide();
+      }
+    },
     onCommitted: ({ line, mode }) => {
       if (mode === 'replace') {
         // 只有该行内容变了 —— 丢弃这一行的缓存即可。

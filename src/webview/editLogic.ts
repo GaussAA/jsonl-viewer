@@ -105,7 +105,11 @@ export function describeEditFailure(res: {
   error?: string;
   conflict?: boolean;
   invalid?: boolean;
+  cancelled?: boolean;
 }): string {
+  // 取消优先于其余判定：它是「用户主动中止」而非失败。写入层已自动回滚，
+  // 故措辞必须让人放心（文件原样未动），而不是混在「保存失败」里吓人一跳。
+  if (res.cancelled) return res.error ?? '已取消，文件未被修改。';
   if (res.conflict) {
     return `${res.error ?? '文件已变化'}\n可点击「重新加载」获取磁盘最新内容后再编辑。`;
   }
@@ -182,6 +186,18 @@ export function replaceProgressText(processedBytes: number, totalBytes: number):
   if (!Number.isFinite(totalBytes) || totalBytes <= 0) return '正在替换…';
   const pct = Math.min(100, Math.max(0, Math.floor((processedBytes / totalBytes) * 100)));
   return `正在替换… ${pct}%（${formatBytes(processedBytes)} / ${formatBytes(totalBytes)}）`;
+}
+
+/**
+ * 单行编辑（搬移尾部）的进度文案。
+ *
+ * 与批量替换分开措辞：一个是「改写这一行」，一个是「重写整个文件」—— 用户据此判断
+ * 等多久才算不正常，混着说会让人误以为自己在做整文件操作。
+ */
+export function editProgressText(processedBytes: number, totalBytes: number): string {
+  if (!Number.isFinite(totalBytes) || totalBytes <= 0) return '正在写入…';
+  const pct = Math.min(100, Math.max(0, Math.floor((processedBytes / totalBytes) * 100)));
+  return `正在写入… ${pct}%（${formatBytes(processedBytes)} / ${formatBytes(totalBytes)}）`;
 }
 
 /* ---------------------------- 字段级编辑（详情树） ---------------------------- */

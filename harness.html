@@ -410,6 +410,25 @@ async function handleHostRequest(msg) {
         return;
       }
 
+      // 模拟真实宿主的进度推送（写盘的搬移阶段）。前端只在「成本足够大」时才显示，
+      // 此处照推 3 拍以便浏览器里能看见；中途点取消会真的中止且**不写入任何改动**
+      // —— 与真实宿主一致（取消会自动回滚，文件保持原样）。
+      const totalNow = totalBytesNow();
+      const STEPS = 3;
+      for (let i = 1; i <= STEPS; i++) {
+        if (cancelledRequests.has(msg.requestId)) {
+          cancelledRequests.delete(msg.requestId);
+          fail({ cancelled: true, error: '已取消，文件已按备份恢复原样。' });
+          return;
+        }
+        push('editProgress', {
+          kind: 'edit',
+          processedBytes: Math.floor((totalNow * i) / STEPS),
+          totalBytes: totalNow,
+        });
+        await sleep(140);
+      }
+
       ensureLines()[line] = text;
       recordHistory(`编辑第 ${line + 1} 行`);
       reply('editResult', msg.requestId, {
