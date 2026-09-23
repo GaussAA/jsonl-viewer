@@ -372,3 +372,44 @@ test('applyLineInsert / applyLineDelete：越界与非整数参数抛错', async
   // 合法边界：插入到末尾（line === totalLines）
   assert.equal(li.applyLineInsert(3, 2).totalLines, 4);
 });
+
+/**
+ * 回归：**在文件最开头插入**时必须补回第 0 行锚点。
+ *
+ * 缺陷原貌：`cp.line >= line` 在 `line === 0` 时会把唯一的 `{0,0}` 锚点平移到 `{1,bytes}`，
+ * 索引于是失去「≤ 目标行的最近起点」—— `scan` 找不到顺读起点，**静默返回空**（不报错）。
+ * 外部表现极具迷惑性：`totalLines` 说 4 行，但 `readRecord(0)` 报「行不存在」。
+ *
+ * 这条路径由「撤销批量删除」触发（把被删的行插回文件开头），是真实可达的。
+ */
+test('applyLineInsert(0)：开头插入后第 0 行锚点必须保留（否则 scan 静默读空）', async () => {
+  const li = await buildFromString('a\nb\nc\n');
+  assert.deepEqual(
+    li.checkpoints.map((c) => c.line),
+    [0],
+    '小文件仅一个锚点'
+  );
+
+  const next = li.applyLineInsert(0, 2); // 在开头插入 "x\n"
+  assert.strictEqual(next.checkpoints[0].line, 0, '第 0 行锚点必须保留');
+  assert.strictEqual(next.checkpoints[0].offset, 0, '插入点在最开头，故偏移必为 0');
+  assert.equal(next.totalLines, 4);
+
+  // 连续两次插入到开头：仍须有且只有一个 line 0 锚点
+  const twice = next.applyLineInsert(0, 2);
+  assert.strictEqual(twice.checkpoints[0].line, 0);
+  assert.equal(twice.checkpoints.filter((c) => c.line === 0).length, 1, '不得重复补锚点');
+  assert.equal(twice.totalLines, 5);
+});
+
+test('applyLineInsert(0)：多检查点场景下开头插入后仍能扫出全部行', async () => {
+  // checkpointInterval=2 → 三行文件有 2 个锚点（行 0 与行 2）
+  const li = await buildFromString('a\nb\nc\n', 3, { checkpointInterval: 2 });
+  assert.equal(li.checkpoints.length, 2, '确实是多锚点');
+
+  const reader = new MemoryReader(Buffer.from('x\na\nb\nc\n', 'utf8'));
+  const shifted = li.applyLineInsert(0, 2); // 逻辑上等同于文件变成 x\na\nb\nc\n
+  const lines = await scanAll(shifted, reader);
+  assert.deepEqual(lines, ['x', 'a', 'b', 'c'], '开头插入后仍能顺读全部行');
+  assert.equal(shifted.checkpoints[0].line, 0, '锚点仍在最前');
+});

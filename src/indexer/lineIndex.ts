@@ -322,6 +322,13 @@ export class LineIndex implements LineIndexStats {
     const next = this.checkpoints.map((cp) =>
       cp.line >= line ? { line: cp.line + 1, offset: cp.offset + insertedBytes } : cp
     );
+    // 在**文件最开头**插入时（line === 0），原 {line:0} 锚点会被上面的平移变成 {line:1}，
+    // 索引随即失去「≤ 目标行的最近起点」—— scan 找不到顺读起点，表现为**什么都读不到**
+    // （不是报错，而是静默返回空，极难排查）。必须在最前面补回 {line:0, offset:0}：
+    // 插入点在最开头，故第 0 行的起始偏移必然是 0。
+    if (line === 0 && next[0]?.line !== 0) {
+      next.unshift({ line: 0, offset: 0 });
+    }
     return new LineIndex(
       next,
       this.totalBytes + insertedBytes,
