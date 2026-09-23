@@ -66,6 +66,11 @@
  * 出现操作条（复制 / 删除 / 取消选择），右键菜单顶部也会出现批量项。批量删除会真的
  * 改变数组长度与后续行号；复制走浏览器剪贴板（localhost 下可用）。
  *
+ * M3（坏行诊断）：工具栏状态行出现「⚠ N 坏行」徽章（无坏行时不显示）→ 点击打开浮层。
+ * 未扫描时徽章写「N+」（下界，虚线边框）且提示「仅在已浏览范围内」；点「扫描整个文件」
+ * 走 4 拍进度（可取消），完成后转为确数。「全选坏行」把坏行写入选区，随后可直接用
+ * 选区操作条的「删除」一次清除 —— 这就是「找出坏行 → 一键清除」的完整清洗闭环。
+ *
  * 注：totalBytes 乘了 BYTES_SCALE（默认 2000），以便在小样例上也能验证「大 cost
  * 编辑」的提示；真实宿主的 totalBytes 是磁盘真实字节数。
  * ============================================================ */
@@ -119,6 +124,27 @@ let lines = null;
 const BYTES_SCALE = 2000;
 /** 已请求取消的 requestId（模拟宿主的 cancel 集合）。 */
 const cancelledRequests = new Set();
+/**
+ * 是否已做过全文件坏行扫描（决定 getBadLines 回 partial 还是全量口径）。
+ *
+ * 与真实宿主一致：任何改动文件内容的操作都会让它失效（行号与内容都变了），
+ * 故 recordHistory（写操作的统一收口）里会重置它。
+ */
+let badLinesComplete = false;
+
+/** 当前行数组里的坏行（无法解析为 JSON 的行，含空行）。 */
+function computeBadLines() {
+  const out = [];
+  const arr = ensureLines();
+  for (let i = 0; i < arr.length; i++) {
+    try {
+      JSON.parse(arr[i]);
+    } catch {
+      out.push(i);
+    }
+  }
+  return out;
+}
 
 function byteLen(s) {
   return new TextEncoder().encode(s).length;
@@ -153,6 +179,8 @@ function ensureHistory() {
 
 /** 记录一步（在写操作**之后**调用：快照即当前状态）。 */
 function recordHistory(label) {
+  // 文件内容已变 ⇒「全量扫过」这一结论不再有依据（与真实宿主的 refreshSnapshot 同义）。
+  badLinesComplete = false;
   ensureHistory();
   // 在光标处发生新操作 → 其后的「已撤销」分支作废（标准撤销栈语义）
   hist.states.length = hist.cursor + 1;
@@ -578,6 +606,57 @@ async function handleHostRequest(msg) {
       });
       return;
     }
+    case 'getBadLines': {
+      // 未扫描时回空集 + partial（真实宿主是「已浏览范围内发现的」，此处简化为空）——
+      // 这个简化只会让演示更保守，不会假装知道得比实际多。
+      const bad = badLinesComplete ? computeBadLines() : [];
+      reply('badLines', msg.requestId, {
+        lines: bad,
+        partial: !badLinesComplete,
+        scanned: badLinesComplete ? totalLinesNow() : 0,
+        totalLines: totalLinesNow(),
+        truncated: false,
+        costMs: 0,
+      });
+      return;
+    }
+    case 'scanBadLines': {
+      // 按真实宿主语义：纯读、分拍上报进度、可取消且**取消不改变任何状态**。
+      const totalNow = totalBytesNow();
+      const STEPS = 4;
+      for (let i = 1; i <= STEPS; i++) {
+        if (cancelledRequests.has(msg.requestId)) {
+          cancelledRequests.delete(msg.requestId);
+          reply('badLines', msg.requestId, {
+            lines: [],
+            partial: true,
+            scanned: 0,
+            totalLines: totalLinesNow(),
+            truncated: false,
+            cancelled: true,
+            costMs: 0,
+          });
+          return;
+        }
+        push('editProgress', {
+          kind: 'scanBadLines',
+          processedBytes: Math.floor((totalNow * i) / STEPS),
+          totalBytes: totalNow,
+        });
+        await sleep(140);
+      }
+      badLinesComplete = true;
+      const bad = computeBadLines();
+      reply('badLines', msg.requestId, {
+        lines: bad,
+        partial: false,
+        scanned: totalLinesNow(),
+        totalLines: totalLinesNow(),
+        truncated: false,
+        costMs: 580,
+      });
+      return;
+    }
     case 'deleteRecords': {
       // 与真实宿主语义一致：行号去重 + 越界过滤 + 相邻行合并成连续区间。
       const arr = ensureLines();
@@ -697,6 +776,7 @@ async function handleHostRequest(msg) {
     }
     case 'fileReload':
       hist.states = []; // 行号已失效：下次访问时按新内容重建历史
+      badLinesComplete = false;
       reply('overview', msg.requestId, { uri: 'mock://samples.jsonl', totalLines: totalLinesNow(), totalBytes: totalBytesNow(), buildMs: 12, eof: true });
       return;
     case 'cancel':
@@ -712,6 +792,7 @@ async function handleHostRequest(msg) {
 /** 放弃所有改动并从「磁盘」重载 → 触发 documentReset。 */
 window.mockRevert = () => {
   hist.states = [];
+  badLinesComplete = false;
   lines = null; // 丢弃所有改动，下次访问时按样例重新生成
   window.postMessage(
     { type: 'documentReset', payload: { message: '已从磁盘重新加载（harness 模拟）。' } },
