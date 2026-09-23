@@ -58,6 +58,10 @@
  * 与「取消」按钮；中途点取消会真的中止且**不改动任何数据** —— 与真实宿主一致，
  * 批量重写在 rename 之前中止时目标文件从未被触碰。
  *
+ * M3（编辑历史）：工具栏「历史」按钮打开浮层，列出本次会话的写操作（光标之前的为已应用、
+ * 之后的为已撤销）；点条目「停在这一步」、顶部可单步撤销/重做。harness 用整份行数组的
+ * 快照实现回退，但**单一光标语义与真实宿主一致**。
+ *
  * M2（多选批量）：Ctrl/Cmd 点击切换选中、Shift 点击范围选择；选中 > 1 行时列表下方
  * 出现操作条（复制 / 删除 / 取消选择），右键菜单顶部也会出现批量项。批量删除会真的
  * 改变数组长度与后续行号；复制走浏览器剪贴板（localhost 下可用）。
@@ -128,6 +132,65 @@ function ensureLines() {
     lines.push((i + 1) % BAD_LINE === 0 ? BAD_RAW : JSON.stringify(sampleValue(i)));
   }
   return lines;
+}
+
+/* ---------------- 会话编辑历史（快照式简化实现，语义与真实宿主一致） ----------------
+ * 真实宿主用一个「操作 + 双向回退数据」的光标模型；harness 无需那么精细，直接对整份
+ * 行数组做快照即可 —— 关键是**单一光标语义与真实宿主一致**（历史浮层据此渲染）。 */
+const hist = { states: [], labels: [], cursor: 0, dropped: false };
+
+function resetHistory() {
+  hist.states = [[...ensureLines()]];
+  hist.labels = ['初始状态'];
+  hist.cursor = 0;
+  hist.dropped = false;
+}
+
+function ensureHistory() {
+  if (hist.states.length === 0) resetHistory();
+  return hist;
+}
+
+/** 记录一步（在写操作**之后**调用：快照即当前状态）。 */
+function recordHistory(label) {
+  ensureHistory();
+  // 在光标处发生新操作 → 其后的「已撤销」分支作废（标准撤销栈语义）
+  hist.states.length = hist.cursor + 1;
+  hist.labels.length = hist.cursor + 1;
+  hist.states.push([...ensureLines()]);
+  hist.labels.push(label);
+  hist.cursor = hist.states.length - 1;
+  while (hist.states.length > 51) {
+    hist.states.shift();
+    hist.labels.shift();
+    hist.cursor--;
+    hist.dropped = true;
+  }
+}
+
+/** 用快照替换当前行集合（保持数组引用不变，避免其它闭包持有旧引用）。 */
+function restoreLines(snapshot) {
+  const arr = ensureLines();
+  arr.length = 0;
+  for (const l of snapshot) arr.push(l);
+}
+
+/** 把光标移到目标位置，返回实际步数。 */
+function moveHistoryCursor(target) {
+  const clamped = Math.max(0, Math.min(target, hist.states.length - 1));
+  const steps = Math.abs(clamped - hist.cursor);
+  hist.cursor = clamped;
+  restoreLines(hist.states[hist.cursor]);
+  return { clamped, steps };
+}
+
+/** 由描述反推类型（仅用于列表徽章）。 */
+function histKindOf(label) {
+  if (label.includes('插入')) return 'insert';
+  if (label.startsWith('删除') && !label.includes('第')) return 'deleteMany';
+  if (label.startsWith('删除')) return 'delete';
+  if (label.startsWith('替换')) return 'replaceAll';
+  return 'edit';
 }
 
 /** 取某行的**磁盘原文**。 */
@@ -315,6 +378,7 @@ async function handleHostRequest(msg) {
       }
 
       ensureLines()[line] = text;
+      recordHistory(`编辑第 ${line + 1} 行`);
       reply('editResult', msg.requestId, {
         ok: true,
         line,
@@ -377,6 +441,7 @@ async function handleHostRequest(msg) {
         return;
       }
       const removed = arr.splice(line, 1)[0];
+      recordHistory(`删除第 ${line + 1} 行`);
       reply('editResult', msg.requestId, {
         ok: true,
         line,
@@ -498,6 +563,7 @@ async function handleHostRequest(msg) {
         delta += byteLen(c.after) - byteLen(c.before);
         lines[c.line] = c.after;
       }
+      recordHistory(`替换 ${changes.length} 行`);
       const undoable = changes.length <= 2000;
       reply('replaceResult', msg.requestId, {
         ok: true,
@@ -540,6 +606,7 @@ async function handleHostRequest(msg) {
         removedBytes += byteLen(arr[wanted[i]]) + 1;
         arr.splice(wanted[i], 1);
       }
+      recordHistory(`删除 ${wanted.length} 行`);
       reply('deleteManyResult', msg.requestId, {
         ok: true,
         deleted: wanted.length,
@@ -578,7 +645,58 @@ async function handleHostRequest(msg) {
       });
       return;
     }
+    case 'getHistory': {
+      ensureHistory();
+      reply('history', msg.requestId, {
+        entries: hist.labels.slice(1).map((label, i) => ({
+          id: 'h' + (i + 1),
+          kind: histKindOf(label),
+          label,
+          lines: 1,
+          bytesDelta: 0,
+          at: Date.now(),
+        })),
+        cursor: Math.max(0, hist.cursor - 1),
+        dropped: hist.dropped,
+      });
+      return;
+    }
+    case 'undoEdit':
+    case 'redoEdit':
+    case 'revertTo': {
+      ensureHistory();
+      // 三者的目标都以「条目下标 + 1」为光标（与真实宿主一致：停在这一步）
+      let target;
+      if (msg.type === 'undoEdit') target = hist.cursor - 1;
+      else if (msg.type === 'redoEdit') target = hist.cursor + 1;
+      else {
+        const n = Number(String(msg.id ?? '').replace(/^h/, ''));
+        target = Number.isFinite(n) ? n + 1 : hist.cursor;
+      }
+      const totalOps = hist.states.length - 1;
+      const clamped = Math.max(0, Math.min(target, hist.states.length - 1));
+      if (clamped === hist.cursor) {
+        reply('historyResult', msg.requestId, {
+          ok: false,
+          steps: 0,
+          cursor: Math.max(0, hist.cursor - 1),
+          total: totalOps,
+          error: target < hist.cursor ? '没有可撤销的操作' : '没有可重做的操作',
+        });
+        return;
+      }
+      const { steps } = moveHistoryCursor(clamped);
+      reply('historyResult', msg.requestId, {
+        ok: true,
+        steps,
+        cursor: Math.max(0, hist.cursor - 1),
+        total: totalOps,
+        label: hist.labels[hist.cursor] ?? '',
+      });
+      return;
+    }
     case 'fileReload':
+      hist.states = []; // 行号已失效：下次访问时按新内容重建历史
       reply('overview', msg.requestId, { uri: 'mock://samples.jsonl', totalLines: totalLinesNow(), totalBytes: totalBytesNow(), buildMs: 12, eof: true });
       return;
     case 'cancel':
@@ -593,6 +711,7 @@ async function handleHostRequest(msg) {
 
 /** 放弃所有改动并从「磁盘」重载 → 触发 documentReset。 */
 window.mockRevert = () => {
+  hist.states = [];
   lines = null; // 丢弃所有改动，下次访问时按样例重新生成
   window.postMessage(
     { type: 'documentReset', payload: { message: '已从磁盘重新加载（harness 模拟）。' } },
