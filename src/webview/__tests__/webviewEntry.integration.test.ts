@@ -1118,4 +1118,165 @@ describe('webviewEntry 装配层（集成）', () => {
       assert.ok(!/替换失败/.test(bannerText(app)), '不得把取消报成失败');
     });
   });
+
+  describe('多选：Ctrl/Shift 点击、选区操作条、批量删除/复制', () => {
+    /** 带修饰键的卡片点击。 */
+    const clickCard = (
+      app: HTMLElement,
+      line: number,
+      mods: { ctrl?: boolean; shift?: boolean } = {}
+    ): void => {
+      const c = card(app, line);
+      assert.ok(c, `卡片 L${line} 存在`);
+      c!.dispatchEvent(
+        new (win().MouseEvent)('click', {
+          bubbles: true,
+          ctrlKey: !!mods.ctrl,
+          shiftKey: !!mods.shift,
+        })
+      );
+    };
+    const selBar = (app: HTMLElement): HTMLElement =>
+      app.querySelector<HTMLElement>('.jlv-selbar')!;
+    const selText = (app: HTMLElement): string =>
+      text(selBar(app).querySelector('.jlv-selbar-text'));
+    const selBtn = (app: HTMLElement, label: string): HTMLButtonElement =>
+      Array.from(selBar(app).querySelectorAll<HTMLButtonElement>('button')).find(
+        (b) => b.textContent === label
+      )!;
+    const bannerText = (app: HTMLElement): string =>
+      text(app.querySelector('.jlv-banner')?.querySelector('.jlv-banner-text') ?? null);
+    /** jsdom 的 KeyboardEvent 构造器（Window 类型未声明它，需从窗口对象取）。 */
+    const KE = (
+      win() as unknown as {
+        KeyboardEvent: new (t: string, o?: { key?: string }) => KeyboardEvent;
+      }
+    ).KeyboardEvent;
+
+    it('单选不显示操作条；Ctrl 点击累加选中并显示「已选中 N 行」', async () => {
+      const { app } = await bootWithRecords();
+      assert.strictEqual(selBar(app).hidden, true, '未多选时不显示操作条');
+
+      clickCard(app, 0);
+      assert.strictEqual(selBar(app).hidden, true, '单选仍不显示');
+
+      clickCard(app, 2, { ctrl: true });
+      assert.strictEqual(selBar(app).hidden, false);
+      assert.match(selText(app), /已选中 2 行/);
+      assert.ok(card(app, 0)!.classList.contains('selected'));
+      assert.ok(card(app, 2)!.classList.contains('selected'));
+
+      clickCard(app, 4, { ctrl: true });
+      assert.match(selText(app), /已选中 3 行/);
+    });
+
+    it('Ctrl 再次点击已选中的行 → 取消该行', async () => {
+      const { app } = await bootWithRecords();
+      clickCard(app, 0);
+      clickCard(app, 1, { ctrl: true });
+      assert.match(selText(app), /已选中 2 行/);
+
+      clickCard(app, 1, { ctrl: true });
+      assert.strictEqual(selBar(app).hidden, true, '只剩 1 行 → 操作条收起');
+    });
+
+    it('Shift 点击选中锚点到目标的整段范围', async () => {
+      const { app } = await bootWithRecords();
+      clickCard(app, 1);
+      clickCard(app, 4, { shift: true });
+
+      assert.match(selText(app), /已选中 4 行/, 'L2..L5 共 4 行');
+      for (const l of [1, 2, 3, 4]) {
+        assert.ok(card(app, l)!.classList.contains('selected'), `L${l} 已选中`);
+      }
+    });
+
+    it('普通点击重置为单选（不保留上次多选）', async () => {
+      const { app } = await bootWithRecords();
+      clickCard(app, 0);
+      clickCard(app, 3, { ctrl: true });
+      assert.match(selText(app), /已选中 2 行/);
+
+      clickCard(app, 5);
+      assert.strictEqual(selBar(app).hidden, true, '普通点击清空多选');
+      assert.ok(card(app, 5)!.classList.contains('selected'));
+      assert.ok(!card(app, 0)!.classList.contains('selected'));
+    });
+
+    it('「取消选择」按钮与 Esc 都清空多选', async () => {
+      const { app } = await bootWithRecords();
+      clickCard(app, 0);
+      clickCard(app, 1, { ctrl: true });
+      selBtn(app, '取消选择').click();
+      assert.strictEqual(selBar(app).hidden, true);
+
+      clickCard(app, 0);
+      clickCard(app, 1, { ctrl: true });
+      globalThis.document.dispatchEvent(new KE('keydown', { key: 'Escape' }));
+      assert.strictEqual(selBar(app).hidden, true, 'Esc 同样清空');
+    });
+
+    it('批量删除：横幅确认后发出正确的行号集合，回执后行数减少且选区清空', async () => {
+      const { host, app } = await bootWithRecords();
+      clickCard(app, 1);
+      clickCard(app, 3, { ctrl: true });
+      clickCard(app, 4, { ctrl: true });
+
+      selBtn(app, '删除').click();
+      await sleep(10);
+
+      const banner = app.querySelector<HTMLElement>('.jlv-banner')!;
+      assert.strictEqual(banner.hidden, false);
+      assert.match(
+        text(banner.querySelector('.jlv-banner-text')),
+        /确定删除 3 行（2 段连续）/,
+        '确认文案说明行数与段数，用户才能核对自己选对了没'
+      );
+      assert.strictEqual(reqs(host, HostEndpoint.DELETE_RECORDS).length, 0, '确认前不发请求');
+
+      banner.querySelector<HTMLButtonElement>('.jlv-banner-action')!.click();
+      await sleep(20);
+      const req = lastReq(host, HostEndpoint.DELETE_RECORDS)!;
+      assert.deepStrictEqual(req.lines, [1, 3, 4], '行号集合正确（升序）');
+
+      host.receive({
+        type: HostReply.DELETE_MANY_RESULT,
+        requestId: req.requestId,
+        payload: { ok: true, deleted: 3, ranges: 2, bytesDelta: -30, costMs: 1, skipped: 0 },
+      });
+      await sleep(40);
+
+      assert.strictEqual(selBar(app).hidden, true, '删除后选区清空（行号已失效）');
+      assert.match(text(app.querySelector('.jlv-pager-summary')), /97 行/, '总行数减少 3');
+      assert.match(bannerText(app), /已删除 3 行/);
+    });
+
+    it('批量复制：发出行号集合并如实提示截断', async () => {
+      const { host, app } = await bootWithRecords();
+      clickCard(app, 2);
+      clickCard(app, 5, { ctrl: true });
+
+      selBtn(app, '复制').click();
+      await sleep(20);
+
+      const req = lastReq(host, HostEndpoint.COPY_LINES)!;
+      assert.deepStrictEqual(req.lines, [2, 5]);
+
+      host.receive({
+        type: HostReply.COPY_RESULT,
+        requestId: req.requestId,
+        payload: { ok: true, count: 2, bytes: 40, truncated: true, skipped: 1 },
+      });
+      await sleep(40);
+
+      const msg = bannerText(app);
+      assert.match(msg, /已复制 2 行/);
+      assert.match(msg, /1 行因过大跳过/);
+      assert.match(msg, /已截断/, '截断必须如实告知，否则用户以为复制全了');
+    });
+
+    // 注：右键菜单里的批量项改在 virtualScroll 的单元测试里覆盖 —— 菜单容器是
+    // virtualScroll 的**模块级单例**（仅首次创建时挂入当时的 document），
+    // 在集成测试里只有全文件第一个右键用例能查到，硬塞进来只会得到一个假失败。
+  });
 });

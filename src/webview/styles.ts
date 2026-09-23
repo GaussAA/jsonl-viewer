@@ -371,6 +371,38 @@ body {
 }
 @media (prefers-reduced-motion: reduce) {
   .jlv-replace { animation: none; }
+  .jlv-selbar { animation: none; }
+}
+
+/* 选区操作条（列表下方；选中 > 1 行时出现） */
+.jlv-selbar {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 7px 10px; margin-top: 6px;
+  background: color-mix(in srgb, var(--jlv-info) 12%, var(--jlv-panel-bg));
+  border: 1px solid color-mix(in srgb, var(--jlv-info) 30%, transparent);
+  border-radius: 8px;
+  animation: jlv-reveal .16s ease both;
+}
+.jlv-selbar-text {
+  flex: 1; min-width: 0;
+  font-size: 11px; color: var(--jlv-info); font-family: var(--jlv-mono);
+}
+.jlv-selbar .jlv-btn { padding: 4px 10px; }
+/* 破坏性操作（删除）：用错误色描边，与普通按钮一眼可分 */
+.jlv-btn.jlv-btn-danger {
+  color: var(--jlv-error-fg);
+  border-color: color-mix(in srgb, var(--jlv-error-fg) 35%, transparent);
+  background: color-mix(in srgb, var(--jlv-error-fg) 10%, transparent);
+}
+.jlv-btn.jlv-btn-danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--jlv-error-fg) 18%, transparent);
+  color: var(--jlv-error-fg);
+}
+/* 多选时额外标出「详情正在展示这一行」：用 outline（不占布局、不与 .selected 的
+ * box-shadow / ::before 左高亮条冲突） */
+.jlv-record-card.current {
+  outline: 1px solid color-mix(in srgb, var(--jlv-fg) 40%, transparent);
+  outline-offset: 2px;
 }
 
 /* 按钮行（原型 .toolbar-actions / .btn）——宽度自适应文本 */

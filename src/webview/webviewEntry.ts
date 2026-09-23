@@ -27,11 +27,16 @@ import { createVSCodeApi, RpcBus } from './rpc.ts';
 import { mergePersistedState, summarizeWithLayout } from './queryLogic.ts';
 import type { FieldCondition, FieldLayout } from './queryLogic.ts';
 import { HostEndpoint } from '../protocol/rpc.ts';
-import type { EditResultPayload, ReplaceResultPayload } from '../protocol/rpc.ts';
+import type {
+  CopyLinesResultPayload,
+  DeleteManyResultPayload,
+  EditResultPayload,
+  ReplaceResultPayload,
+} from '../protocol/rpc.ts';
 import type { InitPayload, OverviewPayload, RecordsPayload } from '../protocol/rpc.ts';
 import { CSS_TEXT } from './styles.ts';
 import { describeReplaceOutcome } from '../core/replaceLogic.ts';
-import { INIT_TIMEOUT_MS, RPC_HEAVY_TIMEOUT_MS } from '../constants.ts';
+import { INIT_TIMEOUT_MS, MAX_SELECTION_LINES, RPC_HEAVY_TIMEOUT_MS } from '../constants.ts';
 
 /** 渲染用的记录形状（与 LRUCache 值一致）。 */
 export type CachedRecord = RecordEntry & { value?: unknown };
@@ -247,6 +252,7 @@ export function main(): void {
     getList: () => list,
     getToolbar: () => toolbar,
     showDetailForLine: (line) => void showDetailForLine(line),
+    selectLine: (line) => selectSingle(line),
     updateNavEnabled,
     schedulePersist,
   });
@@ -342,14 +348,7 @@ export function main(): void {
     getRecord: (line) => state.cache.get(line),
     getFields: () => state.fields,
     summarize: (value) => summarizeWithLayout(value, state.fields, state.fieldLayout),
-    onSelect: (line) => {
-      state.selectedLine = line;
-      list.select(line);
-      void showDetailForLine(line);
-      updateNavEnabled();
-      // 窄容器抽屉：选中记录后收起目录抽屉，回到详情主视图（layout 于底部接线后可用）
-      if (layout.isNarrow()) layout.setDrawer(false);
-    },
+    onSelect: (line, mods) => handleSelect(line, mods),
     onRangeChange: (displayFirst, displayLast) => {
       // 分页/翻页已改变当前可视页 → 立即刷新范围文本（不依赖后面是否有实际拉取）。
       updateToolbar();
@@ -375,6 +374,9 @@ export function main(): void {
     onInsertRecord: (line) => editPanel.open(line, '', 'insert'),
     // 右键「删除第 N 行」：先横幅二次确认，再落盘。
     onDeleteRecord: (line) => deleteRecordAt(line),
+    // 右键菜单的批量项（选区 > 1 行时出现）
+    onDeleteSelected: () => confirmDeleteSelection(),
+    onCopySelected: () => void copySelection(),
     onClearFilter: () => actions.clearFilterForCond(),
     // 截断态「复制该行 JSON」：按需拉完整值（列表缓存不持有超大对象）。
     onRequestRecord: (line) =>
@@ -574,9 +576,225 @@ export function main(): void {
     });
   }
 
+  /**
+   * 批量删除后：总行数减少 N，选区与详情复位。
+   *
+   * 不做「行号位移推算」而直接整体复位：删掉的行散布在各处，剩余行的新行号取决于
+   * 它前面被删了几行 —— 用户看到的是一批内容消失，此时把选中状态留在某个「碰巧算对」
+   * 的行上，比清空更令人困惑。
+   */
+  function applyBulkDelete(deleted: number): void {
+    state.cache.clear();
+    if (state.overview) {
+      const totalLines = Math.max(0, state.overview.totalLines - deleted);
+      state.overview = { ...state.overview, totalLines };
+      list.setTotalRows(totalLines);
+    }
+    clearSelection();
+    state.selectedLine = undefined;
+    list.clearAllSelection();
+    detail.clear();
+    list.refresh();
+    updateToolbar();
+  }
+
+  /* ---------------- 多选：选区状态 + 浮动操作条 ---------------- */
+
+  /**
+   * 选中的行集合。与 `state.selectedLine` 是两个概念：后者是详情面板的来源，
+   * 前者是批量操作的对象。单选时两者一致。
+   *
+   * 状态**只放在这里**（列表只负责渲染 `setSelectedLines`）：同一份状态放两处，
+   * 迟早会在某条路径上不同步，而这类 bug 表现为「删掉了没选中的行」这种严重后果。
+   */
+  const selectedLines = new Set<number>();
+  /** Shift 范围选择的锚点。 */
+  let selAnchor: number | undefined;
+
+  /** 选区操作条（列表下方；选区 > 1 行时出现）。 */
+  const selBar = document.createElement('div');
+  selBar.className = 'jlv-selbar';
+  selBar.hidden = true;
+
+  const selText = document.createElement('span');
+  selText.className = 'jlv-selbar-text';
+
+  const selCopyBtn = document.createElement('button');
+  selCopyBtn.type = 'button';
+  selCopyBtn.className = 'jlv-btn';
+  selCopyBtn.textContent = '复制';
+  selCopyBtn.title = '复制选中行的原文到剪贴板';
+  selCopyBtn.addEventListener('click', () => void copySelection());
+
+  const selDeleteBtn = document.createElement('button');
+  selDeleteBtn.type = 'button';
+  selDeleteBtn.className = 'jlv-btn jlv-btn-danger';
+  selDeleteBtn.textContent = '删除';
+  selDeleteBtn.title = '删除选中的行（立即写入磁盘）';
+  selDeleteBtn.addEventListener('click', () => confirmDeleteSelection());
+
+  const selClearBtn = document.createElement('button');
+  selClearBtn.type = 'button';
+  selClearBtn.className = 'jlv-btn';
+  selClearBtn.textContent = '取消选择';
+  // 只清多选集合：详情面板仍停留在「最后点击的那一行」（它与多选是两个概念）。
+  selClearBtn.addEventListener('click', () => clearSelection());
+
+  selBar.append(selText, selCopyBtn, selDeleteBtn, selClearBtn);
+
+  /** 把选区状态同步到列表与操作条（所有改选区的路径都必须过它）。 */
+  function syncSelection(): void {
+    list.setSelectedLines(selectedLines);
+    const n = selectedLines.size;
+    selBar.hidden = n <= 1;
+    if (n > 1) selText.textContent = `已选中 ${n} 行`;
+  }
+
+  /** 清空选区（不改 `state.selectedLine`，详情仍可停留在原行）。 */
+  function clearSelection(): void {
+    selectedLines.clear();
+    selAnchor = undefined;
+    syncSelection();
+  }
+
+  /**
+   * 单选某行：**同时**设置详情来源与选区（两者一致）。
+   *
+   * 键盘导航、跳转搜索匹配、初始化等所有「非鼠标点击」的选中路径都应走它 ——
+   * 否则会出现「视觉上选中了、选区里却没有」的不一致，而批量操作按选区执行。
+   */
+  function selectSingle(line: number): void {
+    selectedLines.clear();
+    selectedLines.add(line);
+    selAnchor = line;
+    state.selectedLine = line;
+    list.select(line);
+    syncSelection();
+  }
+
+  /**
+   * 显示顺序上 a 与 b 之间的所有真实行号（含两端）；范围过大时返回 null。
+   *
+   * 无过滤时就是连续整数区间；**过滤态下只包含当前显示中的行** —— 用户看到的是一份
+   * 筛选后的列表，Shift 范围选择理应只覆盖看得见的那些行。
+   *
+   * 先算长度再决定是否分配：`Array.from({length: 1e6})` 会当场吃掉几十 MB。
+   */
+  function displayRangeBetween(a: number, b: number): number[] | null {
+    const map = state.filterMap;
+    if (!map) {
+      const lo = Math.min(a, b);
+      const hi = Math.max(a, b);
+      if (hi - lo + 1 > MAX_SELECTION_LINES) return null;
+      return Array.from({ length: hi - lo + 1 }, (_, i) => lo + i);
+    }
+    const ia = map.indexOf(a);
+    const ib = map.indexOf(b);
+    if (ia < 0 || ib < 0) return [a, b]; // 端点不在当前视图：退化为两端
+    const lo = Math.min(ia, ib);
+    const hi = Math.max(ia, ib);
+    if (hi - lo + 1 > MAX_SELECTION_LINES) return null;
+    return map.slice(lo, hi + 1);
+  }
+
+  /** 列表点击 → 更新选区。三种模式：普通单选 / Ctrl 切换 / Shift 范围。 */
+  function handleSelect(line: number, mods: { ctrl: boolean; shift: boolean }): void {
+    if (mods.shift && selAnchor !== undefined) {
+      const range = displayRangeBetween(selAnchor, line);
+      if (!range) {
+        banner.show(`一次最多选择 ${MAX_SELECTION_LINES} 行，请缩小范围后再试。`, undefined);
+      } else {
+        for (const l of range) selectedLines.add(l);
+        // Shift 不重置锚点，便于连续多次扩展
+      }
+    } else if (mods.ctrl) {
+      if (selectedLines.has(line)) selectedLines.delete(line);
+      else selectedLines.add(line);
+      selAnchor = line;
+    } else {
+      selectedLines.clear();
+      selectedLines.add(line);
+      selAnchor = line;
+    }
+    state.selectedLine = line;
+    list.select(line);
+    syncSelection();
+    void showDetailForLine(line);
+    updateNavEnabled();
+    // 窄容器抽屉：选中记录后收起目录抽屉，回到详情主视图
+    if (layout.isNarrow()) layout.setDrawer(false);
+  }
+
+  /**
+   * 复制选中的行。原文由宿主读取后写入剪贴板（`vscode.env.clipboard` 比 webview 侧的
+   * `navigator.clipboard` 可靠，不受 webview 权限限制）。
+   */
+  async function copySelection(): Promise<void> {
+    const lines = [...selectedLines].toSorted((a, b) => a - b);
+    if (lines.length === 0) return;
+    try {
+      const res = await bus.request<CopyLinesResultPayload>(
+        HostEndpoint.COPY_LINES,
+        { lines },
+        { timeoutMs: RPC_HEAVY_TIMEOUT_MS }
+      ).promise;
+      if (!res?.ok) {
+        banner.show(res?.error ?? '复制失败', undefined);
+        return;
+      }
+      const parts = [`已复制 ${res.count} 行到剪贴板`];
+      if (res.skipped > 0) parts.push(`${res.skipped} 行因过大跳过`);
+      if (res.truncated) parts.push('因超过上限已截断，请分批复制');
+      banner.show(parts.join('；'), undefined);
+    } catch (e) {
+      banner.show(e instanceof Error ? e.message : String(e), undefined);
+    }
+  }
+
+  /**
+   * 批量删除选中的行。不可逆的磁盘写入，先横幅二次确认（webview 里 `window.confirm`
+   * 不可用）。确认文案带上「几段连续」—— 用户能借此确认自己框对了吗。
+   */
+  function confirmDeleteSelection(): void {
+    const lines = [...selectedLines].toSorted((a, b) => a - b);
+    if (lines.length === 0) return;
+    let segments = 1;
+    for (let i = 1; i < lines.length; i++) {
+      if (lines[i] !== lines[i - 1] + 1) segments++;
+    }
+    // 多行时补一个前导空格，让「确定删除 3 行」而不是「确定删除3 行」（中文排版）。
+    const what =
+      lines.length === 1 ? `第 ${lines[0] + 1} 行` : ` ${lines.length} 行（${segments} 段连续）`;
+    banner.show(`确定删除${what}？该操作会立即写入磁盘。`, '确认删除', () => {
+      void (async () => {
+        try {
+          const res = await bus.request<DeleteManyResultPayload>(
+            HostEndpoint.DELETE_RECORDS,
+            { lines },
+            { timeoutMs: RPC_HEAVY_TIMEOUT_MS }
+          ).promise;
+          if (res?.cancelled) {
+            banner.show('已取消：文件未被修改。', undefined);
+            return;
+          }
+          if (!res?.ok) {
+            banner.show(res?.error ?? '删除失败', undefined);
+            return;
+          }
+          applyBulkDelete(res.deleted);
+          const skippedNote = res.skipped > 0 ? `；${res.skipped} 行因过大跳过` : '';
+          banner.show(`已删除 ${res.deleted} 行${skippedNote}`, undefined);
+        } catch (e) {
+          banner.show(e instanceof Error ? e.message : String(e), undefined);
+        }
+      })();
+    });
+  }
+
   // 组装两栏：左栏放入列头(toolbar) + 目录列表(分页)；右栏为详情面板；横幅浮层最后挂载。
   leftCol.appendChild(toolbar.root);
   leftCol.appendChild(list.scrollEl);
+  leftCol.appendChild(selBar); // 选区操作条紧贴列表下方（选中 > 1 行时出现）
   leftCol.appendChild(list.pagerEl);
   rootEl.appendChild(leftCol);
   rootEl.appendChild(resizer);
@@ -1054,6 +1272,22 @@ export function main(): void {
    * ThrottleQueue 的 setTimeout、RpcBus 的 pending timers 都必须清理。
    * 防御性双重保险：同一 window 上多注册一次 beforeunload 无害。
    */
+  /**
+   * Esc：清空多选。
+   *
+   * 编辑浮层打开时让位给它（浮层自己的 Esc 负责关闭面板）—— 否则按一次 Esc 会同时
+   * 关面板又清选区，两件不相干的事一起发生。
+   */
+  const onKeyDown = (e: KeyboardEvent): void => {
+    if (e.key !== 'Escape') return;
+    if (editPanel.isOpen()) return;
+    if (selectedLines.size > 0) {
+      clearSelection();
+      e.preventDefault();
+    }
+  };
+  document.addEventListener('keydown', onKeyDown);
+
   let cleanupCalled = false;
   const cleanup = (): void => {
     if (cleanupCalled) return;
@@ -1065,6 +1299,7 @@ export function main(): void {
     detail.dispose();
     editPanel.dispose();
     toolbar.destroy();
+    document.removeEventListener('keydown', onKeyDown);
   };
   window.addEventListener('beforeunload', cleanup);
 }

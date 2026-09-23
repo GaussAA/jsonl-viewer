@@ -44,6 +44,13 @@ export interface QueryActionsDeps {
   getToolbar: () => ReturnType<typeof createToolbar>;
   /** 跳转到指定行并展示详情（main 提供）。 */
   showDetailForLine: (line: number) => void;
+  /**
+   * 选中某行（main 提供）。
+   *
+   * 必须由装配层统一入口：选中要同时更新「详情来源 + 多选选区 + 列表视觉」，
+   * 各调用方自己拼容易漏掉其中一项，而漏掉选区会让后续批量操作作用于错误的行。
+   */
+  selectLine: (line: number) => void;
   /** 刷新 prev/next 等导航按钮可用态（main 提供）。 */
   updateNavEnabled: () => void;
   /** 防抖持久化偏好（#32 将抽出，此处注入）。 */
@@ -72,10 +79,8 @@ export function createQueryActions(deps: QueryActionsDeps): QueryActions {
   }
 
   function jumpToMatch(line: number): void {
-    const list = deps.getList();
-    list.select(line);
-    list.scrollToLine(line);
-    state.selectedLine = line;
+    deps.selectLine(line); // 选中语义统一收口（含选区同步与详情来源）
+    deps.getList().scrollToLine(line);
     void deps.showDetailForLine(line);
     deps.updateNavEnabled();
   }

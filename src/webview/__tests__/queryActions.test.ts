@@ -125,6 +125,12 @@ function makeHarness(): Harness {
     showDetailForLine: (l) => {
       calls.detail.push(l);
     },
+    // 装配层的选中入口：真实实现会同时设置 state.selectedLine、列表当前行与多选选区；
+    // 这里模拟其可观测效果（选中行 + 列表当前行），断言与改动前保持一致。
+    selectLine: (l) => {
+      calls.select.push(l);
+      state.selectedLine = l;
+    },
     updateNavEnabled: () => {
       calls.nav += 1;
     },

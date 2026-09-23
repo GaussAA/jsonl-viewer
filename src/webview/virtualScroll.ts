@@ -29,13 +29,25 @@ export interface RecordEntry {
   count?: number;
 }
 
+/** 选中时的修饰键状态（决定是单选、切换选中还是范围选择）。 */
+export interface SelectMods {
+  /** Ctrl / Cmd：切换该行的选中状态（多选）。 */
+  ctrl: boolean;
+  /** Shift：从锚点到该行做范围选择。 */
+  shift: boolean;
+}
+
+/** 无修饰键（键盘导航、程序化选中用）。 */
+const NO_MODS: SelectMods = { ctrl: false, shift: false };
+
 export interface ListCallbacks {
   /** 按行号取已加载的记录；未加载返回 undefined（渲染「加载中…」占位）。 */
   getRecord(line: number): RecordEntry | undefined;
   getFields(): readonly FieldLike[] | null;
   /** 可选：字段摘要（无 summary 时回退用）。 */
   summarize?(value: unknown): { key: string; display: string }[];
-  onSelect(line: number): void;
+  /** 选中某行；`mods` 携带修饰键，由调用方决定如何更新选区。 */
+  onSelect(line: number, mods: SelectMods): void;
   /** 当前页展示位区间变化（[first, lastExclusive)），通知控制器按需拉取。 */
   onRangeChange(first: number, lastExclusive: number): void;
   /** 可选：跳转到源文件对应行（右键「定位到源码行」）。 */
@@ -46,6 +58,10 @@ export interface ListCallbacks {
   onDeleteRecord?(line: number): void;
   /** 可选：在本行之前插入一行（右键「在第 N 行前插入」）。 */
   onInsertRecord?(line: number): void;
+  /** 可选：删除选中的多行（右键菜单；选区 > 1 行时出现）。 */
+  onDeleteSelected?(): void;
+  /** 可选：复制选中的多行（右键菜单；选区 > 1 行时出现）。 */
+  onCopySelected?(): void;
   /** 可选：清空过滤条件（空态「清除过滤」按钮）。 */
   onClearFilter?(): void;
   /** 可选：按需拉取某行完整值（截断态「复制该行 JSON」用）。 */
@@ -89,6 +105,13 @@ export class VirtualRecordList {
   /** 展示位 -> 真实行号；null 表示不过滤（展示位 == 真实行号）。 */
   private translation: number[] | null = null;
   private selectedLine: number | undefined;
+  /**
+   * 多选集合（由外部驱动，列表只负责渲染）。
+   *
+   * 与 `selectedLine` 是两个概念：`selectedLine` 是「详情面板正在展示哪一行」，
+   * 多选集合是「批量操作作用于哪些行」。单选时两者一致，多选时详情仍跟随最后点击的行。
+   */
+  private selectedLines: ReadonlySet<number> = new Set();
   private page = 0; // 当前页（0 起）
   readonly pageSize: number;
   private disposed = false;
@@ -211,6 +234,22 @@ export class VirtualRecordList {
 
   getSelected(): number | undefined {
     return this.selectedLine;
+  }
+
+  /**
+   * 设置多选集合。外部（装配层）是唯一状态源，列表只负责把它渲染出来 ——
+   * 状态放在两处（列表一份、装配层一份）迟早在某条路径上不同步。
+   */
+  setSelectedLines(lines: ReadonlySet<number>): void {
+    this.selectedLines = lines;
+    this.applySelection();
+  }
+
+  /** 彻底清除选中（多选集合 + 当前行标记）。批量删除后行号已失效，必须走它。 */
+  clearAllSelection(): void {
+    this.selectedLine = undefined;
+    this.selectedLines = new Set();
+    this.applySelection();
   }
 
   getPageInfo(): PageInfo {
@@ -393,9 +432,12 @@ export class VirtualRecordList {
     card.id = `jlv-opt-${real}`;
     card.dataset.line = String(real);
     card.setAttribute('role', 'option');
-    card.addEventListener('click', () => {
+    card.addEventListener('click', (e) => {
       const line = Number(card.dataset.line);
-      if (!Number.isNaN(line)) this.cb.onSelect(line);
+      if (!Number.isNaN(line)) {
+        // 修饰键交给调用方解读：Ctrl/Cmd 切换、Shift 范围、无修饰即单选。
+        this.cb.onSelect(line, { ctrl: e.ctrlKey || e.metaKey, shift: e.shiftKey });
+      }
       this.scrollEl.focus({ preventScroll: true }); // 便于后续键盘导航
     });
 
@@ -490,6 +532,27 @@ export class VirtualRecordList {
     card.addEventListener('contextmenu', (e) => {
       e.preventDefault();
       const items: CtxItem[] = [];
+
+      // 右键的行若在选区中且选区不止一行 → 批量操作置顶。
+      // 用户先框选再右键，意图显然是「对这一批做点什么」，此时把单行操作放前面会误导。
+      const inSelection = this.selectedLines.has(real);
+      const selCount = this.selectedLines.size;
+      if (inSelection && selCount > 1) {
+        if (this.cb.onCopySelected) {
+          items.push({
+            label: `复制选中的 ${selCount} 行`,
+            run: () => this.cb.onCopySelected?.(),
+          });
+        }
+        if (this.cb.onDeleteSelected) {
+          items.push({
+            label: `删除选中的 ${selCount} 行`,
+            run: () => this.cb.onDeleteSelected?.(),
+          });
+        }
+        items.push({ sep: true });
+      }
+
       if (this.cb.onEditRecord) {
         items.push({
           label: `编辑第 ${real + 1} 行`,
@@ -540,11 +603,20 @@ export class VirtualRecordList {
 
   private applySelection(): void {
     let activeId: string | undefined;
+    // 选中视觉**以多选集合为准**；集合为空时退化为「当前行」的单选视觉。
+    // 若两者都标记，会出现「视觉上是选中的、选区里却没有它」这种不一致 ——
+    // 而用户接下来的批量操作按选区执行，那种不一致的后果是删错行。
+    const multiActive = this.selectedLines.size > 0;
     for (const el of Array.from(this.inner.children) as HTMLElement[]) {
-      const isSel = Number(el.dataset.line) === this.selectedLine;
-      el.classList.toggle('selected', isSel);
-      el.setAttribute('aria-selected', isSel ? 'true' : 'false');
-      if (isSel && el.id) activeId = el.id;
+      const line = Number(el.dataset.line);
+      const isCurrent = line === this.selectedLine;
+      const isMulti = this.selectedLines.has(line);
+      const showSelected = multiActive ? isMulti : isCurrent;
+      el.classList.toggle('selected', showSelected);
+      // 多选中额外标出「详情正在展示哪一行」
+      el.classList.toggle('current', multiActive && isCurrent);
+      el.setAttribute('aria-selected', showSelected ? 'true' : 'false');
+      if (isCurrent && el.id) activeId = el.id;
     }
     // 同步 listbox 的 activedescendant，读屏可感知选中行（仅当选中的行在当前页）。
     if (activeId) this.scrollEl.setAttribute('aria-activedescendant', activeId);
@@ -661,7 +733,7 @@ export class VirtualRecordList {
       }
       this.select(real);
     }
-    this.cb.onSelect(real); // 键盘导航也要加载右栏详情（此前遗漏，功能级缺陷）
+    this.cb.onSelect(real, NO_MODS); // 键盘导航也要加载右栏详情（此前遗漏，功能级缺陷）
   }
 
   /** 目录键盘导航。 */
@@ -699,7 +771,7 @@ export class VirtualRecordList {
       if (d >= 0) {
         const real = this.realLine(d);
         this.select(real);
-        this.cb.onSelect(real);
+        this.cb.onSelect(real, NO_MODS);
       }
       return;
     }
@@ -712,7 +784,7 @@ export class VirtualRecordList {
       this.render(true);
       const real = this.realLine(d);
       this.select(real);
-      this.cb.onSelect(real);
+      this.cb.onSelect(real, NO_MODS);
       return;
     }
 

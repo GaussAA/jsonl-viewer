@@ -40,7 +40,16 @@ function setReducedMotion(on: boolean): void {
 
 interface Harness {
   list: VirtualRecordList;
-  calls: { select: number[]; range: Array<[number, number]>; cleared: number; requested: number[] };
+  calls: {
+    select: number[];
+    /** 每次选中携带的修饰键（多选语义由调用方解读）。 */
+    selectMods: Array<{ ctrl: boolean; shift: boolean }>;
+    range: Array<[number, number]>;
+    cleared: number;
+    requested: number[];
+    deleteSelected: number;
+    copySelected: number;
+  };
   /** 已加载的记录（其余行返回 undefined → 渲染「加载中」占位）。 */
   loaded: Set<number>;
 }
@@ -48,9 +57,12 @@ interface Harness {
 function makeList(pageSize?: number): Harness {
   const calls = {
     select: [] as number[],
+    selectMods: [] as Array<{ ctrl: boolean; shift: boolean }>,
     range: [] as Array<[number, number]>,
     cleared: 0,
     requested: [] as number[],
+    deleteSelected: 0,
+    copySelected: 0,
   };
   const loaded = new Set<number>();
   const cb: ListCallbacks = {
@@ -65,7 +77,16 @@ function makeList(pageSize?: number): Harness {
           }
         : undefined,
     getFields: () => null,
-    onSelect: (line) => calls.select.push(line),
+    onSelect: (line, mods) => {
+      calls.select.push(line);
+      calls.selectMods.push({ ...mods });
+    },
+    onDeleteSelected: () => {
+      calls.deleteSelected += 1;
+    },
+    onCopySelected: () => {
+      calls.copySelected += 1;
+    },
     onRangeChange: (first, lastExclusive) => calls.range.push([first, lastExclusive]),
     onClearFilter: () => {
       calls.cleared += 1;
@@ -433,5 +454,150 @@ describe('VirtualRecordList（视图层覆盖率补强）', () => {
     } finally {
       setReducedMotion(true);
     }
+  });
+
+  /* ----------------------- 多选与批量项 ----------------------- */
+
+  /** 窗口对象（jsdom 的事件构造器挂在 window 上）。 */
+  const winObj = (): {
+    MouseEvent: new (t: string, o?: unknown) => MouseEvent;
+    KeyboardEvent: new (t: string, o?: unknown) => KeyboardEvent;
+  } => (globalThis as unknown as { window: never }).window;
+
+  it('点击把修饰键原样交给调用方（Ctrl/Cmd 与 Shift 的语义由装配层决定）', () => {
+    const { list, calls } = makeList();
+    list.setTotalRows(5);
+    const c = cards(list)[1];
+
+    c.dispatchEvent(new (winObj().MouseEvent)('click', { bubbles: true }));
+    c.dispatchEvent(new (winObj().MouseEvent)('click', { bubbles: true, ctrlKey: true }));
+    c.dispatchEvent(new (winObj().MouseEvent)('click', { bubbles: true, shiftKey: true }));
+    c.dispatchEvent(new (winObj().MouseEvent)('click', { bubbles: true, metaKey: true }));
+
+    assert.deepStrictEqual(calls.selectMods, [
+      { ctrl: false, shift: false },
+      { ctrl: true, shift: false },
+      { ctrl: false, shift: true },
+      // Cmd（macOS）等价于 Ctrl，故也归入 ctrl
+      { ctrl: true, shift: false },
+    ]);
+  });
+
+  it('setSelectedLines：选中视觉以选区为准，并单独标出「详情正在展示的行」', () => {
+    const { list } = makeList();
+    list.setTotalRows(5);
+    list.select(1); // 当前行（详情来源）
+    list.setSelectedLines(new Set([0, 2]));
+
+    const els = cards(list);
+    assert.ok(!els[1].classList.contains('selected'), '当前行不在选区 → 不显示选中');
+    assert.ok(els[1].classList.contains('current'), '但要标出「详情正在展示它」');
+    assert.ok(els[0].classList.contains('selected'));
+    assert.ok(els[2].classList.contains('selected'));
+    assert.strictEqual(els[0].getAttribute('aria-selected'), 'true');
+    assert.strictEqual(els[1].getAttribute('aria-selected'), 'false');
+  });
+
+  it('选区为空时退化为「当前行」的单选视觉（与改动前行为一致）', () => {
+    const { list } = makeList();
+    list.setTotalRows(5);
+    list.select(1);
+    list.setSelectedLines(new Set());
+
+    const els = cards(list);
+    assert.ok(els[1].classList.contains('selected'), '单选视觉保留');
+    assert.ok(!els[1].classList.contains('current'), '单选无需额外的当前行标记');
+  });
+
+  it('选区变化即时反映到已渲染卡片（不必等重绘）', () => {
+    const { list } = makeList();
+    list.setTotalRows(5);
+    assert.ok(!cards(list)[2].classList.contains('selected'));
+
+    list.setSelectedLines(new Set([2]));
+    assert.ok(cards(list)[2].classList.contains('selected'));
+  });
+
+  it('clearAllSelection：清空选区与当前行（批量删除后行号失效，必须走它）', () => {
+    const { list } = makeList();
+    list.setTotalRows(5);
+    list.select(1);
+    list.setSelectedLines(new Set([1, 2]));
+
+    list.clearAllSelection();
+
+    const els = cards(list);
+    assert.ok(!els[1].classList.contains('selected'));
+    assert.ok(!els[2].classList.contains('selected'));
+    assert.strictEqual(list.getSelected(), undefined, '当前行一并清除');
+  });
+
+  it('右键菜单：选区 > 1 行时出现批量项，点击回调装配层', () => {
+    const { list, calls } = makeList();
+    list.setTotalRows(5);
+    list.setSelectedLines(new Set([0, 1, 2]));
+
+    cards(list)[1].dispatchEvent(
+      new (winObj().MouseEvent)('contextmenu', { bubbles: true, clientX: 10, clientY: 10 })
+    );
+
+    const menu = globalThis.document.querySelector<HTMLElement>('.jlv-ctx');
+    // 菜单容器是模块级单例，仅本文件第一个右键用例能查得到（故断言集中在此）。
+    assert.ok(menu, '右键菜单已挂载');
+    const items = Array.from(menu!.querySelectorAll<HTMLButtonElement>('.jlv-ctx-item'));
+    const labels = items.map((b) => b.textContent ?? '');
+
+    const del = items.find((b) => /删除选中的 3 行/.test(b.textContent ?? ''));
+    assert.ok(del, `出现批量删除项（实际项：${labels.join(' / ')}）`);
+    const copy = items.find((b) => /复制选中的 3 行/.test(b.textContent ?? ''));
+    assert.ok(copy, '出现批量复制项');
+
+    del!.click();
+    assert.strictEqual(calls.deleteSelected, 1, '点击后回调到装配层');
+    copy!.click();
+    assert.strictEqual(calls.copySelected, 1);
+  });
+
+  it('卡片复制按钮：走剪贴板写入并在无 clipboard API 时降级，且不把异常抛给调用方', async () => {
+    const { list } = makeList();
+    list.setTotalRows(3);
+
+    // 直接点卡片头部的复制按钮 —— 不走右键菜单（菜单容器是模块级单例且会被
+    // makeList 的清空文档逻辑摘掉，只在首个右键用例里可查）。
+    const copy = cards(list)[0].querySelector<HTMLButtonElement>('.jlv-card-line__copy');
+    assert.ok(copy, '存在卡片复制按钮');
+
+    // jsdom 没有 navigator.clipboard，函数必须自行降级而不是把异常抛给调用方
+    assert.doesNotThrow(() => copy!.click());
+    await wait(20);
+
+    assert.strictEqual(
+      globalThis.document.querySelectorAll('textarea').length,
+      0,
+      '降级用的临时 textarea 已清理（不留 DOM 垃圾）'
+    );
+    assert.strictEqual(copy!.title, '已复制', '给出「已复制」的即时反馈');
+  });
+
+  it('focus：把选中行滚动进可视区（rAF 后执行；跨页时先翻页）', async () => {
+    const { list } = makeList();
+    list.setTotalRows(100);
+
+    list.focus(5);
+    await wait(60); // 等 requestAnimationFrame 回调
+    assert.strictEqual(list.getSelected(), 5);
+    assert.strictEqual(list.getPageInfo().page, 0, '同行同页不翻页');
+
+    // 跨页选中：先切到目标页，再滚动定位
+    list.focus(45);
+    await wait(60);
+    assert.strictEqual(list.getSelected(), 45);
+    assert.strictEqual(list.getPageInfo().page, 2, '第 46 行在第 3 页');
+
+    // 过滤态下不存在的行：退回首页并保持可选中（displayPosOf 返回 -1 的分支）
+    list.setTranslation([0, 10, 20]);
+    list.focus(99);
+    await wait(60);
+    assert.strictEqual(list.getPageInfo().page, 0, '不在视图中的行 → 回到首页');
   });
 });
