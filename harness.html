@@ -58,6 +58,10 @@
  * 与「取消」按钮；中途点取消会真的中止且**不改动任何数据** —— 与真实宿主一致，
  * 批量重写在 rename 之前中止时目标文件从未被触碰。
  *
+ * M2（多选批量）：Ctrl/Cmd 点击切换选中、Shift 点击范围选择；选中 > 1 行时列表下方
+ * 出现操作条（复制 / 删除 / 取消选择），右键菜单顶部也会出现批量项。批量删除会真的
+ * 改变数组长度与后续行号；复制走浏览器剪贴板（localhost 下可用）。
+ *
  * 注：totalBytes 乘了 BYTES_SCALE（默认 2000），以便在小样例上也能验证「大 cost
  * 编辑」的提示；真实宿主的 totalBytes 是磁盘真实字节数。
  * ============================================================ */
@@ -505,6 +509,72 @@ async function handleHostRequest(msg) {
         costMs: 2,
         changes: undoable ? changes : undefined,
         undoable,
+      });
+      return;
+    }
+    case 'deleteRecords': {
+      // 与真实宿主语义一致：行号去重 + 越界过滤 + 相邻行合并成连续区间。
+      const arr = ensureLines();
+      const wanted = [...new Set(Array.isArray(msg.lines) ? msg.lines : [])]
+        .filter((l) => Number.isInteger(l) && l >= 0 && l < arr.length)
+        .sort((a, b) => a - b);
+      if (wanted.length === 0) {
+        reply('deleteManyResult', msg.requestId, {
+          ok: false,
+          deleted: 0,
+          ranges: 0,
+          bytesDelta: 0,
+          costMs: 0,
+          skipped: 0,
+          error: '没有可删除的行',
+        });
+        return;
+      }
+      let ranges = 1;
+      for (let i = 1; i < wanted.length; i++) {
+        if (wanted[i] !== wanted[i - 1] + 1) ranges++;
+      }
+      let removedBytes = 0;
+      // 倒序删除：行号才不会因前面的删除而位移
+      for (let i = wanted.length - 1; i >= 0; i--) {
+        removedBytes += byteLen(arr[wanted[i]]) + 1;
+        arr.splice(wanted[i], 1);
+      }
+      reply('deleteManyResult', msg.requestId, {
+        ok: true,
+        deleted: wanted.length,
+        ranges,
+        bytesDelta: -removedBytes * BYTES_SCALE,
+        costMs: 1,
+        skipped: 0,
+      });
+      return;
+    }
+    case 'copyLines': {
+      const arr = ensureLines();
+      const wanted = [...new Set(Array.isArray(msg.lines) ? msg.lines : [])]
+        .filter((l) => Number.isInteger(l) && l >= 0 && l < arr.length)
+        .sort((a, b) => a - b);
+      const text = wanted.map((l) => arr[l] + '\n').join('');
+      try {
+        await navigator.clipboard.writeText(text);
+      } catch (e) {
+        reply('copyResult', msg.requestId, {
+          ok: false,
+          count: 0,
+          bytes: 0,
+          truncated: false,
+          skipped: 0,
+          error: '写入剪贴板失败（浏览器可能未授权）：' + (e && e.message ? e.message : String(e)),
+        });
+        return;
+      }
+      reply('copyResult', msg.requestId, {
+        ok: true,
+        count: wanted.length,
+        bytes: text.length,
+        truncated: false,
+        skipped: 0,
       });
       return;
     }
