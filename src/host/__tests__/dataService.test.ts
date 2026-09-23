@@ -13,6 +13,7 @@ import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DataService } from '../dataService.ts';
+import { MAX_SELECTION_LINES } from '../../constants.ts';
 
 async function makeFile(dir: string, lines: string[]): Promise<string> {
   const file = join(dir, 'data.jsonl');
@@ -836,6 +837,285 @@ test('replaceText：取消 → cancelled 标记、文件分毫未动、不留临
     const rec = await ds.readRecord(2);
     assert.equal(rec.ok, true);
     assert.deepEqual(rec.value, { n: 'x' });
+
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+/* --------------------- 多选批量删除（M2） --------------------- */
+
+test('deleteRecords：相邻行合并成一个区间，不相邻行各自成区间', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const file = await makeFile(dir, ['{"a":1}', '{"b":2}', '{"c":3}', '{"d":4}', '{"e":5}']);
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    // 删 1、2（相邻）+ 4（不相邻）；故意重复传 1 验证去重
+    const res = await ds.deleteRecords([1, 2, 4, 1, 4]);
+
+    assert.equal(res.ok, true);
+    assert.equal(res.deleted, 3, '去重后删除 3 行');
+    assert.equal(res.ranges, 2, '相邻的 1、2 合并成一个区间，4 单独一个');
+    assert.equal(await readFile(file, 'utf8'), '{"a":1}\n{"d":4}\n');
+    assert.equal(ds.totalLines, 2);
+
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('deleteRecords：整段连续删除合并为单个区间（框选场景的核心优化）', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const file = await makeFile(
+      dir,
+      Array.from({ length: 100 }, (_, i) => `{"i":${i}}`)
+    );
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    const targets = Array.from({ length: 80 }, (_, i) => 10 + i); // 删 10..89
+    const res = await ds.deleteRecords(targets);
+
+    assert.equal(res.deleted, 80);
+    assert.equal(res.ranges, 1, '80 个连续行合并成 1 个区间编辑（否则会是 80 个）');
+    assert.equal(ds.totalLines, 20);
+
+    // 首尾行内容正确 —— 索引倒序应用若写错，这里会读到错位内容
+    assert.deepEqual((await ds.readRecord(0)).value, { i: 0 });
+    assert.deepEqual((await ds.readRecord(9)).value, { i: 9 });
+    assert.deepEqual((await ds.readRecord(19)).value, { i: 99 });
+
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('deleteRecords → insertRanges：撤销逐字节还原，且索引偏移精确', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    // 各行长度刻意不同：若用「平均字节」平移检查点，撤销后读到的内容就会错位。
+    const original = ['{"a":1}', '{"b":22}', '{"c":333}', '{"d":4444}', '{"e":55555}'];
+    const file = await makeFile(dir, original);
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    const del = await ds.deleteRecords([1, 2]);
+    assert.equal(del.ok, true);
+    assert.ok(del.changes && del.changes.length === 1, '相邻行合并为一个区间');
+    assert.deepEqual(del.changes![0].lineBytes.length, 2, '每行字节数逐行记录');
+    assert.equal(await readFile(file, 'utf8'), '{"a":1}\n{"d":4444}\n{"e":55555}\n');
+
+    const back = await ds.insertRanges(del.changes!);
+    assert.equal(back.ok, true);
+    assert.equal(back.deleted, 2);
+    assert.equal(await readFile(file, 'utf8'), original.join('\n') + '\n', '逐字节还原');
+    assert.equal(ds.totalLines, 5);
+
+    for (let i = 0; i < original.length; i++) {
+      const r = await ds.readRecord(i);
+      assert.equal(r.ok, true, `第 ${i} 行可读`);
+      assert.equal(r.rawText, original[i], `第 ${i} 行内容正确（偏移未错位）`);
+    }
+
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('deleteRecords / insertRanges：撤销后可再次删除（重做往返一致）', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const file = await makeFile(dir, ['{"a":1}', '{"b":2}', '{"c":3}', '{"d":4}']);
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    const first = await ds.deleteRecords([1, 2]);
+    const afterDelete = await readFile(file, 'utf8');
+
+    const back = await ds.insertRanges(first.changes!);
+    assert.equal(back.ok, true);
+
+    // 重做：用同一组行号再删一次，结果必须一致（区间偏移未漂移）
+    await ds.deleteRecords(first.changes!.flatMap((r) => r.lines));
+    assert.equal(await readFile(file, 'utf8'), afterDelete, '重做结果与首次删除一致');
+
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('deleteRecords：超过选区上限时拒绝，文件不变', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const count = MAX_SELECTION_LINES + 1;
+    const file = await makeFile(
+      dir,
+      Array.from({ length: count }, (_, i) => `{"i":${i}}`)
+    );
+    const original = await readFile(file, 'utf8');
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    const targets = Array.from({ length: count }, (_, i) => i);
+    const res = await ds.deleteRecords(targets);
+
+    assert.equal(res.ok, false);
+    assert.match(res.error ?? '', /最多删除/);
+    assert.equal(await readFile(file, 'utf8'), original, '拒绝时文件必须原样');
+
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('readLinesText：按行取磁盘原文，CRLF 原样保留', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const file = join(dir, 'crlf.jsonl');
+    await writeFile(file, '{"a":1}\r\n{"b":2}\r\n{"c":3}\r\n');
+    const ds = new DataService('file:///crlf.jsonl', file, { sampleLines: 10 });
+    await ds.getOverview();
+
+    const res = await ds.readLinesText([0, 2]);
+
+    assert.equal(res.ok, true);
+    assert.equal(res.count, 2);
+    assert.equal(res.text, '{"a":1}\r\n{"c":3}\r\n', '只取指定行且行尾原样（可安全粘贴）');
+    assert.equal(res.truncated, false);
+
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('readLinesText：总字节超过上限时截断并如实标记', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const file = await makeFile(dir, ['{"a":1}']);
+    // 造一个超过 COPY_MAX_BYTES（8MB）的单行
+    await writeFile(file, `{"x":"${'a'.repeat(9 * 1024 * 1024)}"}\n{"b":2}\n`);
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    const res = await ds.readLinesText([0, 1]);
+
+    assert.equal(res.truncated, true, '必须如实标记截断（静默截断会让用户以为复制全了）');
+    assert.equal(res.count, 0, '放不下的行不复制');
+
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('readLinesText：空输入与全越界行号都报「没有可复制的行」', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const file = await makeFile(dir, ['{"a":1}', '{"b":2}']);
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    const empty = await ds.readLinesText([]);
+    assert.equal(empty.ok, false);
+    assert.match(empty.error ?? '', /没有可复制的行/);
+
+    // 越界 / 小数 / 负数混合输入：归一化后为空 → 同样拒绝（不做部分静默复制）
+    const oob = await ds.readLinesText([99, -1, 1.5]);
+    assert.equal(oob.ok, false);
+    assert.equal(oob.text, '', '失败时不返回任何内容');
+
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('readLinesText：超过选区上限时拒绝', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const count = MAX_SELECTION_LINES + 1;
+    const file = await makeFile(
+      dir,
+      Array.from({ length: count }, (_, i) => `{"i":${i}}`)
+    );
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    const res = await ds.readLinesText(Array.from({ length: count }, (_, i) => i));
+    assert.equal(res.ok, false);
+    assert.match(res.error ?? '', /最多复制/);
+
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * 坏行标记的批量位移。
+ *
+ * 注：`knownBadLines` 目前**只写不读**（除本模块自身的位移逻辑外无消费方），
+ * 故这里只能通过「磁盘上坏行的位置」间接验证位移被正确执行。补此测试是为了锁定
+ * 位移语义 —— 一旦将来接入消费方（如坏行列表视图），它必须仍然正确。
+ */
+test('deleteRecords：坏行标记随删除位移，且删除坏行本身时被丢弃', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const file = await makeFile(dir, ['{"a":1}', '{"b":2}', 'not-json', '{"d":4}']);
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    // 先让第 2 行（坏行）进入 knownBadLines
+    const bad = await ds.readRecord(2);
+    assert.equal(bad.ok, false, '第 3 行确为坏行');
+
+    // 删掉它前面的两行 → 坏行前移到第 0 行（主路径：不在 deleted 集合中）
+    const first = await ds.deleteRecords([0, 1]);
+    assert.equal(first.ok, true);
+    assert.equal(ds.totalLines, 2);
+    const moved = await ds.readRecord(0);
+    assert.equal(moved.ok, false, '坏行随之前移到第 1 行');
+    assert.equal(moved.rawText, 'not-json');
+
+    // 再删掉坏行自己（分支：deleted 集合命中 → 丢弃而非位移）
+    const second = await ds.deleteRecords([0]);
+    assert.equal(second.ok, true);
+    assert.equal(ds.totalLines, 1);
+    assert.deepEqual((await ds.readRecord(0)).value, { d: 4 });
+
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('insertRanges：偏移越界时拒绝（文件已被其它编辑改动过）', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const file = await makeFile(dir, ['{"a":1}', '{"b":2}']);
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    // 伪造一个远超文件大小的插入点：宁可拒绝，也不要在错误位置插入
+    const bogus = [
+      { start: 999_999, end: 999_999, content: '{"x":1}\n', lines: [0], lineBytes: [8] },
+    ];
+    const res = await ds.insertRanges(bogus);
+
+    assert.equal(res.ok, false);
+    assert.equal(res.conflict, true);
+    assert.match(res.error ?? '', /失效/);
+    assert.equal(await readFile(file, 'utf8'), '{"a":1}\n{"b":2}\n', '拒绝时文件必须原样');
 
     await ds.dispose();
   } finally {

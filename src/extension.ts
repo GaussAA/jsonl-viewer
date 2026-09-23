@@ -14,7 +14,7 @@ import {
   RpcMessage,
 } from './protocol/rpc.ts';
 import type { FieldCondition } from './core/query.ts';
-import type { ReplaceChange } from './protocol/rpc.ts';
+import type { DeletedRange, ReplaceChange } from './protocol/rpc.ts';
 import { FILE_STALE_POLL_MS } from './constants.ts';
 
 /** The `viewType` used by the standalone webview panel (命令 / 资源管理器右键菜单路径). */
@@ -155,6 +155,11 @@ type JsonlEditRecord =
       /** 批量查找替换：一次操作改写多行，撤销须**一次性**还原整批。 */
       kind: 'replaceAll';
       changes: ReplaceChange[];
+    }
+  | {
+      /** 批量删除：撤销 = 在同一组区间插回原内容（与删除共用同一组偏移）。 */
+      kind: 'deleteMany';
+      changes: DeletedRange[];
     };
 
 /** viewer 挂载目标：普通 WebviewPanel 与自定义编辑器面板的 webview 语义一致，统一抽象。 */
@@ -473,6 +478,51 @@ function registerHostHandlers(deps: HostHandlerDeps): vscode.Disposable {
               }
               return okReply(HostReply.REPLACE_RESULT, req.requestId, result);
             },
+            // 批量删除多行（编辑能力 M2）：相邻行合并成连续区间后一次原子重写；
+            // 回传的区间同时用于撤销（与删除共用同一组偏移）。
+            [HostEndpoint.DELETE_RECORDS]: async (req) => {
+              const result = await (async () => {
+                try {
+                  return await data.deleteRecords(req.lines, {
+                    onProgress: (info) =>
+                      post({
+                        type: HostReply.EDIT_PROGRESS,
+                        payload: { kind: 'replace', ...info },
+                      }),
+                    shouldCancel: () => cancel.has(req.requestId),
+                  });
+                } finally {
+                  cancel.delete(req.requestId);
+                }
+              })();
+              if (result.ok && result.changes?.length && reportEdit) {
+                reportEdit({ kind: 'deleteMany', changes: result.changes }, data);
+              }
+              return okReply(HostReply.DELETE_MANY_RESULT, req.requestId, result);
+            },
+            // 批量复制：宿主读取磁盘原文后由扩展侧写入剪贴板（vscode.env.clipboard
+            // 比 webview 的 navigator.clipboard 可靠，不受 webview 权限限制）。
+            [HostEndpoint.COPY_LINES]: async (req) => {
+              const res = await data.readLinesText(req.lines);
+              const payload: Record<string, unknown> = {
+                ok: res.ok,
+                count: res.count,
+                bytes: res.bytes,
+                truncated: res.truncated,
+                skipped: res.skipped,
+              };
+              if (res.error) payload.error = res.error;
+              if (!res.ok) return okReply(HostReply.COPY_RESULT, req.requestId, payload);
+              try {
+                await vscode.env.clipboard.writeText(res.text);
+              } catch (e) {
+                payload.ok = false;
+                payload.count = 0;
+                payload.error = `写入剪贴板失败：${e instanceof Error ? e.message : String(e)}`;
+              }
+              // 正文不回传：它已是剪贴板内容，MB 级文本再经 RPC 传一遍纯属浪费。
+              return okReply(HostReply.COPY_RESULT, req.requestId, payload);
+            },
           })
         ).response;
       } catch (e) {
@@ -750,6 +800,28 @@ class JsonlCustomEditorProvider
    * 都紧接其对应的正向操作，故操作时的行号语义始终成立，无需额外记录字节偏移。
    */
   private reportEdit(document: JsonlDocument, data: DataService, edit: JsonlEditRecord): void {
+    // 批量删除：撤销与删除**完全对称** —— 删除是把区间清空，撤销是在同一组 start 处插回
+    // 原内容（删除不改变删除点之前的偏移）。故两者都是一次原子重写，而非 N 次逐行操作。
+    if (edit.kind === 'deleteMany') {
+      const ranges = edit.changes;
+      const total = ranges.reduce((a, r) => a + r.lines.length, 0);
+      const remove = async (): Promise<void> => {
+        const r = await data.deleteRecords(ranges.flatMap((x) => x.lines));
+        if (!r.ok) throw new Error(r.error ?? '批量删除失败');
+      };
+      const restore = async (): Promise<void> => {
+        const r = await data.insertRanges(ranges);
+        if (!r.ok) throw new Error(r.error ?? '撤销批量删除失败');
+      };
+      this.editEmitter.fire({
+        document,
+        label: `删除 ${total} 行`,
+        undo: restore,
+        redo: remove,
+      });
+      return;
+    }
+
     // 批量替换：撤销必须一次性还原整批 —— 逐行撤销会让用户在 N 次 Ctrl+Z 之间
     // 看到「改了一半」的中间态，那比不支持撤销更令人困惑。
     if (edit.kind === 'replaceAll') {

@@ -42,6 +42,10 @@ export const HostEndpoint = {
   DELETE_RECORD: 'deleteRecord',
   /** 全文查找替换（编辑能力 M2；批量改写命中行，走「重写 + 原子替换」）。 */
   REPLACE_TEXT: 'replaceText',
+  /** 批量删除多行（编辑能力 M2；相邻行会合并成连续区间后一次原子重写）。 */
+  DELETE_RECORDS: 'deleteRecords',
+  /** 读取多行原文并复制到剪贴板（剪贴板由宿主侧写入，比 webview 的 clipboard 可靠）。 */
+  COPY_LINES: 'copyLines',
 } as const;
 
 /** O(1) 查找表：把 HostEndpoint 所有值预编译成 Set，isHostEndpoint 每次调用不再 O(n) 遍历。 */
@@ -70,6 +74,10 @@ export const HostReply = {
   DOCUMENT_RESET: 'documentReset',
   /** 查找替换结果（成功与业务失败均走此回执）。 */
   REPLACE_RESULT: 'replaceResult',
+  /** 批量删除结果（成功与业务失败均走此回执）。 */
+  DELETE_MANY_RESULT: 'deleteManyResult',
+  /** 批量复制结果（是否截断必须如实回报）。 */
+  COPY_RESULT: 'copyResult',
   /**
    * host 主动推送：耗时写操作的进度（批量重写的全文件重写阶段）。
    *
@@ -221,6 +229,65 @@ export interface ReplaceResultPayload {
   conflict?: boolean;
 }
 
+/**
+ * 一次批量删除中被移除的**连续区间**。
+ *
+ * 关键：`start` / `end` 与 `content` 一起回传，是因为**撤销 = 在同一组 start 处插入 content**。
+ * 删除不会改变「删除点之前」的任何偏移，故删除与撤销共用同一组区间 —— 完全可逆，
+ * 且撤销与删除一样是**一次原子重写**（而非 N 次逐行插入）。
+ */
+export interface DeletedRange {
+  /** 被删区间的起始偏移；删除后该偏移即为插入点。 */
+  start: number;
+  /** 结束偏移（含行尾，独占）。 */
+  end: number;
+  /** 区间内的原始字节（含行尾），撤销时原样插回。 */
+  content: string;
+  /** 该区间覆盖的行号（升序）。 */
+  lines: number[];
+  /**
+   * 每行的字节数（含行尾），与 `lines` 一一对应。
+   *
+   * 必须回传：撤销时要把索引检查点精确平移，而各行的字节长度并不相等 ——
+   * 用「总字节 ÷ 行数」的平均值去平移会让检查点错位，`scan` 随即读到错误位置。
+   */
+  lineBytes: number[];
+}
+
+/** 批量删除结果。 */
+export interface DeleteManyResultPayload {
+  ok: boolean;
+  /** 实际删除的行数。 */
+  deleted: number;
+  /** 合并后的连续区间数（框选一整段时它会是 1，这是本功能的核心优化）。 */
+  ranges: number;
+  bytesDelta: number;
+  costMs: number;
+  /** 因过大而跳过的行数（无法安全取出内容）。 */
+  skipped: number;
+  /** 供撤销的区间清单（与删除共用同一组偏移）。 */
+  changes?: DeletedRange[];
+  error?: string;
+  /** 是否为「文件已被外部修改」冲突。 */
+  conflict?: boolean;
+  /** 是否被用户主动取消（与失败严格区分：取消时目标文件从未被触碰）。 */
+  cancelled?: boolean;
+}
+
+/** 批量复制结果。 */
+export interface CopyLinesResultPayload {
+  ok: boolean;
+  /** 实际复制的行数。 */
+  count: number;
+  /** 复制的字节数。 */
+  bytes: number;
+  /** 是否因超过上限被截断 —— 必须如实告知，静默截断会让用户以为复制全了。 */
+  truncated: boolean;
+  /** 因过大而跳过的行数。 */
+  skipped: number;
+  error?: string;
+}
+
 /** 耗时写操作的进度（host → webview 主动推送）。 */
 export interface EditProgressPayload {
   /** 操作类型；目前仅批量替换会推送。 */
@@ -305,6 +372,18 @@ export type HostRequest =
       replacement: string;
       /** 是否大小写不敏感；默认与搜索一致（true）。 */
       caseInsensitive?: boolean;
+    }
+  | {
+      type: typeof HostEndpoint.DELETE_RECORDS;
+      requestId: string;
+      /** 要删除的行号（0 基；可乱序、可含重复，宿主负责归一化与合并）。 */
+      lines: number[];
+    }
+  | {
+      type: typeof HostEndpoint.COPY_LINES;
+      requestId: string;
+      /** 要复制的行号（0 基）。 */
+      lines: number[];
     };
 
 /* host -> webview 的具体响应消息。 */
@@ -322,7 +401,13 @@ export type HostResponse =
   | { type: typeof HostReply.EDIT_RESULT; requestId: string; payload: EditResultPayload }
   | { type: typeof HostReply.DOCUMENT_RESET; payload: DocumentResetPayload }
   | { type: typeof HostReply.REPLACE_RESULT; requestId: string; payload: ReplaceResultPayload }
-  | { type: typeof HostReply.EDIT_PROGRESS; payload: EditProgressPayload };
+  | { type: typeof HostReply.EDIT_PROGRESS; payload: EditProgressPayload }
+  | {
+      type: typeof HostReply.DELETE_MANY_RESULT;
+      requestId: string;
+      payload: DeleteManyResultPayload;
+    }
+  | { type: typeof HostReply.COPY_RESULT; requestId: string; payload: CopyLinesResultPayload };
 
 export type RpcMessage = HostRequest | HostResponse;
 
@@ -435,6 +520,12 @@ export type HostHandlerMap = {
   ) => Promise<HostResponse> | HostResponse;
   [HostEndpoint.REPLACE_TEXT]: (
     req: Extract<HostRequest, { type: typeof HostEndpoint.REPLACE_TEXT }>
+  ) => Promise<HostResponse> | HostResponse;
+  [HostEndpoint.DELETE_RECORDS]: (
+    req: Extract<HostRequest, { type: typeof HostEndpoint.DELETE_RECORDS }>
+  ) => Promise<HostResponse> | HostResponse;
+  [HostEndpoint.COPY_LINES]: (
+    req: Extract<HostRequest, { type: typeof HostEndpoint.COPY_LINES }>
   ) => Promise<HostResponse> | HostResponse;
   [HostEndpoint.CANCEL]: (
     req: Extract<HostRequest, { type: typeof HostEndpoint.CANCEL }>

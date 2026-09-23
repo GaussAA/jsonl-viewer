@@ -85,6 +85,23 @@ const baseHandlers: HostHandlerMap = {
       costMs: 0,
       undoable: false,
     }),
+  [HostEndpoint.DELETE_RECORDS]: (r) =>
+    okReply(HostReply.DELETE_MANY_RESULT, r.requestId, {
+      ok: true,
+      deleted: 0,
+      ranges: 0,
+      bytesDelta: 0,
+      costMs: 0,
+      skipped: 0,
+    }),
+  [HostEndpoint.COPY_LINES]: (r) =>
+    okReply(HostReply.COPY_RESULT, r.requestId, {
+      ok: true,
+      count: 0,
+      bytes: 0,
+      truncated: false,
+      skipped: 0,
+    }),
   [HostEndpoint.CANCEL]: () => undefined,
 };
 

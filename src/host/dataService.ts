@@ -42,11 +42,16 @@ import {
   FILTER_MAX_RESULTS,
   MAX_REPLACE_UNDO_LINES,
   MAX_REPLACE_UNDO_BYTES,
+  MAX_SELECTION_LINES,
+  COPY_MAX_BYTES,
   PROGRESS_THROTTLE_MS,
 } from '../constants.ts';
 import { buildIndexWithFallback, type IndexHost } from './indexHost.ts';
 import { buildRecordsPayload } from '../protocol/rpc.ts';
 import type {
+  CopyLinesResultPayload,
+  DeleteManyResultPayload,
+  DeletedRange,
   EditResultPayload,
   OverviewPayload,
   RecordsPayload,
@@ -104,6 +109,18 @@ function throttleProgress(
     last = now;
     cb(info);
   };
+}
+
+/** 二分统计升序数组中小于 `x` 的元素个数（用于批量删除后的行号映射）。 */
+function countLessThan(sorted: readonly number[], x: number): number {
+  let lo = 0;
+  let hi = sorted.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (sorted[mid] < x) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
 }
 
 /** 检测文件是否已变更（size/mtime）的最小快照。 */
@@ -762,6 +779,325 @@ export class DataService {
     );
   }
 
+  /* ------------------------- 多选批量操作（M2） ------------------------- */
+
+  /**
+   * 批量删除多行，一次原子落盘。
+   *
+   * 两个关键设计：
+   *   1. **相邻行合并成连续区间** —— 框选一整段连续行是最常见的多选场景，合并后
+   *      编辑数从 N 降到 1。这是本功能最有价值的优化（否则「框选 500 行删除」
+   *      会变成 500 个区间编辑）。
+   *   2. **回传区间（start/end/content）** —— 撤销正是「在同一组 start 处插入 content」。
+   *      删除不会改变「删除点之前」的任何偏移，故删除与撤销共用同一组区间，
+   *      完全可逆，且撤销同样是**一次原子重写**而非 N 次逐行插入。
+   *
+   * 索引必须**倒序**应用 `applyLineDelete`：其语义是「在现有索引上删第 line 行」，
+   * 倒序才能保证每次的行号都还未被后面的删除影响。
+   */
+  async deleteRecords(
+    lines: readonly number[],
+    opts: ReplaceOpts = {}
+  ): Promise<DeleteManyResultPayload> {
+    const li = await this.ensureIndex();
+    const reader = this.reader!;
+
+    const conflict = await this.detectWriteConflict(-1);
+    if (conflict) {
+      return DataService.deleteManyFailure(conflict.error ?? '文件已被外部修改', {
+        conflict: true,
+      });
+    }
+
+    const targets = DataService.normalizeLines(lines, li.totalLines);
+    if (targets.length === 0) return DataService.deleteManyFailure('没有可删除的行');
+    if (targets.length > MAX_SELECTION_LINES) {
+      return DataService.deleteManyFailure(
+        `一次最多删除 ${MAX_SELECTION_LINES} 行，当前选中 ${targets.length} 行。`
+      );
+    }
+
+    // 一次顺序扫过目标区间，取每行的字节范围与原文（含行尾 —— 撤销要原样插回）
+    const wanted = new Set(targets);
+    const rows: { line: number; start: number; end: number; bytes: number; content: string }[] = [];
+    let skipped = 0;
+    for await (const r of li.scan(reader, targets[0], targets[targets.length - 1] + 1)) {
+      if (!wanted.has(r.line)) continue;
+      // 超长行（scan 以 error 标记）无法安全取出内容：跳过而非删一半。
+      if (r.error) {
+        skipped++;
+        continue;
+      }
+      const ending = detectLineEnding({ start: r.start, end: r.end }, r.bytes.length);
+      const eol = ending === 'crlf' ? '\r\n' : ending === 'lf' ? '\n' : '';
+      rows.push({
+        line: r.line,
+        start: r.start,
+        end: r.end,
+        bytes: r.end - r.start,
+        content: r.bytes.toString('utf8') + eol,
+      });
+    }
+    if (rows.length === 0) return DataService.deleteManyFailure('没有可删除的行（目标行过大）');
+
+    // 合并相邻行为连续区间（每行字节数逐行记录 —— 撤销要精确平移检查点）
+    const ranges: DeletedRange[] = [];
+    for (const row of rows) {
+      const tail = ranges[ranges.length - 1];
+      if (tail && tail.lines[tail.lines.length - 1] + 1 === row.line) {
+        tail.end = row.end;
+        tail.lines.push(row.line);
+        tail.lineBytes.push(row.bytes);
+        tail.content += row.content;
+      } else {
+        ranges.push({
+          start: row.start,
+          end: row.end,
+          content: row.content,
+          lines: [row.line],
+          lineBytes: [row.bytes],
+        });
+      }
+    }
+
+    const edits: ByteEdit[] = ranges.map((r) => ({
+      start: r.start,
+      end: r.end,
+      replacement: Buffer.alloc(0),
+    }));
+
+    this.editing = true;
+    try {
+      const res = await this.rewriteAtomic(edits, opts);
+      // 倒序应用索引删除（见方法文档）
+      let idx = li;
+      for (let i = rows.length - 1; i >= 0; i--) {
+        idx = idx.applyLineDelete(rows[i].line, rows[i].end - rows[i].start);
+      }
+      this.index = idx;
+      this.remapBadLinesAfterDeletes(wanted);
+      await this.refreshSnapshot();
+
+      return {
+        ok: true,
+        deleted: rows.length,
+        ranges: ranges.length,
+        bytesDelta: res.bytesDelta,
+        costMs: Math.round(res.costMs * 100) / 100,
+        skipped,
+        changes: ranges,
+      };
+    } catch (e) {
+      if (e instanceof WriteCancelledError) {
+        return DataService.deleteManyFailure('已取消', { cancelled: true });
+      }
+      return DataService.deleteManyFailure(e instanceof Error ? e.message : String(e));
+    } finally {
+      this.editing = false;
+    }
+  }
+
+  /**
+   * 按字节区间批量插回内容（批量删除的**撤销 / 重做**专用）。
+   *
+   * 传入的区间来自 `deleteRecords` 回传的 `changes`。之所以能直接复用同一组 `start`：
+   * 删除不改变「删除点之前」的任何偏移，故原 `start` 在删除后的文件里仍是有效插入点。
+   * 于是撤销与删除完全对称 —— 都是一次原子重写，而不是 N 次逐行插入。
+   *
+   * 插入行号用 `原首行号 − 在此之前被删的行数` 推出，并**倒序**应用
+   * `applyLineInsert`：倒序时后面的插入不会影响前面待处理区间的行号。
+   */
+  async insertRanges(
+    ranges: readonly DeletedRange[],
+    opts: ReplaceOpts = {}
+  ): Promise<DeleteManyResultPayload> {
+    const li = await this.ensureIndex();
+
+    if (ranges.length === 0) return DataService.deleteManyFailure('没有需要恢复的内容');
+
+    const conflict = await this.detectWriteConflict(-1);
+    if (conflict) {
+      return DataService.deleteManyFailure(conflict.error ?? '文件已被外部修改', {
+        conflict: true,
+      });
+    }
+
+    const sorted = [...ranges].toSorted((a, b) => a.start - b.start);
+    const allLines = sorted.flatMap((r) => r.lines).toSorted((a, b) => a - b);
+
+    const edits: ByteEdit[] = [];
+    for (const r of sorted) {
+      if (!Number.isInteger(r.start) || r.start < 0 || r.start > li.totalBytes) {
+        // 偏移越界说明文件已被别的编辑改动过：宁可拒绝，也不要在错误位置插入。
+        return DataService.deleteManyFailure(
+          '撤销数据已失效（文件已被其它编辑改动），请重新加载。',
+          {
+            conflict: true,
+          }
+        );
+      }
+      if (r.lines.length === 0 || !r.content) continue;
+      edits.push({ start: r.start, end: r.start, replacement: Buffer.from(r.content, 'utf8') });
+    }
+    if (edits.length === 0) return DataService.deleteManyFailure('没有需要恢复的内容');
+
+    this.editing = true;
+    try {
+      const res = await this.rewriteAtomic(edits, opts);
+      let idx = li;
+      let restored = 0;
+      // 倒序：先插后面的区间，前面区间的行号推导才不受影响。
+      for (let i = sorted.length - 1; i >= 0; i--) {
+        const r = sorted[i];
+        if (r.lines.length === 0 || !r.content) continue;
+        const at = r.lines[0] - countLessThan(allLines, r.lines[0]);
+        // 逐行插入并**逐行给出精确字节数** —— 用平均字节平移检查点会错位（见 DeletedRange.lineBytes）。
+        for (let k = 0; k < r.lines.length; k++) {
+          idx = idx.applyLineInsert(at + k, r.lineBytes[k] ?? 0);
+        }
+        restored += r.lines.length;
+      }
+      this.index = idx;
+      // 恢复的行内容已知合法（原本就在文件里），故从坏行集合中摘除。
+      for (const l of allLines) this.knownBadLines.delete(l);
+      await this.refreshSnapshot();
+
+      return {
+        ok: true,
+        deleted: restored,
+        ranges: edits.length,
+        bytesDelta: res.bytesDelta,
+        costMs: Math.round(res.costMs * 100) / 100,
+        skipped: 0,
+      };
+    } catch (e) {
+      if (e instanceof WriteCancelledError) {
+        return DataService.deleteManyFailure('已取消', { cancelled: true });
+      }
+      return DataService.deleteManyFailure(e instanceof Error ? e.message : String(e));
+    } finally {
+      this.editing = false;
+    }
+  }
+
+  /** 释放句柄 → 原子重写 → 拿回句柄（批量删除与批量重写共用同一时序）。 */
+  private async rewriteAtomic(
+    edits: ByteEdit[],
+    opts: ReplaceOpts
+  ): Promise<{ bytesDelta: number; costMs: number }> {
+    await this.releaseFileHandles();
+    try {
+      const res = await rewriteWithEdits(this.path, edits, {
+        onProgress: throttleProgress(opts.onProgress),
+        ...(opts.shouldCancel ? { shouldCancel: opts.shouldCancel } : {}),
+      });
+      return { bytesDelta: res.bytesDelta, costMs: res.costMs };
+    } finally {
+      // 无论成败都必须把句柄拿回来，否则后续所有读取都会失败。
+      await this.acquireFileHandles();
+    }
+  }
+
+  /**
+   * 批量删除后重映射坏行行号。
+   *
+   * 逐次调用 `shiftKnownBadLinesAfterDelete` 是 O(删除数 × 坏行数)；此处二分统计
+   * 「该行之前被删了几行」，降到 O((坏行数 + 删除数) log 删除数)。
+   */
+  private remapBadLinesAfterDeletes(deleted: ReadonlySet<number>): void {
+    if (this.knownBadLines.size === 0) return;
+    const sorted = [...deleted].toSorted((a, b) => a - b);
+    const next = new Set<number>();
+    for (const l of this.knownBadLines) {
+      if (deleted.has(l)) continue; // 该行已删除，丢弃
+      next.add(l - countLessThan(sorted, l));
+    }
+    this.knownBadLines.clear();
+    for (const l of next) this.knownBadLines.add(l);
+  }
+
+  /** 归一化行号：去重、滤越界、升序（宿主对前端的最后一道防线）。 */
+  private static normalizeLines(lines: readonly number[], totalLines: number): number[] {
+    const seen = new Set<number>();
+    for (const l of lines) {
+      if (Number.isInteger(l) && l >= 0 && l < totalLines) seen.add(l);
+    }
+    return [...seen].toSorted((a, b) => a - b);
+  }
+
+  private static deleteManyFailure(
+    error: string,
+    extra?: Partial<DeleteManyResultPayload>
+  ): DeleteManyResultPayload {
+    return {
+      ok: false,
+      deleted: 0,
+      ranges: 0,
+      bytesDelta: 0,
+      costMs: 0,
+      skipped: 0,
+      error,
+      ...extra,
+    };
+  }
+
+  /**
+   * 读取多行的**磁盘原文**并拼接，供批量复制。
+   *
+   * 与列表摘要不同：这里要的是可直接粘贴的原始文本，故走一次顺序 scan 取原文，
+   * 不做 JSON 解析、不重排、不改行尾。超过 `COPY_MAX_BYTES` 时截断并标记 ——
+   * 静默截断会让用户以为复制全了，粘出来的东西却不完整。
+   *
+   * 返回体额外带 `text`（正文很可能是 MB 级，不宜再经 RPC 回传一遍；
+   * 调用方取其写剪贴板后，回执里不带正文）。
+   */
+  async readLinesText(
+    lines: readonly number[]
+  ): Promise<CopyLinesResultPayload & { text: string }> {
+    const li = await this.ensureIndex();
+    const reader = this.reader!;
+    const empty = (error: string): CopyLinesResultPayload & { text: string } => ({
+      ok: false,
+      count: 0,
+      bytes: 0,
+      truncated: false,
+      skipped: 0,
+      error,
+      text: '',
+    });
+
+    const targets = DataService.normalizeLines(lines, li.totalLines);
+    if (targets.length === 0) return empty('没有可复制的行');
+    if (targets.length > MAX_SELECTION_LINES) {
+      return empty(`一次最多复制 ${MAX_SELECTION_LINES} 行，当前选中 ${targets.length} 行。`);
+    }
+
+    const wanted = new Set(targets);
+    const parts: string[] = [];
+    let bytes = 0;
+    let skipped = 0;
+    let truncated = false;
+
+    for await (const r of li.scan(reader, targets[0], targets[targets.length - 1] + 1)) {
+      if (!wanted.has(r.line)) continue;
+      if (r.error) {
+        skipped++;
+        continue;
+      }
+      const rawBytes = r.end - r.start;
+      if (bytes + rawBytes > COPY_MAX_BYTES) {
+        truncated = true;
+        break;
+      }
+      const ending = detectLineEnding({ start: r.start, end: r.end }, r.bytes.length);
+      const eol = ending === 'crlf' ? '\r\n' : ending === 'lf' ? '\n' : '';
+      parts.push(r.bytes.toString('utf8') + eol);
+      bytes += rawBytes;
+    }
+
+    return { ok: true, count: parts.length, bytes, truncated, skipped, text: parts.join('') };
+  }
+
   /**
    * 把规划好的编辑一次落盘，并同步索引与基线快照。
    *
@@ -780,18 +1116,7 @@ export class DataService {
   ): Promise<ReplaceResultPayload> {
     this.editing = true;
     try {
-      await this.releaseFileHandles();
-      let res;
-      try {
-        res = await rewriteWithEdits(this.path, edits, {
-          // 节流后的进度：1GB 文件底层会回调 250 次，全量上报只是无意义的 IPC 压力。
-          onProgress: throttleProgress(opts.onProgress),
-          ...(opts.shouldCancel ? { shouldCancel: opts.shouldCancel } : {}),
-        });
-      } finally {
-        // 无论成败都必须把句柄拿回来，否则后续所有读取都会失败。
-        await this.acquireFileHandles();
-      }
+      const res = await this.rewriteAtomic(edits, opts);
       // 索引增量更新：行数不变，逐行平移其后检查点（各 delta 相互独立，顺序无关）
       let idx = li;
       for (const { line, delta } of deltas) idx = idx.applyLineReplace(line, delta);
