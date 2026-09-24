@@ -1065,6 +1065,15 @@ body {
   color: var(--jlv-info);
 }
 .jlv-field-bool { display: flex; gap: 8px; }
+.jlv-field-applyall {
+  display: flex; align-items: center; gap: 6px;
+  padding: 4px 2px;
+  font-size: 10px; color: var(--jlv-dim);
+  cursor: pointer;
+  user-select: none;
+}
+.jlv-field-applyall:hover { color: var(--jlv-fg); }
+.jlv-field-applyall input { accent-color: var(--jlv-focus); margin: 0; }
 @media (max-width: 700px) {
   .jlv-field-backdrop { padding: 12px; }
 }

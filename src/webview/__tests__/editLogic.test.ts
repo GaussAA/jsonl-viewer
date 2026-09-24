@@ -16,6 +16,7 @@ import {
   isFieldEditableKind,
   initialFieldText,
   parseFieldInput,
+  fieldReplaceConfirmText,
   EDIT_COST_WARN_BYTES,
 } from '../editLogic.ts';
 
@@ -249,4 +250,16 @@ test('parseFieldInput：布尔与数字的错误原因可读，且不含未处�
   const empty = parseFieldInput('', 'number');
   assert.equal(empty.ok, false);
   if (empty.ok === false) assert.match(empty.error, /不能为空/);
+});
+
+test('fieldReplaceConfirmText：小文件直说，大文件必须解释为什么慢', () => {
+  const small = fieldReplaceConfirmText('.status', 1024);
+  assert.match(small, /确定把所有行中「\.status」/);
+  assert.match(small, /立即写入磁盘/);
+
+  const big = fieldReplaceConfirmText('.status', 64 * 1024 * 1024);
+  assert.match(big, /重写整个/, '批量字段级替换同样要重写整个文件，必须说明');
+  assert.match(big, /与命中行数无关/);
+  assert.match(big, /可取消/);
+  assert.ok(big.length < 200, `文案应保持可读，实际 ${big.length} 字`);
 });

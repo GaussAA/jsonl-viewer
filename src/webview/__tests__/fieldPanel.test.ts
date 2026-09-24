@@ -24,8 +24,12 @@ const idx = (i: number): PathSeg => ({ kind: 'index', key: String(i) });
 interface Harness {
   panel: ReturnType<typeof createFieldPanel>;
   calls: { notify: string[] };
-  /** 每次 submit 收到的 (path, value)。 */
-  submitted: { segs: PathSeg[]; value: unknown }[];
+  /** 每次 submit 收到的 (path, value, extra)。 */
+  submitted: {
+    segs: PathSeg[];
+    value: unknown;
+    extra?: { applyAll: boolean; from: unknown };
+  }[];
   /** 下一次 submit 的返回值（改它可模拟失败）。 */
   nextResult: { ok: boolean; error?: string };
   /** 让 submit 挂起，便于测「提交中」的控件状态。 */
@@ -43,8 +47,8 @@ function makePanel(): Harness {
     hold: false,
   };
   h.panel = createFieldPanel({
-    submit: async (segs, value) => {
-      h.submitted.push({ segs: [...segs], value });
+    submit: async (segs, value, extra) => {
+      h.submitted.push({ segs: [...segs], value, extra });
       if (h.hold) {
         await new Promise<void>((r) => {
           h.release = r;
@@ -116,7 +120,9 @@ describe('fieldPanel', () => {
     saveBtn().click();
     await wait(20);
 
-    assert.deepStrictEqual(h.submitted, [{ segs: [key('a')], value: 'he said "hi"' }]);
+    assert.strictEqual(h.submitted.length, 1);
+    assert.strictEqual(h.submitted[0].segs[0].key, 'a');
+    assert.strictEqual(h.submitted[0].value, 'he said "hi"');
     assert.strictEqual(h.panel.isOpen(), false, '成功后关闭');
     assert.match(h.calls.notify[0], /已更新 \.a/);
   });
@@ -283,5 +289,86 @@ describe('fieldPanel', () => {
     h.panel.open([key('b')], 'y');
     await wait(20);
     assert.strictEqual(titleText(), '编辑 .a', '第二次调用被忽略，不覆盖正在编辑的内容');
+  });
+
+  /* ------------------------- 批量（应用到全部） ------------------------- */
+
+  const applyAllCheck = (): HTMLInputElement =>
+    globalThis.document.querySelector<HTMLInputElement>('.jlv-field-applyall input')!;
+
+  it('批量复选框默认不勾：单行改值是高频操作，批量是低频的重操作', async () => {
+    const h = makePanel();
+    h.panel.open([key('a')], 'old');
+    await wait(20);
+
+    assert.strictEqual(applyAllCheck().checked, false, '默认值必须偏向轻的那边');
+    textarea()!.value = 'new';
+    saveBtn().click();
+    await wait(20);
+
+    assert.strictEqual(h.submitted[0].extra?.applyAll, false);
+    assert.strictEqual(h.panel.isOpen(), false, '单行模式成功后关闭');
+  });
+
+  it('勾选后提交：extra 带 applyAll 与原值（批量匹配基准）', async () => {
+    const h = makePanel();
+    h.panel.open([key('status')], 'pending');
+    await wait(20);
+
+    applyAllCheck().checked = true;
+    textarea()!.value = 'done';
+    saveBtn().click();
+    await wait(20);
+
+    assert.strictEqual(h.submitted[0].extra?.applyAll, true);
+    assert.strictEqual(h.submitted[0].extra?.from, 'pending', '批量匹配基准是打开时的原值');
+    assert.strictEqual(h.submitted[0].value, 'done');
+  });
+
+  it('批量提交时浮层先关闭（确认横幅 z-index 更低，不能被浮层挡住）', async () => {
+    const h = makePanel();
+    h.panel.open([key('a')], 'x');
+    await wait(20);
+    applyAllCheck().checked = true;
+
+    saveBtn().click();
+    await wait(20);
+    // submit 被调用时浮层应已关闭 —— 在 makePanel 的 submit 里此刻 isOpen() 为 false
+    assert.strictEqual(h.panel.isOpen(), false, '为确认横幅让路');
+
+    h.nextResult = { ok: true };
+    h.release?.();
+    h.hold = false;
+    await wait(30);
+  });
+
+  it('批量失败走横幅通知（浮层已让路，写进浮层没人看得见）', async () => {
+    const h = makePanel();
+    h.nextResult = { ok: false, error: '文件已被外部修改' };
+    h.panel.open([key('a')], 'x');
+    await wait(20);
+    applyAllCheck().checked = true;
+    saveBtn().click();
+    await wait(30);
+
+    assert.deepStrictEqual(
+      h.calls.notify,
+      ['文件已被外部修改'],
+      '失败原因必须走横幅，且不弹成功提示'
+    );
+    assert.strictEqual(h.submitted[0].extra?.applyAll, true);
+  });
+
+  it('重新打开浮层时批量勾选被重置（批量必须每次显式选择）', async () => {
+    const h = makePanel();
+    h.panel.open([key('a')], 'x');
+    await wait(20);
+    applyAllCheck().checked = true;
+    h.panel.close();
+    await wait(20);
+
+    h.panel.open([key('b')], 'y');
+    await wait(20);
+    assert.strictEqual(applyAllCheck().checked, false, '不得残留上一次的批量选择');
   });
 });

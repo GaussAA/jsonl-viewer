@@ -1706,6 +1706,85 @@ describe('webviewEntry 装配层（集成）', () => {
           `hint=${app.querySelector('.jlv-tree-hint')?.textContent ?? '无'}）`
       );
     });
+
+    it('勾选「应用到全部」→ 先关浮层 → 确认横幅 → REPLACE_FIELD（path/from/to 正确）', async () => {
+      const { host, app } = await bootWithRecords();
+      replyDetail(host, { status: 'pending' }, '{"status":"pending"}');
+      await sleep(20);
+
+      entryFor(app, 'status')!.click();
+      await sleep(30);
+      const panel = fieldPanelEl(app);
+      assert.ok(panel.classList.contains('open'), '前置：浮层已打开');
+
+      // 勾选批量并保存：浮层先关闭（为确认横幅让路），且**确认前绝不发请求**
+      panel.querySelector<HTMLInputElement>('.jlv-field-applyall input')!.checked = true;
+      panel.querySelector<HTMLTextAreaElement>('textarea.jlv-field-input')!.value = 'done';
+      panel.querySelector<HTMLButtonElement>('.jlv-field-save')!.click();
+      await sleep(30);
+
+      assert.strictEqual(panel.classList.contains('open'), false, '浮层已为确认横幅让路');
+      const banner = app.querySelector<HTMLElement>('.jlv-banner')!;
+      assert.strictEqual(banner.hidden, false, '出现二次确认横幅');
+      assert.strictEqual(text(banner.querySelector('.jlv-banner-action')), '确认替换');
+      assert.strictEqual(
+        reqs(host, HostEndpoint.REPLACE_FIELD).length,
+        0,
+        '确认之前绝不发起批量写入'
+      );
+
+      banner.querySelector<HTMLButtonElement>('.jlv-banner-action')!.click();
+      await sleep(30);
+
+      const req = lastReq(host, HostEndpoint.REPLACE_FIELD);
+      assert.ok(req, '确认后发起批量字段替换');
+      assert.deepStrictEqual(req!.path, ['status']);
+      assert.strictEqual(req!.from, 'pending', '匹配基准是打开浮层时的原值');
+      assert.strictEqual(req!.to, 'done');
+
+      // 回执成功 → 横幅给结果，并应重新拉取详情（该行内容已变）
+      host.receive({
+        type: HostReply.REPLACE_FIELD_RESULT,
+        requestId: req!.requestId,
+        payload: {
+          ok: true,
+          replaced: 3,
+          skippedInvalid: 0,
+          unchanged: 97,
+          total: 100,
+          bytesDelta: 0,
+          costMs: 5,
+          undoable: true,
+        },
+      });
+      await sleep(30);
+      assert.match(
+        text(app.querySelector('.jlv-banner-text')),
+        /替换/,
+        '横幅给出批量结果（浮层已关，横幅是唯一出口）'
+      );
+      assert.ok(lastReq(host, HostEndpoint.READ_RECORD), '当前行的详情应被重新拉取（内容已变）');
+    });
+
+    it('不点确认就什么都不发生（确认是唯一放行条件）', async () => {
+      const { host, app } = await bootWithRecords();
+      replyDetail(host, { status: 'pending' }, '{"status":"pending"}');
+      await sleep(20);
+      entryFor(app, 'status')!.click();
+      await sleep(30);
+      const panel = fieldPanelEl(app);
+      panel.querySelector<HTMLInputElement>('.jlv-field-applyall input')!.checked = true;
+      panel.querySelector<HTMLButtonElement>('.jlv-field-save')!.click();
+      await sleep(30);
+
+      assert.strictEqual(app.querySelector<HTMLElement>('.jlv-banner')!.hidden, false);
+      await sleep(20);
+      assert.strictEqual(
+        reqs(host, HostEndpoint.REPLACE_FIELD).length,
+        0,
+        '不确认就不写 —— 静置也不得放行'
+      );
+    });
   });
 
   describe('单行编辑的进度与取消（M3 收尾）', () => {

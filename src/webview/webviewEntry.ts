@@ -22,13 +22,14 @@ import { createEditPanel } from './editPanel.ts';
 import { createHistoryPanel } from './historyPanel.ts';
 import { createBadLinesPanel, scanProgressText } from './badLinesPanel.ts';
 import { createFieldPanel } from './fieldPanel.ts';
-import { toPathParts } from './detailLogic.ts';
+import { toPathParts, pathToString } from './detailLogic.ts';
 import type { PathSeg } from './detailLogic.ts';
 import { replaceValueAtPath } from '../core/jsonSpan.ts';
 import {
   describeEditFailure,
   editProgressText,
   estimateEditCost,
+  fieldReplaceConfirmText,
   replaceConfirmText,
   replaceProgressText,
   EDIT_COST_WARN_BYTES,
@@ -353,6 +354,9 @@ export function main(): void {
   /** 正在执行的单行编辑（仅当成本足够大、真的会等待时才置位）。 */
   let activeEdit: { requestId: string } | null = null;
 
+  /** 正在执行的批量字段级替换（null = 无）。 */
+  let activeFieldReplace: { requestId: string } | null = null;
+
   /**
    * 长任务进度 → 横幅（只换文字，不得触碰「取消」按钮）。
    *
@@ -360,7 +364,10 @@ export function main(): void {
    * 与任务语义无关；加一种长任务不该再造一条推送链路。
    */
   bus.onEditProgress((info) => {
-    if (info.kind === 'replace' && activeReplace) {
+    if (
+      (info.kind === 'replace' && activeReplace) ||
+      (info.kind === 'replaceField' && activeFieldReplace)
+    ) {
       banner.setText(replaceProgressText(info.processedBytes, info.totalBytes));
       return;
     }
@@ -1143,7 +1150,8 @@ export function main(): void {
   /* ---------------- 字段级编辑（详情树上点某个字段的值） ---------------- */
 
   const fieldPanel = createFieldPanel({
-    submit: (segs, next) => commitFieldEdit(segs, next),
+    submit: (segs, next, extra) =>
+      extra?.applyAll ? commitFieldReplaceAll(segs, extra.from, next) : commitFieldEdit(segs, next),
     notify: (message) => banner.show(message, undefined),
   });
   rootEl.appendChild(fieldPanel.root);
@@ -1201,6 +1209,69 @@ export function main(): void {
     void showDetailForLine(line);
     scheduleBadLinesRefresh();
     return { ok: true };
+  }
+
+  /**
+   * 批量字段级替换：先横幅二次确认，再走 `REPLACE_FIELD`。
+   *
+   * 与整行批量替换**同一套交互**（确认 → 进度 → 取消 → 结果）—— 同类危险操作的交互
+   * 必须长一个样，用户学一次就会用。差别只在确认文案说的是「该路径下值相同的字段」。
+   *
+   * 注意浮层在批量提交时已自行关闭（为确认横幅让路），故结果只能走横幅反馈。
+   */
+  function commitFieldReplaceAll(
+    segs: readonly PathSeg[],
+    from: unknown,
+    to: unknown
+  ): Promise<{ ok: boolean; error?: string }> {
+    return new Promise((resolve) => {
+      const totalBytes = state.overview?.totalBytes ?? 0;
+      const pathText = pathToString([...segs]) || '$';
+      banner.show(fieldReplaceConfirmText(pathText, totalBytes), '确认替换', () => {
+        void (async () => {
+          try {
+            const { requestId, promise } = bus.request<ReplaceResultPayload>(
+              HostEndpoint.REPLACE_FIELD,
+              { path: toPathParts(segs), from, to },
+              { timeoutMs: RPC_HEAVY_TIMEOUT_MS }
+            );
+            // 记下 requestId：进度推送据此渲染横幅文字，取消据此发 CANCEL。
+            // 取消**只发 CANCEL、不 settle 本地 Promise** —— 要等宿主回执才能如实
+            // 说「文件未被修改」，与整行批量替换同一纪律。
+            activeFieldReplace = { requestId };
+            banner.show('正在替换…', '取消', () => {
+              bus.post(HostEndpoint.CANCEL, { requestId });
+            });
+            const res = await promise;
+            if (res?.cancelled) {
+              banner.show('已取消：文件未被修改。', undefined);
+              resolve({ ok: false, error: '已取消' });
+              return;
+            }
+            if (!res?.ok) {
+              banner.show(res?.error ?? '批量替换失败', undefined);
+              resolve({ ok: false, error: res?.error ?? '批量替换失败' });
+              return;
+            }
+            // 改动可能散落全文件，无法逐行失效 —— 整体清空缓存并按需重拉。
+            state.cache.clear();
+            state.maxLoaded = 0;
+            list.refresh();
+            updateToolbar();
+            scheduleBadLinesRefresh();
+            if (state.selectedLine !== undefined) void showDetailForLine(state.selectedLine);
+            banner.show(describeReplaceOutcome(res), undefined);
+            resolve({ ok: true });
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            banner.show(msg, undefined);
+            resolve({ ok: false, error: msg });
+          } finally {
+            activeFieldReplace = null;
+          }
+        })();
+      });
+    });
   }
 
   /* ---------------- 详情面板：按需请求完整 JSON ---------------- */

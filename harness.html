@@ -75,6 +75,9 @@
  * → 点它打开浮层改这一个字段的值。保存后只替换原文里那一段字节（键序与空白原样保留），
  * 再走整行编辑落盘。字符串/数字用输入框、布尔用两个按钮、null 与容器不给入口
  * （后者请用工具栏的整行编辑）。harness 的 readRecord 回传了 rawText，故这条路可直接验。
+ * 勾选「同时更新其他行中此路径下值相同的字段」再保存 → 浮层先关闭、底部横幅二次确认
+ * → 确认后走批量字段级替换（4 拍进度可取消）：只有该路径下**值相同**的字段被改，
+ * 其他字段里恰好含相同文本的地方不受波及。
  *
  * 注：totalBytes 乘了 BYTES_SCALE（默认 2000），以便在小样例上也能验证「大 cost
  * 编辑」的提示；真实宿主的 totalBytes 是磁盘真实字节数。
@@ -136,6 +139,16 @@ const cancelledRequests = new Set();
  * 故 recordHistory（写操作的统一收口）里会重置它。
  */
 let badLinesComplete = false;
+
+/** JSON 值深度相等（对象比较键集合与各键的值，键序无关；1 与 1.0 相等）。 */
+function jsonEquals(a, b) {
+  if (a === b) return true;
+  if (a === null || b === null || typeof a !== 'object' || typeof b !== 'object') return false;
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  const ka = Object.keys(a), kb = Object.keys(b);
+  if (ka.length !== kb.length) return false;
+  return ka.every((k) => k in b && jsonEquals(a[k], b[k]));
+}
 
 /** 当前行数组里的坏行（无法解析为 JSON 的行，含空行）。 */
 function computeBadLines() {
@@ -502,6 +515,74 @@ async function handleHostRequest(msg) {
         movedBytes: 0,
         costMs: 1,
         beforeText: removed,
+      });
+      return;
+    }
+    case 'replaceField': {
+      // 演示简化：解析整行后沿路径取值/赋值再序列化重建。真实实现是 core/jsonSpan 的
+      // 字节级外科替换（键序与空白逐字节保留）—— 正确性由单测保证，这里只演示交互流：
+      // 勾选「应用到全部」→ 横幅二次确认 → 4 拍进度（可取消）→ 结果如实统计。
+      const path = Array.isArray(msg.path) ? msg.path : [];
+      const from = msg.from;
+      const to = msg.to;
+      const arr = ensureLines();
+      const totalNow = totalBytesNow();
+      let changed = 0, skippedInvalid = 0, unchanged = 0, delta = 0;
+      const changes = [];
+      for (let i = 0; i < arr.length; i++) {
+        if (cancelledRequests.has(msg.requestId)) {
+          cancelledRequests.delete(msg.requestId);
+          reply('replaceFieldResult', msg.requestId, {
+            ok: false, cancelled: true, replaced: 0, skippedInvalid: 0, unchanged: 0,
+            total: arr.length, bytesDelta: 0, costMs: 0, undoable: false, error: '已取消',
+          });
+          return;
+        }
+        push('editProgress', {
+          kind: 'replaceField',
+          processedBytes: Math.floor((totalNow * i) / arr.length),
+          totalBytes: totalNow,
+        });
+        await sleep(60); // 模拟扫描耗时：让进度可见、取消可点
+        let obj;
+        try { obj = JSON.parse(arr[i]); } catch { skippedInvalid++; continue; }
+        let cur = obj;
+        let okPath = true;
+        for (const seg of path) {
+          if (cur === null || typeof cur !== 'object') { okPath = false; break; }
+          cur = cur[seg];
+        }
+        if (!okPath || cur === undefined) { unchanged++; continue; }
+        if (!jsonEquals(cur, from)) { unchanged++; continue; }
+        let target = obj;
+        for (let d = 0; d < path.length - 1; d++) target = target[path[d]];
+        target[path[path.length - 1]] = to;
+        const before = arr[i];
+        const after = JSON.stringify(obj);
+        delta += byteLen(after) - byteLen(before);
+        arr[i] = after;
+        changes.push({ line: i, before, after });
+        changed++;
+      }
+      push('editProgress', { kind: 'replaceField', processedBytes: totalNow, totalBytes: totalNow });
+      if (changed === 0) {
+        reply('replaceFieldResult', msg.requestId, {
+          ok: true, replaced: 0, skippedInvalid, unchanged, total: arr.length, bytesDelta: 0, costMs: 0, undoable: false,
+        });
+        return;
+      }
+      recordHistory('批量字段替换');
+      const undoable = changed <= 2000;
+      reply('replaceFieldResult', msg.requestId, {
+        ok: true,
+        replaced: changed,
+        skippedInvalid,
+        unchanged,
+        total: arr.length,
+        bytesDelta: delta * BYTES_SCALE,
+        costMs: 2,
+        changes: undoable ? changes : undefined,
+        undoable,
       });
       return;
     }

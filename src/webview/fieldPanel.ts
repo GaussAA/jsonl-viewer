@@ -28,9 +28,24 @@ import {
 } from './editLogic.ts';
 import { jsonKindOf, pathToString, type PathSeg } from './detailLogic.ts';
 
+/** 批量模式的附加参数（勾选「应用到全部」时携带）。 */
+export interface FieldSubmitExtra {
+  /** 是否把这次改动应用到其他行中相同路径、相同值的字段。 */
+  applyAll: boolean;
+  /** 浮层打开时的原值 —— 批量模式的匹配基准。 */
+  from: unknown;
+}
+
 export interface FieldPanelDeps {
-  /** 提交新值。装配层负责定位原文、外科式替换、走整行编辑链路。 */
-  submit(segs: readonly PathSeg[], next: unknown): Promise<{ ok: boolean; error?: string }>;
+  /**
+   * 提交新值。装配层负责定位原文、外科式替换、走整行编辑链路；
+   * `extra.applyAll` 为真时改走批量字段级替换（装配层自行做二次确认）。
+   */
+  submit(
+    segs: readonly PathSeg[],
+    next: unknown,
+    extra?: FieldSubmitExtra
+  ): Promise<{ ok: boolean; error?: string }>;
   /** 提示成功（失败由浮层内部显示，不弹提示 —— 用户就在浮层里，看得见）。 */
   notify(message: string): void;
 }
@@ -58,6 +73,8 @@ export function createFieldPanel(deps: FieldPanelDeps): FieldPanelController {
   let busy = false;
   let closeTimer: ReturnType<typeof setTimeout> | undefined;
   let currentSegs: readonly PathSeg[] = [];
+  /** 浮层打开时的原值（勾选「应用到全部」时作为批量匹配基准上交）。 */
+  let openedValue: unknown = undefined;
 
   const backdrop = document.createElement('div');
   backdrop.className = 'jlv-field-backdrop';
@@ -94,11 +111,22 @@ export function createFieldPanel(deps: FieldPanelDeps): FieldPanelController {
   const body = document.createElement('div');
   body.className = 'jlv-field-body';
 
+  /* 「应用到全部」：默认不勾 —— 单行改值是高频操作，批量是低频的重操作，
+   * 默认值必须偏向轻的那边；批量还有二次确认横幅兜底，双保险各管一道。 */
+  const applyAllCheck = document.createElement('input');
+  applyAllCheck.type = 'checkbox';
+  const applyAllText = document.createElement('span');
+  applyAllText.textContent = '同时更新其他行中此路径下值相同的字段';
+  const applyAllRow = document.createElement('label');
+  applyAllRow.className = 'jlv-field-applyall';
+  applyAllRow.append(applyAllCheck, applyAllText);
+  applyAllRow.title = '批量按「路径 + 当前值」精确匹配后替换；其他字段里的相同文本不受影响';
+
   const errorEl = document.createElement('div');
   errorEl.className = 'jlv-field-error';
   errorEl.hidden = true;
 
-  panel.append(head, meta, body, errorEl);
+  panel.append(head, meta, body, applyAllRow, errorEl);
   backdrop.append(panel);
 
   /* ---------------- 内部工具 ---------------- */
@@ -117,22 +145,36 @@ export function createFieldPanel(deps: FieldPanelDeps): FieldPanelController {
    * 提交新值。
    *
    * 失败时**保持浮层打开**并显示原因（用户就在浮层里，关掉再重开只会丢输入）。
+   * 批量标志在提交瞬间从复选框读取 —— 各保存入口（文本保存按钮 / Enter / 布尔按钮）
+   * 都不必自己关心它。
    */
   async function save(next: unknown): Promise<void> {
     if (busy) return;
+    const applyAll = applyAllCheck.checked;
+    // 批量模式**先关浮层**：确认横幅（z-index 30）低于浮层（85），留着浮层会把确认
+    // 挡在后面；且确认动作本就发生在浮层之外 —— 与整行批量替换是同一个交互位形，
+    // 同类危险操作必须长得一样。代价是确认取消后浮层已关，但重新操作的成本很低。
+    if (applyAll) close();
     busy = true;
     clearError();
     setControlsEnabled(false);
     try {
-      const res = await deps.submit(currentSegs, next);
+      const res = await deps.submit(currentSegs, next, { applyAll, from: openedValue });
       if (res.ok) {
-        deps.notify(`已更新 ${pathToString([...currentSegs]) || '$'}`);
+        // 批量结果由装配层以横幅给出（含替换行数等统计）；浮层若再报「已更新 X」
+        // 会把它**盖掉** —— 用户看到的最后一条信息必须是最完整的那个。
+        if (!applyAll) deps.notify(`已更新 ${pathToString([...currentSegs]) || '$'}`);
         close();
+      } else if (applyAll) {
+        // 浮层已为确认横幅让路，错误只能走横幅 —— 写进浮层没人看得见。
+        deps.notify(res.error ?? '批量替换失败');
       } else {
         showError(res.error ?? '保存失败');
       }
     } catch (e) {
-      showError(e instanceof Error ? e.message : String(e));
+      const msg = e instanceof Error ? e.message : String(e);
+      if (applyAll) deps.notify(msg);
+      else showError(msg);
     } finally {
       busy = false;
       setControlsEnabled(true);
@@ -262,6 +304,8 @@ export function createFieldPanel(deps: FieldPanelDeps): FieldPanelController {
       return;
     }
     currentSegs = segs;
+    openedValue = value;
+    applyAllCheck.checked = false; // 每次打开都从「只改这一个」开始 —— 批量必须显式选择
     title.textContent = `编辑 ${pathToString([...segs]) || '$'}`;
     meta.textContent = `原值 ${preview(value)}（${kind}）`;
     buildBody(kind, initialFieldText(value));

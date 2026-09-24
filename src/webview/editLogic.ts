@@ -260,3 +260,24 @@ export function parseFieldInput(
   if (!JSON_NUMBER_RE.test(t)) return { ok: false, error: `「${t}」不是合法的 JSON 数字。` };
   return { ok: true, value: Number(t) };
 }
+
+/**
+ * 「应用到全部」的二次确认文案（批量字段级替换）。
+ *
+ * 与整行替换共用同一成本模型：字段级批量同样要**重写整个文件**，代价与命中行数无关。
+ * 文案里必须说明这一点 —— 用户知道代价来自「整个文件重写」，才不会以为是实现缺陷。
+ */
+export function fieldReplaceConfirmText(
+  pathText: string,
+  totalBytes: number,
+  threshold: number = EDIT_COST_WARN_BYTES
+): string {
+  const head = `确定把所有行中「${pathText}」下与当前值相同的字段替换为新值？`;
+  const cost = estimateBatchCost(totalBytes);
+  if (cost.bytes <= threshold) return `${head}该操作会立即写入磁盘。`;
+  return (
+    `${head}这需要重写整个 ${formatBytes(cost.bytes)} 文件` +
+    `（批量替换的代价与命中行数无关，恒为文件大小），预计${formatDuration(cost.etaMs)}，` +
+    `过程中可取消，取消后文件保持原样。`
+  );
+}
