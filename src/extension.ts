@@ -496,6 +496,28 @@ function registerHostHandlers(deps: HostHandlerDeps): vscode.Disposable {
               if (result.ok && reportEdit) reportEdit(data);
               return okReply(HostReply.REPLACE_RESULT, req.requestId, result);
             },
+            // 批量字段级替换（M3 收尾）：按「路径 + 旧值」精确匹配结构化语义，
+            // 正文里恰好含相同文本的字段不受波及 —— 这是它相对整行替换的存在意义。
+            [HostEndpoint.REPLACE_FIELD]: async (req) => {
+              const result = await (async () => {
+                try {
+                  return await data.replaceField(req.path, req.from, req.to, {
+                    // 扫描与重写两阶段共用此进度通道，前端按 kind 区分文案。
+                    onProgress: (info) =>
+                      post({
+                        type: HostReply.EDIT_PROGRESS,
+                        payload: { kind: 'replaceField', ...info },
+                      }),
+                    shouldCancel: () => cancel.has(req.requestId),
+                  });
+                } finally {
+                  // 与 REPLACE_TEXT 同理：摘除标记，否则 cancel 集合无界增长。
+                  cancel.delete(req.requestId);
+                }
+              })();
+              if (result.ok && reportEdit) reportEdit(data);
+              return okReply(HostReply.REPLACE_FIELD_RESULT, req.requestId, result);
+            },
             // 批量删除多行（编辑能力 M2）：相邻行合并成连续区间后一次原子重写；
             // 回传的区间同时用于撤销（与删除共用同一组偏移）。
             [HostEndpoint.DELETE_RECORDS]: async (req) => {

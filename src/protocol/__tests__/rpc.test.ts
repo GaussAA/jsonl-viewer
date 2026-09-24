@@ -85,6 +85,17 @@ const baseHandlers: HostHandlerMap = {
       costMs: 0,
       undoable: false,
     }),
+  [HostEndpoint.REPLACE_FIELD]: (r) =>
+    okReply(HostReply.REPLACE_FIELD_RESULT, r.requestId, {
+      ok: true,
+      replaced: 0,
+      skippedInvalid: 0,
+      unchanged: 0,
+      total: 0,
+      bytesDelta: 0,
+      costMs: 0,
+      undoable: false,
+    }),
   [HostEndpoint.DELETE_RECORDS]: (r) =>
     okReply(HostReply.DELETE_MANY_RESULT, r.requestId, {
       ok: true,

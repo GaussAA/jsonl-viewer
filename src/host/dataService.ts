@@ -33,6 +33,7 @@ import {
 } from './fileWriter.ts';
 import type { ByteEdit, LineEnding } from './fileWriter.ts';
 import { planLineReplace } from '../core/replaceLogic.ts';
+import { jsonValueEquals, locateValue, replaceValueAtPath } from '../core/jsonSpan.ts';
 import type { FieldCondition } from '../core/query.ts';
 import type { FilterLinesResult, SearchLinesResult } from './searchEngine.ts';
 import {
@@ -993,6 +994,117 @@ export class DataService {
       unchanged,
       opts
     );
+  }
+
+  /**
+   * 批量字段级替换（M3 收尾）：把所有行中「指定路径下的值恰好等于 `from`」的字段改成 `to`。
+   *
+   * 与 `replaceText` 的本质区别：匹配的是**该路径下的值**（结构化语义），而非行内文本。
+   * 把每行的 `status: "pending"` 改成 `"done"` 时，正文里恰好含 "pending" 字样的字段
+   * 不应被波及 —— 这正是本能力相对整行替换的存在意义。
+   *
+   * 落盘复用 `applyLineTexts`：冲突检测、批量原子重写、撤销栈都在那里，复制必漂移。
+   * 本方法只负责「规划」—— 找出哪些行该变成什么样。规划阶段（全文件逐行定位）是耗时
+   * 主体，进度与取消由这里自管；写入阶段的重写进度由 `applyEdits` 继续接管，两种进度
+   * 共用同一个 `onProgress` 通道，前端横幅表现为「扫描 → 重写」连续推进。
+   */
+  async replaceField(
+    path: readonly (string | number)[],
+    from: unknown,
+    to: unknown,
+    opts: ReplaceOpts = {}
+  ): Promise<ReplaceResultPayload> {
+    if (!Array.isArray(path) || path.length === 0) {
+      return DataService.replaceFailure('字段路径不能为空（改整行请用批量替换）。');
+    }
+    // from/to 必须是合法 JSON 值。`JSON.stringify(undefined)` 返回 undefined 而**不抛错**，
+    // 故 undefined 须显式拒绝 —— 否则一个来自上游 bug 的 undefined 会变成「永远匹配不到」，
+    // 用户看到的是一次安静的无操作，而不是一声报错。
+    if (from === undefined || to === undefined) {
+      return DataService.replaceFailure('匹配值或新值不能为 undefined。');
+    }
+    try {
+      JSON.stringify(from);
+      JSON.stringify(to);
+    } catch {
+      return DataService.replaceFailure('匹配值或新值无法序列化为 JSON。');
+    }
+
+    const li = await this.ensureIndex();
+    const reader = this.reader!;
+
+    const conflict = await this.detectWriteConflict(-1);
+    if (conflict) {
+      return DataService.replaceFailure(conflict.error ?? '文件已被外部修改', { conflict: true });
+    }
+
+    const report = throttleProgress(opts.onProgress);
+    const entries: { line: number; text: string }[] = [];
+    let skippedInvalid = 0;
+    let unchanged = 0;
+    const total = li.totalLines;
+    const totalBytes = li.totalBytes;
+
+    for await (const r of li.scan(reader, 0, total)) {
+      // 进度按字节报（与其它长任务同一分母），节流由 helper 管。
+      report?.({ processedBytes: r.end, totalBytes });
+      if (opts.shouldCancel?.()) {
+        // 扫描是纯读 —— 中止时磁盘未被触碰，与「写入前取消」同等零风险。
+        return { ...DataService.replaceFailure('已取消'), cancelled: true };
+      }
+      // 超长行无法安全取出与改回，计入跳过而非静默略过（与 replaceText 同一口径）。
+      if (r.error) {
+        skippedInvalid++;
+        continue;
+      }
+      const raw = r.bytes.toString('utf8');
+      // scan 本身不做 JSON 校验（r.error 只标记超长行），非法行在这里判定 ——
+      // 与 replaceText 的「替换后非法才跳过」不同：本操作的**原文**就必须合法，
+      // 否则无法定位字段（也无法保证改完仍是合法 JSONL）。
+      if (!parseJsonLine(raw).ok) {
+        skippedInvalid++;
+        continue;
+      }
+      const span = locateValue(raw, path);
+      if (!span) {
+        // 路径在该行不存在：该行本就不在本次改动的目标范围内，计入 unchanged。
+        unchanged++;
+        continue;
+      }
+      let current: unknown;
+      try {
+        current = JSON.parse(raw.slice(span.start, span.end));
+      } catch {
+        // locateValue 已保证区间是完整合法的 JSON token，此处只是纵深防御。
+        skippedInvalid++;
+        continue;
+      }
+      if (!jsonValueEquals(current, from)) {
+        unchanged++;
+        continue;
+      }
+      const replaced = replaceValueAtPath(raw, path, to);
+      if (!replaced.ok) {
+        unchanged++;
+        continue;
+      }
+      entries.push({ line: r.line, text: replaced.text });
+    }
+    report?.({ processedBytes: totalBytes, totalBytes }); // 终态必发：停在 96% 比没有进度条更糟
+
+    if (entries.length === 0) {
+      return DataService.replaceOk(0, skippedInvalid, unchanged, total, 0, false);
+    }
+    const res = await this.applyLineTexts(entries, opts);
+    // 扫描阶段的统计（跳过 / 未匹配）与写入结果合并 —— 缺了任何一半，数字都是错的。
+    return res.ok
+      ? {
+          ...res,
+          skippedInvalid: res.skippedInvalid + skippedInvalid,
+          unchanged: res.unchanged + unchanged,
+          total,
+        }
+      : res;
   }
 
   /* ---------------------- 会话编辑历史 ---------------------- */

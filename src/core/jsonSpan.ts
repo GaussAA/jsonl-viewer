@@ -236,6 +236,30 @@ class JsonScanner {
 }
 
 /**
+ * JSON 值的深度相等比较。
+ *
+ * 用于批量字段级替换的「旧值匹配」：判断某行指定路径下的当前值是否等于用户给的
+ * `from`。对象比较键集合与各键的值（**键序无关**——语义相等不要求书写顺序一致）；
+ * 数字按 JS 语义比较（`1` 与 `1.0` 解析后是同一个数，视为相等）。
+ */
+export function jsonValueEquals(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (a === null || b === null || typeof a !== 'object' || typeof b !== 'object') return false;
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  if (Array.isArray(a) && Array.isArray(b)) {
+    return a.length === b.length && a.every((v, i) => jsonValueEquals(v, b[i]));
+  }
+  const ka = Object.keys(a as object);
+  const kb = Object.keys(b as object);
+  if (ka.length !== kb.length) return false;
+  return ka.every(
+    (k) =>
+      Object.prototype.hasOwnProperty.call(b, k) &&
+      jsonValueEquals((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k])
+  );
+}
+
+/**
  * 在 `text` 中定位 `path` 所指的值区间。
  *
  * 返回 `undefined` 表示：文本不是合法 JSON、路径在该值中不存在、或路径类型不符

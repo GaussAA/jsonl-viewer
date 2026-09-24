@@ -1786,3 +1786,206 @@ test('editRecord：等长替换不轮询取消（无搬移即无取消可言）'
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+/* ====================== 批量字段级替换（M3 收尾） ====================== */
+
+test('replaceField：按路径 + 旧值精确匹配，正文里的相同文本不受波及', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    // note 里恰好含 "pending" 字样 —— 整行文本替换会误伤它，字段级替换不该动它。
+    const file = await makeFile(dir, [
+      '{"status":"pending","note":"pending here"}',
+      '{"status":"done"}',
+      '{"status":"pending"}',
+    ]);
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    const res = await ds.replaceField(['status'], 'pending', 'done');
+    assert.equal(res.ok, true);
+    assert.equal(res.replaced, 2);
+    assert.equal(res.total, 3, 'total 是全文件行数（含路径不存在的行）');
+    assert.equal(res.unchanged, 1, '第 2 行 status 已是 done，计入未变化');
+
+    assert.equal(
+      await readFile(file, 'utf8'),
+      '{"status":"done","note":"pending here"}\n{"status":"done"}\n{"status":"done"}\n',
+      '只有 status 变了 —— note 里的 "pending" 原样保留'
+    );
+
+    // 索引增量更新后每一行仍能被正确读回
+    assert.deepEqual((await ds.readRecord(0)).value, { status: 'done', note: 'pending here' });
+    assert.equal((await ds.checkStale())?.changed, false, '替换不得被误报为外部变更');
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('replaceField：嵌套路径与数组下标', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const file = await makeFile(dir, [
+      '{"user":{"tags":["a","b"]}}',
+      '{"user":{"tags":["a","c"]}}',
+    ]);
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    const res = await ds.replaceField(['user', 'tags', 1], 'b', 'B');
+    assert.equal(res.ok, true);
+    assert.equal(res.replaced, 1);
+    assert.equal(
+      await readFile(file, 'utf8'),
+      '{"user":{"tags":["a","B"]}}\n{"user":{"tags":["a","c"]}}\n'
+    );
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('replaceField：类型必须一致（数字 1 不匹配字符串 "1"），但 1 与 1.0 相等', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const file = await makeFile(dir, ['{"n":1}', '{"n":"1"}', '{"n":1.0}']);
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    const res = await ds.replaceField(['n'], 1, 2);
+    assert.equal(res.ok, true);
+    assert.equal(res.replaced, 2, '第 1、3 行命中（1.0 解析后就是 1）；字符串 "1" 不匹配');
+    assert.equal(await readFile(file, 'utf8'), '{"n":2}\n{"n":"1"}\n{"n":2}\n');
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('replaceField：对象值匹配与键序无关（语义相等不要求书写顺序一致）', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const file = await makeFile(dir, ['{"cfg":{"b":2,"a":1}}', '{"cfg":{"a":1}}']);
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    const res = await ds.replaceField(['cfg'], { a: 1, b: 2 }, { a: 9, b: 8 });
+    assert.equal(res.ok, true);
+    assert.equal(res.replaced, 1, '只有键集合与值完全一致的第一行命中');
+    assert.equal(await readFile(file, 'utf8'), '{"cfg":{"a":9,"b":8}}\n{"cfg":{"a":1}}\n');
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('replaceField：允许换类型（数字 → 字符串）', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const file = await makeFile(dir, ['{"v":1}', '{"v":1}']);
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    const res = await ds.replaceField(['v'], 1, 'one');
+    assert.equal(res.ok, true);
+    assert.equal(await readFile(file, 'utf8'), '{"v":"one"}\n{"v":"one"}\n');
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('replaceField：无命中 / 空路径 / undefined 值 —— 失败路径都不得改动文件', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const file = await makeFile(dir, ['{"a":1}', '{"b":2}']);
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    const miss = await ds.replaceField(['zzz'], 1, 2);
+    assert.equal(miss.ok, true);
+    assert.equal(miss.replaced, 0);
+    assert.equal(miss.total, 2);
+
+    const emptyPath = await ds.replaceField([], 1, 2);
+    assert.equal(emptyPath.ok, false);
+    assert.match(emptyPath.error ?? '', /路径不能为空/);
+
+    const undef = await ds.replaceField(['a'], undefined, 2);
+    assert.equal(undef.ok, false, 'undefined 不是合法 JSON 值，须显式拒绝');
+
+    assert.equal(await readFile(file, 'utf8'), '{"a":1}\n{"b":2}\n');
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('replaceField：扫描阶段取消 —— 文件未被触碰且如实标记 cancelled', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const file = await makeFile(dir, ['{"status":"pending"}', '{"status":"pending"}']);
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    const res = await ds.replaceField(['status'], 'pending', 'done', {
+      shouldCancel: () => true,
+    });
+    assert.equal(res.ok, false);
+    assert.equal(res.cancelled, true);
+    assert.equal(
+      await readFile(file, 'utf8'),
+      '{"status":"pending"}\n{"status":"pending"}\n',
+      '扫描是纯读，取消后磁盘未被触碰'
+    );
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('replaceField：进度终态必发（扫描 + 写入两阶段共用同一通道）', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const lines = Array.from(
+      { length: 50 },
+      (_, i) => '{"i":' + i + ',"flag":' + (i % 2 === 0) + '}'
+    );
+    const file = await makeFile(dir, lines);
+    const ds = makeService(file);
+    const ov = await ds.getOverview();
+
+    const seen: { processedBytes: number; totalBytes: number }[] = [];
+    const res = await ds.replaceField(['flag'], true, false, {
+      onProgress: (info) => seen.push({ ...info }),
+    });
+    assert.equal(res.ok, true);
+    assert.equal(res.replaced, 25);
+
+    assert.ok(seen.length > 0, '应有进度上报');
+    const last = seen[seen.length - 1];
+    assert.equal(last.processedBytes, last.totalBytes, '终态必须到达（否则进度条停在 96%）');
+    assert.equal(last.totalBytes, ov.totalBytes, '分母是文件总字节');
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('replaceField：非法 JSON 行计入 skippedInvalid 且其余行照常改', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const file = await makeFile(dir, ['{"status":"pending"}', 'not json', '{"status":"pending"}']);
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    const res = await ds.replaceField(['status'], 'pending', 'done');
+    assert.equal(res.ok, true);
+    assert.equal(res.replaced, 2);
+    assert.equal(res.skippedInvalid, 1, '非法行如实统计，不得静默略过');
+    assert.equal(await readFile(file, 'utf8'), '{"status":"done"}\nnot json\n{"status":"done"}\n');
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

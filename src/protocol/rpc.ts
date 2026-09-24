@@ -42,6 +42,13 @@ export const HostEndpoint = {
   DELETE_RECORD: 'deleteRecord',
   /** 全文查找替换（编辑能力 M2；批量改写命中行，走「重写 + 原子替换」）。 */
   REPLACE_TEXT: 'replaceText',
+  /**
+   * 批量字段级替换（M3 收尾）：把所有行中「指定路径下的值恰好等于 from」的字段改成 to。
+   *
+   * 与 REPLACE_TEXT 的本质区别：匹配的是**该路径下的值**（结构化语义），而非行内文本 ——
+   * 其他字段里恰好含相同文本的地方不受影响。这正是它存在的意义。
+   */
+  REPLACE_FIELD: 'replaceField',
   /** 批量删除多行（编辑能力 M2；相邻行会合并成连续区间后一次原子重写）。 */
   DELETE_RECORDS: 'deleteRecords',
   /** 读取多行原文并复制到剪贴板（剪贴板由宿主侧写入，比 webview 的 clipboard 可靠）。 */
@@ -91,6 +98,8 @@ export const HostReply = {
   DOCUMENT_RESET: 'documentReset',
   /** 查找替换结果（成功与业务失败均走此回执）。 */
   REPLACE_RESULT: 'replaceResult',
+  /** 批量字段级替换结果（与 REPLACE_RESULT 同构，复用同一 payload 形状）。 */
+  REPLACE_FIELD_RESULT: 'replaceFieldResult',
   /** 批量删除结果（成功与业务失败均走此回执）。 */
   DELETE_MANY_RESULT: 'deleteManyResult',
   /** 批量复制结果（是否截断必须如实回报）。 */
@@ -368,7 +377,7 @@ export interface EditProgressPayload {
    * 之所以复用同一个推送通道：它表达的本就是「长任务的字节级进度」，
    * 与任务语义无关；新增一种长任务时不该再造一条推送链路。
    */
-  kind: 'replace' | 'scanBadLines' | 'edit';
+  kind: 'replace' | 'scanBadLines' | 'edit' | 'replaceField';
   /** 已处理的原始文件字节数（批量替换时不含被替换区间，它们无需逐字节复制）。 */
   processedBytes: number;
   /** 原始文件总字节数（进度分母）。 */
@@ -481,6 +490,16 @@ export type HostRequest =
       caseInsensitive?: boolean;
     }
   | {
+      type: typeof HostEndpoint.REPLACE_FIELD;
+      requestId: string;
+      /** 字段路径（对象键为 string、数组下标为 number；不得为空 —— 空路径即整行替换，应走 REPLACE_TEXT）。 */
+      path: (string | number)[];
+      /** 匹配的旧值（与该路径下的当前值做**深度相等**比较；1 与 1.0 相等）。 */
+      from: unknown;
+      /** 替换为的新值（任意 JSON 值，可换类型）。 */
+      to: unknown;
+    }
+  | {
       type: typeof HostEndpoint.DELETE_RECORDS;
       requestId: string;
       /** 要删除的行号（0 基；可乱序、可含重复，宿主负责归一化与合并）。 */
@@ -519,6 +538,11 @@ export type HostResponse =
   | { type: typeof HostReply.EDIT_RESULT; requestId: string; payload: EditResultPayload }
   | { type: typeof HostReply.DOCUMENT_RESET; payload: DocumentResetPayload }
   | { type: typeof HostReply.REPLACE_RESULT; requestId: string; payload: ReplaceResultPayload }
+  | {
+      type: typeof HostReply.REPLACE_FIELD_RESULT;
+      requestId: string;
+      payload: ReplaceResultPayload;
+    }
   | { type: typeof HostReply.EDIT_PROGRESS; payload: EditProgressPayload }
   | {
       type: typeof HostReply.DELETE_MANY_RESULT;
@@ -641,6 +665,9 @@ export type HostHandlerMap = {
   ) => Promise<HostResponse> | HostResponse;
   [HostEndpoint.REPLACE_TEXT]: (
     req: Extract<HostRequest, { type: typeof HostEndpoint.REPLACE_TEXT }>
+  ) => Promise<HostResponse> | HostResponse;
+  [HostEndpoint.REPLACE_FIELD]: (
+    req: Extract<HostRequest, { type: typeof HostEndpoint.REPLACE_FIELD }>
   ) => Promise<HostResponse> | HostResponse;
   [HostEndpoint.DELETE_RECORDS]: (
     req: Extract<HostRequest, { type: typeof HostEndpoint.DELETE_RECORDS }>
