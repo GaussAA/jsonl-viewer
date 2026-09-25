@@ -1707,6 +1707,88 @@ describe('webviewEntry 装配层（集成）', () => {
       );
     });
 
+    it('整行编辑「格式化」= 单行规范化；粘贴多行再保存被拦（v1.8.0 事故防线）', async () => {
+      const { host, app } = await bootWithRecords();
+      // 原文刻意带多余空白：单行规范化的价值所在
+      const raw = '{ "name" : "bob" }';
+      replyDetail(host, { name: 'bob' }, raw, raw.length);
+      await sleep(20);
+
+      const editTool = Array.from(app.querySelectorAll('button')).find(
+        (b) => b.title === '编辑当前记录的 JSON'
+      );
+      assert.ok(editTool, '存在整行编辑按钮');
+      editTool!.click();
+      await sleep(60);
+
+      // 打开编辑会重新读取该行磁盘原文（不用缓存的值 —— 保证初始文本与磁盘一致）
+      const origReq = lastReq(host, HostEndpoint.READ_RECORD);
+      assert.ok(origReq, '打开编辑发起原文读取');
+      host.receive({
+        type: HostReply.RESULT,
+        requestId: origReq!.requestId,
+        payload: { ok: true, value: { name: 'bob' }, rawText: raw, rawBytes: raw.length },
+      });
+      await sleep(60);
+
+      const backdrop = app.querySelector<HTMLElement>('.jlv-edit-backdrop')!;
+      assert.ok(backdrop, '整行编辑浮层已打开');
+      const textarea = backdrop.querySelector<HTMLTextAreaElement>('.jlv-edit-input')!;
+      assert.strictEqual(textarea.value, raw, '初始文本为磁盘原文');
+
+      // 场景 A：点格式化 → 单行规范化（去多余空白），恒为单行 → 保存成功
+      const fmtBtn = Array.from(backdrop.querySelectorAll('button')).find(
+        (b) => b.textContent === '格式化'
+      );
+      assert.ok(fmtBtn, '存在格式化按钮');
+      fmtBtn!.click();
+      await sleep(20);
+      assert.strictEqual(
+        textarea.value,
+        '{"name":"bob"}',
+        '格式化 = 单行规范化；绝不产出多行（v1.8.0 事故根因已消除）'
+      );
+
+      const saveBtn = backdrop.querySelector<HTMLButtonElement>('.jlv-edit-primary')!;
+      saveBtn.click();
+      await sleep(40);
+
+      const edit = lastReq(host, HostEndpoint.EDIT_RECORD);
+      assert.ok(edit, '单行结果正常发起写入');
+      assert.strictEqual(edit!.text, '{"name":"bob"}');
+      host.receive({
+        type: HostReply.EDIT_RESULT,
+        requestId: edit!.requestId,
+        payload: { ok: true, line: 0, bytesDelta: -9, inPlace: false, movedBytes: 0, costMs: 1 },
+      });
+      await sleep(30);
+
+      // 场景 B：粘贴多行 pretty → 保存被单行约束拦下，绝不发起写入
+      editTool!.click();
+      await sleep(60);
+      const origReq2 = lastReq(host, HostEndpoint.READ_RECORD);
+      host.receive({
+        type: HostReply.RESULT,
+        requestId: origReq2!.requestId,
+        payload: { ok: true, value: { name: 'bob' }, rawText: '{"name":"bob"}', rawBytes: 14 },
+      });
+      await sleep(60);
+
+      const backdrop2 = app.querySelector<HTMLElement>('.jlv-edit-backdrop')!;
+      const ta2 = backdrop2.querySelector<HTMLTextAreaElement>('.jlv-edit-input')!;
+      // 模拟粘贴多行 pretty：整体是合法 JSON（旧门禁拦不住），但含物理换行
+      ta2.value = '{\n  "name": "bob"\n}';
+      backdrop2.querySelector<HTMLButtonElement>('.jlv-edit-primary')!.click();
+      await sleep(40);
+
+      assert.strictEqual(
+        reqs(host, HostEndpoint.EDIT_RECORD).length,
+        1,
+        'EDIT_RECORD 请求数应仍为格式化那一次 —— 多行结果被本地校验拦下，绝不发起写入'
+      );
+      assert.match(text(app.querySelector('.jlv-edit-error')), /必须单行/);
+    });
+
     it('勾选「应用到全部」→ 先关浮层 → 确认横幅 → REPLACE_FIELD（path/from/to 正确）', async () => {
       const { host, app } = await bootWithRecords();
       replyDetail(host, { status: 'pending' }, '{"status":"pending"}');

@@ -36,11 +36,24 @@ export type EditValidation = { ok: true; text: string } | { ok: false; error: st
  * 校验待提交的整行文本。
  *
  * - **保留原始内容**（不 trim、不重排）：用户输入的空白与键序都可能是有意为之；
- * - 但 `trim()` 后为空的视为空行 → 拒绝（JSONL 的空行是坏行，不该被写出来）。
+ * - 但 `trim()` 后为空的视为空行 → 拒绝（JSONL 的空行是坏行，不该被写出来）；
+ * - **含物理换行（\n / \r）→ 拒绝**：JSONL 每条记录必须单行。合法的 JSONL 行里，
+ *   字符串值内的换行必然已转义为 `\n` 字面量 —— 文本里出现物理换行只有一种解释：
+ *   被格式化/粘贴成了多行。多行文本整体是合法 JSON，所以**只靠 JSON.parse 拦不住
+ *   它**，必须显式检查（v1.8.0 实机事故的另一半根因：多行文本被写入后，从那一行起
+ *   整个文件的行号与内容全部错位）。
  */
 export function validateEditText(raw: string): EditValidation {
   if (raw.trim().length === 0) {
     return { ok: false, error: '内容为空：JSONL 不接受空行' };
+  }
+  if (/\r|\n/.test(raw)) {
+    return {
+      ok: false,
+      error:
+        'JSONL 每条记录必须单行：文本含换行（可能被格式化或粘贴成了多行）。' +
+        '请点「格式化」做单行规范化，或把记录并回一行后再保存。',
+    };
   }
   try {
     JSON.parse(raw);
@@ -51,14 +64,23 @@ export function validateEditText(raw: string): EditValidation {
 }
 
 /**
- * 格式化：`JSON.stringify` 重排为 2 空格缩进。
+ * 格式化：**单行规范化**（JSONL 语义下的「格式化」）。
  *
- * **仅在用户显式点击「格式化」时调用** —— 默认绝不擅自重排，因为重排会改变字节长度、
- * 放大变长编辑的搬移成本，也违背「保持原样」的编辑原则。解析失败返回 undefined。
+ * `JSON.stringify(value)`（无缩进参数）：去掉多余空白、规范转义风格，**保持键序与值
+ * 原样**，且产出恒为单行。
+ *
+ * **刻意不做 pretty-print**（多行缩进）：JSONL 的每条记录占一行，把一条记录展开成
+ * 多行再写回，物理行数就变了 —— 解析按物理行切，首行只剩 `{`，从那一行起整个文件
+ * 的行号与内容全部错位（v1.8.0 实机事故的根因）。pretty 输出属于「整份 JSON 文档」
+ * 的编辑器习惯，在「一行一记录」的文件里是错误语义。
+ *
+ * 仅在用户显式点击「格式化」时调用 —— 即便单行规范化也会改变字节长度（多余空白被
+ * 移除），放大变长编辑的搬移成本，同样违背「保持原样」的默认原则。解析失败返回
+ * undefined。
  */
 export function formatJsonText(raw: string): string | undefined {
   try {
-    return JSON.stringify(JSON.parse(raw), null, 2);
+    return JSON.stringify(JSON.parse(raw));
   } catch {
     return undefined;
   }

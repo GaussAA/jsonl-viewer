@@ -1992,6 +1992,66 @@ test('replaceField：非法 JSON 行计入 skippedInvalid 且其余行照常改'
 
 /* ====================== 写后验证（防御性收口） ====================== */
 
+test('editRecord：拒绝多行文本（JSONL 单行约束），文件保持原样', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const file = await makeFile(dir, ['{"a":1}', '{"b":2}']);
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    // pretty-print 后的多行文本：整体是合法 JSON（旧门禁拦不住），但写入会把
+    // 一条记录拆成多行 —— v1.8.0 实机「整个文件无法渲染」的根因。
+    const res = await ds.editRecord(0, '{\n  "a": 2\n}');
+    assert.equal(res.ok, false);
+    assert.match(res.error ?? '', /必须单行/);
+    assert.equal(await readFile(file, 'utf8'), '{"a":1}\n{"b":2}\n', '文件保持原样');
+
+    // CRLF 同样拒绝
+    const res2 = await ds.editRecord(0, '{"a":2}\r\n');
+    assert.equal(res2.ok, false);
+    assert.match(res2.error ?? '', /必须单行/);
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('insertRecord：拒绝多行文本（与 editRecord 同一口径）', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const file = await makeFile(dir, ['{"a":1}']);
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    const res = await ds.insertRecord(0, '{\n  "a": 2\n}');
+    assert.equal(res.ok, false);
+    assert.match(res.error ?? '', /必须单行/);
+    assert.equal(await readFile(file, 'utf8'), '{"a":1}\n');
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('replaceText：替换结果含换行的行被跳过并如实统计', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const file = await makeFile(dir, ['{"a":"x"}', '{"a":"x"}']);
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    // 替换片段含物理换行：结果会把记录拆成多行 → 按非法跳过
+    const res = await ds.replaceText('"x"', '"y\nz"');
+    assert.equal(res.ok, true);
+    assert.equal(res.replaced, 0);
+    assert.equal(res.skippedInvalid, 2, '两行都因「替换后含换行」被跳过');
+    assert.equal(await readFile(file, 'utf8'), '{"a":"x"}\n{"a":"x"}\n');
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('editRecord 写后验证：不误伤 —— 编辑紧邻坏行的上一行仍成功', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
   try {

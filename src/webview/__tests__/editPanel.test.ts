@@ -150,15 +150,17 @@ test('editPanel：Esc 关闭且不提交', () => {
   }
 });
 
-test('editPanel：格式化按钮重排文本；非法内容给出提示且不改动原文', () => {
+test('editPanel：格式化按钮做单行规范化（恒单行）；非法内容给出提示且不改动原文', () => {
   const { panel } = makePanel();
   try {
-    panel.open(0, '{"a":1}');
+    // 带多余空白的原文：格式化 = 单行规范化（去多余空白、保持键序）
+    panel.open(0, '{ "a" : 1 }');
     const input = q<HTMLTextAreaElement>(panel.root, '.jlv-edit-input');
     const fmt = q<HTMLButtonElement>(panel.root, '.jlv-edit-btn'); // 首个按钮即「格式化」
 
     fmt.click();
-    assert.equal(input.value, '{\n  "a": 1\n}');
+    assert.equal(input.value, '{"a":1}');
+    assert.ok(!/\r|\n/.test(input.value), 'JSONL 语境下格式化绝不产出多行');
 
     input.value = 'not json';
     fmt.click();

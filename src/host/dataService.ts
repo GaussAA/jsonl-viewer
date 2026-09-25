@@ -633,7 +633,19 @@ export class DataService {
       });
     }
 
-    // ④ JSON 校验
+    // ④ JSON 校验 + JSONL 单行约束
+    //    物理换行会把一条记录拆成多行：解析按物理行切，首行只剩 `{`，从那一行起
+    //    整个文件的行号与内容全部错位；且「行数不变」是索引增量更新的前提，被打破
+    //    的后果是全文件读取错位。合法 JSONL 行中字符串值的换行必然已转义为 \n 字面量
+    //    —— 见到物理换行只有 pretty-print 一种解释，必须当场拒绝。
+    //    （多行文本整体是合法 JSON，只靠 parseJsonLine 拦不住 —— v1.8.0 实机事故根因。）
+    if (/\r|\n/.test(text)) {
+      return DataService.editFailure(
+        line,
+        'JSONL 每条记录必须单行（文本含换行）。请把记录并回一行后再保存。',
+        { invalid: true }
+      );
+    }
     const parsed = parseJsonLine(text);
     if (!parsed.ok) {
       return DataService.editFailure(line, `JSON 校验未通过：${parsed.error}`, { invalid: true });
@@ -818,6 +830,15 @@ export class DataService {
     const conflict = await this.detectWriteConflict(at);
     if (conflict) return conflict;
 
+    // 与 editRecord 同一口径的 JSONL 单行约束：插入多行文本会把一条记录拆成多行，
+    // 破坏「一行一记录」与索引的行数假设。
+    if (/\r|\n/.test(text)) {
+      return DataService.editFailure(
+        at,
+        'JSONL 每条记录必须单行（文本含换行）。请把记录并回一行后再插入。',
+        { invalid: true }
+      );
+    }
     const parsed = parseJsonLine(text);
     if (!parsed.ok) {
       return DataService.editFailure(at, `JSON 校验未通过：${parsed.error}`, { invalid: true });
@@ -920,7 +941,9 @@ export class DataService {
     let skippedInvalid = 0;
     let unchanged = 0;
 
-    const validate = (t: string): boolean => parseJsonLine(t).ok;
+    // 替换后含物理换行 = 把一条记录拆成多行，与「JSONL 单行约束」同罪
+    //（统计上计入 invalid，与其他非法结果一致，不静默略过）。
+    const validate = (t: string): boolean => !/\r|\n/.test(t) && parseJsonLine(t).ok;
 
     for await (const r of li.scan(reader, first, last + 1)) {
       if (!hitSet.has(r.line)) continue;

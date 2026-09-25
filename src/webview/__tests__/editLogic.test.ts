@@ -64,11 +64,32 @@ test('validateEditText：空行 / 纯空白 / 非法 JSON 一律拒绝', () => {
 
 /* ---------------------------- 格式化 ---------------------------- */
 
-test('formatJsonText：合法则重排为 2 空格缩进，非法返回 undefined', () => {
-  assert.equal(formatJsonText('{"a":1}'), '{\n  "a": 1\n}');
-  assert.equal(formatJsonText('[1,2]'), '[\n  1,\n  2\n]');
+test('formatJsonText：单行规范化 —— 去多余空白、规范转义、保持键序，恒为单行', () => {
+  // JSONL 语境下「格式化」= 单行规范化：多行 pretty 输出会把一条记录拆成多行，
+  // 从那一行起整个文件错位（v1.8.0 实机事故根因），故语义从 pretty 改为 compact。
+  assert.equal(formatJsonText('{ "a" : 1, "b" : [ 1 , 2 ] }'), '{"a":1,"b":[1,2]}');
+  assert.equal(formatJsonText('{"a":1}'), '{"a":1}', '已规范的行原样保留');
+  assert.equal(formatJsonText('[1,2]'), '[1,2]');
+  // 键序保持：规范化不是重排
+  assert.equal(formatJsonText('{"b":2,"a":1}'), '{"b":2,"a":1}');
+  // 恒为单行：结果里不得含物理换行
+  assert.ok(!/\r|\n/.test(formatJsonText('{"a":"x"}') ?? ''));
   assert.equal(formatJsonText('{"a":1,,}'), undefined);
   assert.equal(formatJsonText(''), undefined);
+});
+
+test('validateEditText：拒绝物理换行 —— 多行 pretty 或粘贴的多行记录', () => {
+  // 多行 pretty：整体是合法 JSON，JSON.parse 拦不住，必须显式检查
+  const pretty = validateEditText('{\n  "a": 1\n}');
+  assert.equal(pretty.ok, false);
+  if (pretty.ok === false) assert.match(pretty.error, /必须单行/);
+
+  const crlf = validateEditText('{"a":1}\r\n');
+  assert.equal(crlf.ok, false, 'CRLF 同样拒绝');
+
+  // 字符串值内的 \n 转义是字面两字符，不是物理换行 —— 合法
+  const escaped = validateEditText('{"a":"line1\\nline2"}');
+  assert.equal(escaped.ok, true);
 });
 
 /* ---------------------------- 文案 ---------------------------- */
