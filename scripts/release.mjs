@@ -22,7 +22,26 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
-const sh = (cmd) => execSync(cmd, { cwd: root, stdio: 'inherit' });
+/**
+ * 带重试的命令执行。
+ *
+ * Windows 下偶发 `spawnSync cmd.exe EBUSY`（杀软/索引服务恰好占用刚生成的产物或
+ * cmd.exe 本身）—— 三次发布有两次因此死在最后一步，产物完整却缺 tag，只能手工续尾。
+ * 短暂等待后重试即可自愈；非 EBUSY 错误照常抛出。
+ */
+const execWithRetry = (cmd, opts) => {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return execSync(cmd, { cwd: root, ...opts });
+    } catch (e) {
+      if (attempt >= 3 || !String(e?.message ?? '').includes('EBUSY')) throw e;
+      console.warn(`[release] 命令被占用（EBUSY），1 秒后重试（${attempt}/2）…`);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000);
+    }
+  }
+};
+const sh = (cmd) => execWithRetry(cmd, { stdio: 'inherit' });
+const shOut = (cmd) => execWithRetry(cmd, { encoding: 'utf8' });
 const rel = join(root, 'releases');
 
 const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
@@ -55,7 +74,7 @@ writeFileSync(join(rel, 'LATEST'), `${version}\n`);
 console.log(`[release] SHA-256 = ${sha}`);
 console.log(`[release] LATEST  -> ${version}`);
 
-const dirty = execSync('git status --porcelain', { cwd: root, encoding: 'utf8' }).trim();
+const dirty = shOut('git status --porcelain').trim();
 if (dirty) {
   console.warn(
     '[release] 提示：工作区有未提交改动，建议先 commit 再继续，否则 tag 不会指向本次代码。'
@@ -66,12 +85,12 @@ const tag = `v${version}`;
 let tagSha = '';
 try {
   // rev-parse 对不存在的 tag 返回非零退出码（execSync 会抛），用 try 容错表示「tag 不存在」。
-  tagSha = execSync(`git rev-parse -q --verify ${tag}`, { cwd: root, encoding: 'utf8' }).trim();
+  tagSha = shOut(`git rev-parse -q --verify ${tag}`).trim();
 } catch {
   tagSha = '';
 }
 if (tagSha) {
-  const head = execSync('git rev-parse HEAD', { cwd: root, encoding: 'utf8' }).trim();
+  const head = shOut('git rev-parse HEAD').trim();
   if (tagSha !== head) {
     console.error(`[release] 错误：tag ${tag} 已存在但指向 ${tagSha}，而非当前 HEAD ${head}。`);
     console.error('[release] 请先提交本次代码并重跑，或手动删除/更新该 tag 后再发布。');
