@@ -603,16 +603,26 @@ export class DataService {
     const conflict = await this.detectWriteConflict(line);
     if (conflict) return conflict;
 
-    // ② 定位该行区间、旧内容长度与旧文本（旧文本供撤销/重做使用）
+    // ② 定位该行区间、旧内容长度与旧文本（旧文本供撤销/重做使用）。
+    //    顺带探明**紧邻下一行**编辑前的合法性：写后验证要区分「下一行原本就是坏行」
+    //    与「本次写入把它弄坏了」—— 后者必须回滚，前者绝不能误报。
     let range: { start: number; end: number } | undefined;
     let oldContentBytes = 0;
     let beforeText = '';
-    for await (const r of li.scan(reader, line, line + 1)) {
-      if (r.error) return DataService.editFailure(line, `该行过大，暂不支持编辑：${r.error}`);
-      range = { start: r.start, end: r.end };
-      oldContentBytes = r.bytes.length;
-      beforeText = r.bytes.toString('utf8');
-      break;
+    let nextLineWasValid: boolean | undefined;
+    {
+      const scanTo = Math.min(line + 2, li.totalLines);
+      for await (const r of li.scan(reader, line, scanTo)) {
+        if (r.line === line) {
+          if (r.error) return DataService.editFailure(line, `该行过大，暂不支持编辑：${r.error}`);
+          range = { start: r.start, end: r.end };
+          oldContentBytes = r.bytes.length;
+          beforeText = r.bytes.toString('utf8');
+        } else if (r.line === line + 1) {
+          // 下一行超长（error）时无从判定合法性，跳过对该行的写后验证。
+          nextLineWasValid = r.error ? undefined : parseJsonLine(r.bytes.toString('utf8')).ok;
+        }
+      }
     }
     if (!range) return DataService.editFailure(line, `行不存在：${line}`);
 
@@ -632,15 +642,38 @@ export class DataService {
     // ⑤⑥ 写盘 + 同步索引与基线
     this.editing = true;
     try {
+      const ending = detectLineEnding(range, oldContentBytes);
       const res = await replaceLine(
         this.path,
         range,
         Buffer.from(text, 'utf8'),
-        detectLineEnding(range, oldContentBytes),
+        ending,
         toReplaceOpts(opts)
       );
       this.index = li.applyLineReplace(line, res.bytesDelta);
       await this.refreshSnapshot();
+
+      // ⑦ 写后验证（防御性收口）：「写盘成功」的唯一可信依据是**用新索引把字节读回来
+      //    仍是合法 JSON**。校验对象 = 被编辑行（必须合法），外加紧邻下一行（仅在它
+      //    编辑前就合法时参与 —— 搬移若损坏内容，最先坏的就是它）。
+      //    失败 = 本次写入在某个环节损坏了内容，**立即用原行原样写回（回滚）**，并把
+      //    根因如实带回前端。宁可让这次编辑失败，也绝不静默落一个坏行进文件。
+      //    验证安排在记入历史之前：回滚等于「这次编辑从未发生」，不该留下历史记录。
+      const verifyError = await this.verifyAfterLineEdit(line, nextLineWasValid);
+      if (verifyError !== '') {
+        const rollbackError = await this.rollbackLineEdit(line, beforeText, ending, res.bytesDelta);
+        if (rollbackError === '') {
+          return DataService.editFailure(
+            line,
+            `编辑写入后自检未通过（${verifyError}），已自动回滚，文件保持编辑前状态。`
+          );
+        }
+        return DataService.editFailure(
+          line,
+          `编辑写入后自检未通过（${verifyError}），且自动回滚失败：${rollbackError}。请先检查文件完整性。`
+        );
+      }
+
       this.knownBadLines.delete(line);
       this.pushHistory({ kind: 'edit', line, before: beforeText, after: text }, res.bytesDelta);
       return {
@@ -1108,6 +1141,65 @@ export class DataService {
   }
 
   /* ---------------------- 会话编辑历史 ---------------------- */
+
+  /**
+   * 写后验证：用**新索引**把被编辑行（以及紧邻下一行，仅当它编辑前合法）重新读回并
+   * `parseJsonLine`。返回空串表示通过；否则返回「第 N 行：<原因>」。
+   *
+   * 之所以要求「读回」而不是相信写入返回值：写入 API 只知道「写了多少字节」，不知道
+   * 「落盘的字节是不是我们想写的」—— 磁盘层任何一环（搬移、fsync、并发写）出错，
+   * 都只有读回才能发现。
+   */
+  private async verifyAfterLineEdit(
+    line: number,
+    nextLineWasValid: boolean | undefined
+  ): Promise<string> {
+    // 调用点在 ensureIndex() 之后，二者必然就绪；类型上仍是可选，故局部断言一次。
+    const index = this.index!;
+    const reader = this.reader!;
+    const targets: number[] = [line];
+    if (nextLineWasValid === true && line + 1 < index.totalLines) targets.push(line + 1);
+    for (const ln of targets) {
+      const r = await readRecordAt(ln, index, reader).catch((e: unknown) => ({
+        ok: false as const,
+        error: e instanceof Error ? e.message : String(e),
+      }));
+      if (!r.ok) return `第 ${ln + 1} 行：${r.error}`;
+    }
+    return '';
+  }
+
+  /**
+   * 编辑写坏时的回滚：用当前（新）索引重新定位该行，把 `beforeText` **原样**写回。
+   * 返回空串表示回滚成功；否则返回失败原因。
+   *
+   * 回滚 delta 恰为本次写入的相反数（`-previousDelta`）—— 行尾在写入与回滚间保持一致，
+   * 内容差就是全部差。
+   */
+  private async rollbackLineEdit(
+    line: number,
+    beforeText: string,
+    ending: LineEnding,
+    previousDelta: number
+  ): Promise<string> {
+    try {
+      const index = this.index!;
+      const reader = this.reader!;
+      let range: { start: number; end: number } | undefined;
+      for await (const r of index.scan(reader, line, line + 1)) {
+        if (r.error) throw new Error(r.error);
+        range = { start: r.start, end: r.end };
+        break;
+      }
+      if (!range) return '定位不到该行';
+      await replaceLine(this.path, range, Buffer.from(beforeText, 'utf8'), ending, {});
+      this.index = index.applyLineReplace(line, -previousDelta);
+      await this.refreshSnapshot();
+      return '';
+    } catch (e) {
+      return e instanceof Error ? e.message : String(e);
+    }
+  }
 
   /**
    * 记录一次成功的写操作。

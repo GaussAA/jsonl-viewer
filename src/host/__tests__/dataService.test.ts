@@ -1989,3 +1989,60 @@ test('replaceField：非法 JSON 行计入 skippedInvalid 且其余行照常改'
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+/* ====================== 写后验证（防御性收口） ====================== */
+
+test('editRecord 写后验证：不误伤 —— 编辑紧邻坏行的上一行仍成功', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    // 第 2 行是本来就存在的坏行：它「编辑前就不合法」，写后验证必须跳过它，
+    // 否则对它前面任何一行的编辑都会被误报为「写后自检未通过」。
+    const file = await makeFile(dir, ['{"a":1}', '{"b":2}', 'not json', '{"c":3}']);
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    const res = await ds.editRecord(1, '{"b":"变长的新值"}');
+    assert.equal(res.ok, true, `编辑应成功：${res.ok ? '' : res.error}`);
+    assert.equal(
+      await readFile(file, 'utf8'),
+      '{"a":1}\n{"b":"变长的新值"}\nnot json\n{"c":3}\n',
+      '只有目标行变化；坏行保持原样（没被「顺手修好」也没被误报）'
+    );
+
+    // 索引读回：坏行如实报错，其余行正常
+    assert.equal((await ds.readRecord(0)).ok, true);
+    assert.equal((await ds.readRecord(1)).ok, true);
+    assert.equal((await ds.readRecord(2)).ok, false, '坏行仍是坏行');
+    assert.equal((await ds.readRecord(3)).ok, true);
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('editRecord 写后验证：正常编辑全部通过（验证不得拦截合法写入）', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const file = await makeFile(dir, [
+      '{"a":1}',
+      '{"name":"大帅","status":"pending"}',
+      '{"c":3}',
+      '{"d":4}',
+    ]);
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    // 变长 + 中文 + 尾部含下一行：验证覆盖 line 与 line+1
+    // 目标 text（磁盘字面）：{"name":"大帅","status":"已完成，含引号 \"x\" 与换行 \n 结束"}
+    const res = await ds.editRecord(
+      1,
+      '{"name":"大帅","status":"已完成，含引号 \\"x\\" 与换行 \\n 结束"}'
+    );
+    assert.equal(res.ok, true, `编辑应成功：${res.ok ? '' : res.error}`);
+    assert.equal((await ds.readRecord(1)).ok, true, '编辑后的行读回仍是合法 JSON（含转义内容）');
+    assert.equal((await ds.readRecord(2)).ok, true, '下一行验证通过');
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
