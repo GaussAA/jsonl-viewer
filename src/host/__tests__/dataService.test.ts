@@ -1355,8 +1355,9 @@ test('history：撤销失败时如实报错且光标不动（不假装成功）'
 
     await ds.editRecord(0, '{"a":2}');
 
-    // 外部改动文件 → 撤销会命中冲突检测
-    const external = '{"z":9}\n{"b":2}\n';
+    // 外部改动文件 → 撤销会命中冲突检测。内容刻意取不同 size：
+    // 冲突检测的 size 防线在 mtime 粒度内可能失灵，测试不得依赖 mtime 运气。
+    const external = '{"z":99}\n{"b":2}\n';
     await writeFile(file, external);
 
     const u = await ds.undoStep();

@@ -61,6 +61,8 @@ if (existsSync(out)) {
 }
 
 console.log(`[release] v${version}  typecheck+test+build ...`);
+// dist 产物守卫测试依赖此开关（默认跳过 —— 与并行 jsdom 测试存在 globalThis 竞态）
+process.env.JLV_DIST_PRODUCT = '1';
 sh('pnpm typecheck && pnpm test && pnpm build');
 
 console.log(`[release] vsce package -> releases/ ...`);

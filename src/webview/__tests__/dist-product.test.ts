@@ -15,6 +15,8 @@ import { HostEndpoint, HostReply } from '../../protocol/rpc.ts';
 
 const DIST = fileURLToPath(new URL('../../../dist/webview.js', import.meta.url));
 const HAS_DIST = existsSync(DIST);
+// 与其他 jsdom 测试并行时 globalThis（document/window）相互覆盖，必须串行：
+// 仅在显式设置 JLV_DIST_PRODUCT=1 时运行（发布链路抽查 / 本地验证）。
 
 const REAL_SET_TIMEOUT = globalThis.setTimeout;
 const sleep = (ms: number): Promise<void> => new Promise((r) => REAL_SET_TIMEOUT(r, ms));
@@ -40,7 +42,13 @@ describe('dist 产物（minify IIFE）字段编辑链路', () => {
 
   it(
     '改字段值 → 保存 → 发出的新行文本必须是合法 JSON',
-    { skip: HAS_DIST ? false : 'dist/webview.js 不存在（先 pnpm compile 构建）' },
+    {
+      skip: !HAS_DIST
+        ? 'dist/webview.js 不存在（先 pnpm compile 构建）'
+        : process.env.JLV_DIST_PRODUCT !== '1'
+          ? '默认跳过（与并行 jsdom 测试存在 globalThis 竞态；JLV_DIST_PRODUCT=1 串行运行）'
+          : false,
+    },
     async () => {
       const host = setupWebviewDom();
       // 注入发布产物：acquireVsCodeApi 已就位，IIFE 加载即自动 main()。
@@ -53,6 +61,7 @@ describe('dist 产物（minify IIFE）字段编辑链路', () => {
         payload: {
           uri: 'file:///t.jsonl',
           totalLines: 100,
+          totalRecords: 100,
           totalBytes: 4096,
           buildMs: 5,
           eof: true,
