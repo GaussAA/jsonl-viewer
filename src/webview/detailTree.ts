@@ -451,10 +451,10 @@ export function createDetailTree(
             input.remove();
           }
         })
-        .catch((e: unknown) => {
+        .catch((err: unknown) => {
           settled = false;
           valueEl.classList.add('error');
-          input.title = e instanceof Error ? e.message : String(e);
+          input.title = err instanceof Error ? err.message : String(err);
           input.focus();
         });
     });
