@@ -43,6 +43,23 @@ export interface LineIndexStats {
   eof: boolean;
 }
 
+/**
+ * 一条逻辑记录的字节/行区间（end 为独占边界）。
+ *
+ * 「记录」是 JSONL 的逻辑单位：紧凑文件里一条记录占一行；pretty/多行文件里一条
+ * 记录可跨多行（由括号感知的分组扫描确定边界）。
+ */
+export interface RecordRange {
+  /** 起始物理行（0 基）。 */
+  startLine: number;
+  /** 结束物理行（含；多行记录时 > startLine）。 */
+  endLine: number;
+  /** 起始字节偏移（含前导空行 —— 空行不属于任何记录，但夹在区间内无害）。 */
+  startOffset: number;
+  /** 独占结束偏移（含记录尾行尾）。 */
+  endOffset: number;
+}
+
 /** 一段行的原始字节区间（end 为独占边界，可能含末尾 \r 或 \n）。 */
 export interface LineRange {
   line: number;
@@ -82,13 +99,27 @@ export class LineIndex implements LineIndexStats {
   readonly totalLines: number;
   readonly buildMs: number;
   readonly eof: boolean;
+  /**
+   * 记录分组（仅多行/含空行文件存在）。
+   *
+   * `recordEndLines[i]` / `recordEndOffsets[i]` = 第 i 条记录的结束物理行 / 独占结束
+   * 字节偏移；记录 i 的起始由上一条推导（第 0 条从行 0 / 偏移 0 起）。
+   * **紧凑文件（每行一条记录、无空行）为 `undefined`** —— 此时记录号==行号，
+   * 走零内存快路径（`multiline` 为 false）。
+   */
+  readonly recordEndLines: ReadonlyArray<number> | undefined;
+  readonly recordEndOffsets: ReadonlyArray<number> | undefined;
+  /** 是否存在跨行记录或空行（决定记录号是否等于行号）。 */
+  readonly multiline: boolean;
 
   constructor(
     checkpoints: Checkpoint[],
     totalBytes: number,
     totalLines: number,
     interval: number,
-    stats: { buildMs?: number; eof?: boolean } = {}
+    stats: { buildMs?: number; eof?: boolean } = {},
+    records:
+      { endLines: ReadonlyArray<number>; endOffsets: ReadonlyArray<number> } | undefined = undefined
   ) {
     this.checkpoints = checkpoints;
     this.totalBytes = totalBytes;
@@ -96,6 +127,53 @@ export class LineIndex implements LineIndexStats {
     this.interval = interval;
     this.buildMs = stats.buildMs ?? 0;
     this.eof = stats.eof ?? true;
+    this.recordEndLines = records?.endLines;
+    this.recordEndOffsets = records?.endOffsets;
+    this.multiline = records !== undefined;
+  }
+
+  /** 记录总数：紧凑文件等于行数，多行文件等于分组数。 */
+  get totalRecords(): number {
+    return this.multiline ? (this.recordEndLines as ReadonlyArray<number>).length : this.totalLines;
+  }
+
+  /**
+   * 第 `no` 条记录（0 基）的区间。
+   *
+   * 紧凑文件直接给行号（内容偏移由调用方经 scan 取）；多行文件由 endLines/endOffsets
+   * 推导：起始 = 上一条的结束（第 0 条从行 0 / 偏移 0 起）。
+   */
+  recordRange(no: number): RecordRange {
+    if (!Number.isInteger(no) || no < 0 || no >= this.totalRecords) {
+      throw new RangeError(`record out of range: ${no} (totalRecords=${this.totalRecords})`);
+    }
+    if (!this.multiline) {
+      return { startLine: no, endLine: no, startOffset: -1, endOffset: -1 };
+    }
+    const endLines = this.recordEndLines as ReadonlyArray<number>;
+    const endOffsets = this.recordEndOffsets as ReadonlyArray<number>;
+    return {
+      startLine: no === 0 ? 0 : endLines[no - 1] + 1,
+      endLine: endLines[no],
+      startOffset: no === 0 ? 0 : endOffsets[no - 1],
+      endOffset: endOffsets[no],
+    };
+  }
+
+  /**
+   * 由「记录起始物理行」反查记录号（多行文件用；历史回退按当时起始行重放）。
+   * 找不到（该行不是任何记录的起始）返回 -1。
+   */
+  recordNoByStartLine(startLine: number): number {
+    if (!this.multiline) return startLine >= 0 && startLine < this.totalLines ? startLine : -1;
+    const endLines = this.recordEndLines as ReadonlyArray<number>;
+    // startLine 必须恰好等于某条记录的起始（= 上一条结束行 + 1，或 0）
+    let prevEnd = -1;
+    for (let i = 0; i < endLines.length; i++) {
+      if (prevEnd + 1 === startLine) return i;
+      prevEnd = endLines[i];
+    }
+    return prevEnd + 1 === startLine ? endLines.length : -1;
   }
 
   /** 流式顺序扫描，构建稀疏检查点索引。返回可查询的 LineIndex（含统计）。 */
@@ -113,20 +191,71 @@ export class LineIndex implements LineIndexStats {
     let totalBytes = 0;
     let lastReport = 0;
 
+    // —— 记录分组状态（括号感知，跨 chunk 保持）——
+    // 「记录」= 一个完整 JSON 值（可跨多行）；空行不属于任何记录。
+    let depth = 0; // 结构嵌套深度（字符串外：{[ ++、}] --）
+    let inString = false; // 是否在 JSON 字符串内
+    let escaped = false; // 字符串内下一字节是否被转义
+    let lineHasContent = false; // 当前行是否含非空白字节（空行不构成记录）
+    let sawMultiline = false; // 出现过跨行记录或空行 → 记录号≠行号
+    const recordEndLines: number[] = [];
+    const recordEndOffsets: number[] = [];
+
     const started = performance.now();
 
     for await (const raw of handle) {
       const buf: Buffer = typeof raw === 'string' ? Buffer.from(raw) : (raw as Buffer);
       const n = buf.length;
       const chunkBase = totalBytes; // 本 chunk 起始的绝对偏移
-      let cursor = 0;
-      let nextLf;
-      while ((nextLf = buf.indexOf(10, cursor)) !== -1) {
-        // 每隔 interval 行记一个检查点（含第 0 行）。
-        if (line % interval === 0) checkpoints.push({ line, offset: startOff });
-        startOff = chunkBase + nextLf + 1; // \n 之后即下一行的绝对起始偏移
-        line++;
-        cursor = nextLf + 1;
+      for (let i = 0; i < n; i++) {
+        const b = buf[i];
+        if (inString) {
+          if (escaped) escaped = false;
+          else if (b === 0x5c /* \ */) escaped = true;
+          else if (b === 0x22 /* " */) inString = false;
+          continue;
+        }
+        switch (b) {
+          case 0x22: // "
+            inString = true;
+            lineHasContent = true;
+            break;
+          case 0x7b: // {
+          case 0x5b: // [
+            depth++;
+            lineHasContent = true;
+            break;
+          case 0x7d: // }
+          case 0x5d: // ]
+            if (depth > 0) depth--;
+            lineHasContent = true;
+            break;
+          case 0x0a: // \n —— 行结束
+            {
+              // 每隔 interval 行记一个检查点（含第 0 行）。
+              if (line % interval === 0) checkpoints.push({ line, offset: startOff });
+              if (depth === 0 && !inString) {
+                if (lineHasContent) {
+                  // 结构闭合且本行非空 → 当前记录在此行收尾
+                  recordEndLines.push(line);
+                  recordEndOffsets.push(chunkBase + i + 1);
+                } else {
+                  // 空行：不属于任何记录，但打破「记录号==行号」
+                  sawMultiline = true;
+                }
+              } else {
+                // 结构未闭合跨行：多行记录的中间行
+                sawMultiline = true;
+              }
+              line++;
+              startOff = chunkBase + i + 1;
+              lineHasContent = false;
+            }
+            break;
+          default:
+            if (b !== 0x20 && b !== 0x09 && b !== 0x0d) lineHasContent = true;
+            break;
+        }
       }
       totalBytes += n;
 
@@ -140,7 +269,18 @@ export class LineIndex implements LineIndexStats {
     // 末尾剩余的一段（无换行结尾）也算一行；正好以 \n 结束则不额外产生空行。
     if (startOff < totalBytes) {
       if (line % interval === 0) checkpoints.push({ line, offset: startOff });
+      if (depth > 0 || inString) sawMultiline = true; // 悬空到 EOF：坏记录，以 EOF 收尾
+      if (lineHasContent || depth > 0 || inString) {
+        recordEndLines.push(line);
+        recordEndOffsets.push(totalBytes);
+      }
       line++;
+    } else if (depth > 0 || inString) {
+      // 悬空记录恰以 \n 结束于 EOF：该行已在上方收行，但记录尚未收尾 ——
+      // 若不在此补收尾，这条记录会凭空消失（v1.9.0 自测抓到的边界）。
+      sawMultiline = true;
+      recordEndLines.push(line - 1);
+      recordEndOffsets.push(totalBytes);
     }
     const buildMs = performance.now() - started;
 
@@ -148,7 +288,12 @@ export class LineIndex implements LineIndexStats {
       onProgress({ bytesRead: totalBytes, lines: line, done: true });
     }
 
-    return new LineIndex(checkpoints, totalBytes, line, interval, { buildMs, eof });
+    // 紧凑文件（每行一条记录、无空行）不存分组数组：记录号==行号，走零内存快路径。
+    const multiline = sawMultiline || recordEndLines.length !== line;
+    const records = multiline
+      ? { endLines: recordEndLines, endOffsets: recordEndOffsets }
+      : undefined;
+    return new LineIndex(checkpoints, totalBytes, line, interval, { buildMs, eof }, records);
   }
 
   /** 二分：≤ line 的最大检查点下标；检查点数组按 line 升序。 */

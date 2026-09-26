@@ -462,6 +462,7 @@ export class DataService {
     return {
       uri: this.uri,
       totalLines: li.totalLines,
+      totalRecords: li.totalRecords,
       totalBytes: li.totalBytes,
       buildMs: this.buildStats?.buildMs ?? li.buildMs,
       eof: this.buildStats?.eof ?? li.eof,
@@ -477,11 +478,11 @@ export class DataService {
     const reader = this.reader!;
     // M3：入口整数化校验——脏行号（NaN/小数/负数）不进入读批，也不污染 knownBadLines。
     if (!Number.isInteger(startLine) || startLine < 0 || !Number.isInteger(count) || count <= 0) {
-      return buildRecordsPayload(0, [], li.totalLines);
+      return buildRecordsPayload(0, [], li.totalRecords);
     }
     // 协议层硬上限：防御异常输入 / 未来改动一次拉取整个文件（解析 + 序列化双重内存风险）。
-    const n = Math.min(count, RECORDS_MAX_COUNT, Math.max(0, li.totalLines - startLine));
-    if (n <= 0) return buildRecordsPayload(startLine, [], li.totalLines);
+    const n = Math.min(count, RECORDS_MAX_COUNT, Math.max(0, li.totalRecords - startLine));
+    if (n <= 0) return buildRecordsPayload(startLine, [], li.totalRecords);
 
     // 阶段三（UI 热路径）：列表态不整条解析、不缓存整条巨物。
     // - 普通行（≤ 内联阈值，见 constants.ts 的 RECORD_INLINE_MAX_BYTES）：JSON.parse 后附带「有界摘要」；
@@ -526,7 +527,7 @@ export class DataService {
         count: jsonCountOf(value),
       });
     }
-    return buildRecordsPayload(startLine, items, li.totalLines);
+    return buildRecordsPayload(startLine, items, li.totalRecords);
   }
 
   /**
@@ -575,16 +576,21 @@ export class DataService {
   }
 
   /**
-   * 就地替换第 `line` 行（行数不变；行尾按磁盘原样保留，不擅自规范化）。
+   * 就地替换第 `recordNo` 条逻辑记录（紧凑文件下即第 `line` 行，行为与旧版一致）。
    *
    * 安全与一致性要点（**顺序即正确性**）：
    *   1. **写前冲突检测**：stat 与索引基线比对（size/mtime）。不一致说明文件已被外部
    *      改动，拒绝写入并返回 conflict —— 避免基于过期视图覆写他人改动；
-   *   2. **乐观锁**：`expectedBytes` 非空时须与磁盘上该行内容字节长度一致；
-   *   3. **JSON 校验**：非法 JSON 默认拒绝（保持文件语义），返回 invalid；
-   *   4. **写盘**：委托 `replaceLine`（等长原位覆写 / 变长尾部搬移）；
-   *   5. **索引与基线同步**：写盘成功后先换上新索引，再立刻刷新基线快照。二者若不同步，
-   *      5s 轮询的 `checkStale` 会把「自写」误判为外部变更并弹「重新加载」横幅。
+   *   2. **乐观锁**：`expectedBytes` 非空时须与磁盘上该记录聚合内容字节长度一致；
+   *   3. **JSON 校验 + JSONL 单行约束**：多行 pretty 文本会被拒绝（写入后会把一条
+   *      记录拆成多行，从那一行起整个文件错位 —— v1.8.0 事故根因）；
+   *   4. **写盘**：单行记录走 `replaceLine` 快路径（索引增量平移）；多行记录走
+   *      `replaceRange` 整体区间替换 + 索引全量重建（行数变化使增量失效，宁可慢不可错）；
+   *   5. **索引与基线同步**：写盘成功后先换上新索引，再立刻刷新基线快照；
+   *   6. **写后验证**：用新索引把该记录读回并校验，失败自动回滚（详见内部方法）。
+   *
+   * 历史回退/重放走 `editRecordInternal`（before/after 可能是多行 —— 曾合法写入文件的
+   * 内容），因此单行约束只在本对外入口检查。
    */
   async editRecord(
     line: number,
@@ -593,52 +599,11 @@ export class DataService {
     opts: EditRecordOpts = {}
   ): Promise<EditResultPayload> {
     const li = await this.ensureIndex();
-    const reader = this.reader!;
-
-    if (!Number.isInteger(line) || line < 0 || line >= li.totalLines) {
-      return DataService.editFailure(line, `无效行号：${line}`);
+    if (!Number.isInteger(line) || line < 0 || line >= li.totalRecords) {
+      return DataService.editFailure(line, `无效记录号：${line}`);
     }
-
-    // ① 写前冲突检测
-    const conflict = await this.detectWriteConflict(line);
-    if (conflict) return conflict;
-
-    // ② 定位该行区间、旧内容长度与旧文本（旧文本供撤销/重做使用）。
-    //    顺带探明**紧邻下一行**编辑前的合法性：写后验证要区分「下一行原本就是坏行」
-    //    与「本次写入把它弄坏了」—— 后者必须回滚，前者绝不能误报。
-    let range: { start: number; end: number } | undefined;
-    let oldContentBytes = 0;
-    let beforeText = '';
-    let nextLineWasValid: boolean | undefined;
-    {
-      const scanTo = Math.min(line + 2, li.totalLines);
-      for await (const r of li.scan(reader, line, scanTo)) {
-        if (r.line === line) {
-          if (r.error) return DataService.editFailure(line, `该行过大，暂不支持编辑：${r.error}`);
-          range = { start: r.start, end: r.end };
-          oldContentBytes = r.bytes.length;
-          beforeText = r.bytes.toString('utf8');
-        } else if (r.line === line + 1) {
-          // 下一行超长（error）时无从判定合法性，跳过对该行的写后验证。
-          nextLineWasValid = r.error ? undefined : parseJsonLine(r.bytes.toString('utf8')).ok;
-        }
-      }
-    }
-    if (!range) return DataService.editFailure(line, `行不存在：${line}`);
-
-    // ③ 乐观锁
-    if (expectedBytes != null && expectedBytes !== oldContentBytes) {
-      return DataService.editFailure(line, '该行内容已变化（与编辑前视图不一致），请重新加载。', {
-        conflict: true,
-      });
-    }
-
-    // ④ JSON 校验 + JSONL 单行约束
-    //    物理换行会把一条记录拆成多行：解析按物理行切，首行只剩 `{`，从那一行起
-    //    整个文件的行号与内容全部错位；且「行数不变」是索引增量更新的前提，被打破
-    //    的后果是全文件读取错位。合法 JSONL 行中字符串值的换行必然已转义为 \n 字面量
-    //    —— 见到物理换行只有 pretty-print 一种解释，必须当场拒绝。
-    //    （多行文本整体是合法 JSON，只靠 parseJsonLine 拦不住 —— v1.8.0 实机事故根因。）
+    // JSONL 单行约束（对外入口）：物理换行会把一条记录拆成多行，从那一行起整个文件
+    // 的行号与内容全部错位。合法 JSONL 行中字符串值的换行必然已转义为 \n 字面量。
     if (/\r|\n/.test(text)) {
       return DataService.editFailure(
         line,
@@ -650,30 +615,134 @@ export class DataService {
     if (!parsed.ok) {
       return DataService.editFailure(line, `JSON 校验未通过：${parsed.error}`, { invalid: true });
     }
+    return this.editRecordInternal(line, text, expectedBytes, opts);
+  }
 
-    // ⑤⑥ 写盘 + 同步索引与基线
+  /**
+   * 编辑内部实现（对外 editRecord 与历史回退/重放共用）。
+   *
+   * 定位记录区间（多行记录=多行区间）→ 乐观锁 → 写盘 → 索引同步 → 写后验证与回滚 →
+   * 历史。**不做单行约束检查** —— 历史重放写回的 before/after 可能是多行（曾合法
+   * 存在于文件中的内容），回退必须能够原样恢复。
+   */
+  private async editRecordInternal(
+    line: number,
+    text: string,
+    expectedBytes?: number,
+    opts: EditRecordOpts = {}
+  ): Promise<EditResultPayload> {
+    const li = await this.ensureIndex();
+    const reader = this.reader!;
+
+    if (!Number.isInteger(line) || line < 0 || line >= li.totalRecords) {
+      return DataService.editFailure(line, `无效记录号：${line}`);
+    }
+
+    // ① 写前冲突检测
+    const conflict = await this.detectWriteConflict(line);
+    if (conflict) return conflict;
+
+    // ② 定位该记录的字节区间与聚合原文（多行记录=多行区间；顺带探明下一条记录
+    //    首行的合法性，供写后验证区分「原本就是坏记录」与「本次写入弄坏了它」）。
+    let range: { start: number; end: number } | undefined;
+    let oldContentBytes = 0;
+    let beforeText = '';
+    let isMultiline = false;
+    let tailEnding: LineEnding = 'lf'; // 记录尾行尾（保持磁盘原样，不擅自规范化）
+    let nextRecordWasValid: boolean | undefined;
+    {
+      const recRange = li.recordRange(line);
+      isMultiline = recRange.endLine > recRange.startLine;
+      const parts: string[] = [];
+      const scanTo = Math.min(recRange.endLine + 2, li.totalLines);
+      for await (const r of li.scan(reader, recRange.startLine, scanTo)) {
+        if (r.line === recRange.endLine) {
+          // 记录尾行：行尾字节数决定回写时的 ending（保持原样）
+          const tailBytes = r.end - r.start - r.bytes.length;
+          tailEnding = tailBytes >= 2 ? 'crlf' : 'lf';
+        }
+        if (r.line <= recRange.endLine) {
+          if (r.error) return DataService.editFailure(line, `该记录过大，暂不支持编辑：${r.error}`);
+          parts.push(r.bytes.toString('utf8'));
+        } else if (r.line === recRange.endLine + 1) {
+          // 下一条记录的首行超长（error）时无从判定合法性，跳过写后验证。
+          nextRecordWasValid = r.error ? undefined : parseJsonLine(r.bytes.toString('utf8')).ok;
+          break;
+        }
+      }
+      if (parts.length === 0) return DataService.editFailure(line, `记录不存在：${line}`);
+      beforeText = parts.join('\n');
+      oldContentBytes = Buffer.byteLength(beforeText, 'utf8');
+      // 字节区间：多行索引直接用分组偏移（含前导空行，一并替换无害）；
+      // 紧凑快路径（multiline=false）recordRange 无偏移，用扫描给出的精确行区间。
+      range =
+        li.multiline || isMultiline
+          ? { start: recRange.startOffset, end: recRange.endOffset }
+          : undefined;
+      if (!range) {
+        for await (const r of li.scan(reader, line, line + 1)) {
+          if (r.error) return DataService.editFailure(line, `该记录过大，暂不支持编辑：${r.error}`);
+          range = { start: r.start, end: r.end };
+          break;
+        }
+        if (!range) return DataService.editFailure(line, `记录不存在：${line}`);
+      }
+    }
+
+    // ③ 乐观锁
+    if (expectedBytes != null && expectedBytes !== oldContentBytes) {
+      return DataService.editFailure(line, '该行内容已变化（与编辑前视图不一致），请重新加载。', {
+        conflict: true,
+      });
+    }
+
+    // ④⑤⑥ 写盘 + 同步索引与基线
     this.editing = true;
     try {
-      const ending = detectLineEnding(range, oldContentBytes);
-      const res = await replaceLine(
-        this.path,
-        range,
-        Buffer.from(text, 'utf8'),
-        ending,
-        toReplaceOpts(opts)
-      );
-      this.index = li.applyLineReplace(line, res.bytesDelta);
-      await this.refreshSnapshot();
+      let bytesDelta: number;
+      let inPlace: boolean;
+      let movedBytes: number;
+      let costMs: number;
+      let ending: LineEnding = tailEnding;
 
-      // ⑦ 写后验证（防御性收口）：「写盘成功」的唯一可信依据是**用新索引把字节读回来
-      //    仍是合法 JSON**。校验对象 = 被编辑行（必须合法），外加紧邻下一行（仅在它
-      //    编辑前就合法时参与 —— 搬移若损坏内容，最先坏的就是它）。
-      //    失败 = 本次写入在某个环节损坏了内容，**立即用原行原样写回（回滚）**，并把
-      //    根因如实带回前端。宁可让这次编辑失败，也绝不静默落一个坏行进文件。
-      //    验证安排在记入历史之前：回滚等于「这次编辑从未发生」，不该留下历史记录。
-      const verifyError = await this.verifyAfterLineEdit(line, nextLineWasValid);
+      if (li.multiline && isMultiline) {
+        // —— 多行记录：整体区间替换为单行新文本（记录数 1→1）+ 索引全量重建 ——
+        // 行数变化打破增量平移的前提；重建 = 全文件重扫（秒级），低频操作宁可慢不可错。
+        const replacement = Buffer.concat([Buffer.from(text, 'utf8'), lineEndingBytes(tailEnding)]);
+        const res = await replaceRange(this.path, range, replacement, toReplaceOpts(opts));
+        await this.rebuildIndex();
+        bytesDelta = res.bytesDelta;
+        inPlace = res.inPlace;
+        movedBytes = res.movedBytes;
+        costMs = res.costMs;
+      } else {
+        // —— 单行记录：原行替换快路径，索引增量平移 ——
+        ending = detectLineEnding(range, oldContentBytes);
+        const res = await replaceLine(
+          this.path,
+          range,
+          Buffer.from(text, 'utf8'),
+          ending,
+          toReplaceOpts(opts)
+        );
+        this.index = li.applyLineReplace(line, res.bytesDelta);
+        await this.refreshSnapshot();
+        bytesDelta = res.bytesDelta;
+        inPlace = res.inPlace;
+        movedBytes = res.movedBytes;
+        costMs = res.costMs;
+      }
+
+      // ⑦ 写后验证（防御性收口）：「写盘成功」的唯一可信依据是**用新索引把字节读回
+      //    来仍是合法 JSON**。校验对象 = 被编辑记录（必须合法），外加紧邻下一条记录
+      //    （仅在它编辑前就合法时参与）。失败 = 本次写入在某个环节损坏了内容，**立即
+      //    用原文写回（回滚）**，并把根因如实带回前端。验证安排在记入历史之前。
+      const verifyError = await this.verifyAfterRecordEdit(line, nextRecordWasValid);
       if (verifyError !== '') {
-        const rollbackError = await this.rollbackLineEdit(line, beforeText, ending, res.bytesDelta);
+        const rollbackError =
+          li.multiline && isMultiline
+            ? await this.rollbackRecordEdit(line, beforeText, tailEnding)
+            : await this.rollbackLineEdit(line, beforeText, ending, bytesDelta);
         if (rollbackError === '') {
           return DataService.editFailure(
             line,
@@ -687,14 +756,14 @@ export class DataService {
       }
 
       this.knownBadLines.delete(line);
-      this.pushHistory({ kind: 'edit', line, before: beforeText, after: text }, res.bytesDelta);
+      this.pushHistory({ kind: 'edit', line, before: beforeText, after: text }, bytesDelta);
       return {
         ok: true,
         line,
-        bytesDelta: res.bytesDelta,
-        inPlace: res.inPlace,
-        movedBytes: res.movedBytes,
-        costMs: Math.round(res.costMs * 100) / 100,
+        bytesDelta,
+        inPlace,
+        movedBytes,
+        costMs: Math.round(costMs * 100) / 100,
         beforeText,
       };
     } catch (e) {
@@ -824,7 +893,7 @@ export class DataService {
     const li = await this.ensureIndex();
     const reader = this.reader!;
 
-    if (!Number.isInteger(at) || at < 0 || at > li.totalLines) {
+    if (!Number.isInteger(at) || at < 0 || at > li.totalRecords) {
       return DataService.editFailure(at, `无效插入位置：${at}`);
     }
     const conflict = await this.detectWriteConflict(at);
@@ -847,7 +916,7 @@ export class DataService {
     // 插入点 = 第 at 行的起始偏移；追加到末尾则用文件末尾。
     let insertAt = li.totalBytes;
     let nextEnding: LineEnding | undefined;
-    if (at < li.totalLines) {
+    if (at < li.totalRecords) {
       const p = await probeLine(li, reader, at);
       if (!p.ok) return DataService.editFailure(at, describeProbeFailure(at, p.reason));
       insertAt = p.start;
@@ -994,7 +1063,7 @@ export class DataService {
     // 目标行 → 期望文本（重复行号后者覆盖前者，避免同一区间被规划两次）
     const wanted = new Map<number, string>();
     for (const e of entries) {
-      if (Number.isInteger(e.line) && e.line >= 0 && e.line < li.totalLines) {
+      if (Number.isInteger(e.line) && e.line >= 0 && e.line < li.totalRecords) {
         wanted.set(e.line, e.text);
       }
     }
@@ -1098,7 +1167,7 @@ export class DataService {
     const entries: { line: number; text: string }[] = [];
     let skippedInvalid = 0;
     let unchanged = 0;
-    const total = li.totalLines;
+    const total = li.totalRecords;
     const totalBytes = li.totalBytes;
 
     for await (const r of li.scan(reader, 0, total)) {
@@ -1166,22 +1235,22 @@ export class DataService {
   /* ---------------------- 会话编辑历史 ---------------------- */
 
   /**
-   * 写后验证：用**新索引**把被编辑行（以及紧邻下一行，仅当它编辑前合法）重新读回并
-   * `parseJsonLine`。返回空串表示通过；否则返回「第 N 行：<原因>」。
+   * 写后验证：用**新索引**把被编辑记录（以及紧邻下一条，仅当它编辑前合法）重新读回
+   * 并 `parseJsonLine`。返回空串表示通过；否则返回「第 N 行：<原因>」。
    *
    * 之所以要求「读回」而不是相信写入返回值：写入 API 只知道「写了多少字节」，不知道
    * 「落盘的字节是不是我们想写的」—— 磁盘层任何一环（搬移、fsync、并发写）出错，
    * 都只有读回才能发现。
    */
-  private async verifyAfterLineEdit(
+  private async verifyAfterRecordEdit(
     line: number,
-    nextLineWasValid: boolean | undefined
+    nextRecordWasValid: boolean | undefined
   ): Promise<string> {
     // 调用点在 ensureIndex() 之后，二者必然就绪；类型上仍是可选，故局部断言一次。
     const index = this.index!;
     const reader = this.reader!;
     const targets: number[] = [line];
-    if (nextLineWasValid === true && line + 1 < index.totalLines) targets.push(line + 1);
+    if (nextRecordWasValid === true && line + 1 < index.totalRecords) targets.push(line + 1);
     for (const ln of targets) {
       const r = await readRecordAt(ln, index, reader).catch((e: unknown) => ({
         ok: false as const,
@@ -1190,6 +1259,44 @@ export class DataService {
       if (!r.ok) return `第 ${ln + 1} 行：${r.error}`;
     }
     return '';
+  }
+
+  /** 结构变更（多行记录编辑等破坏「行数不变」假设的操作）后的索引全量重建。低频重操作。 */
+  private async rebuildIndex(): Promise<void> {
+    await this.releaseFileHandles();
+    const built = await buildIndexWithFallback(this.opts.workerScriptPath, this.path);
+    this.host = built.host;
+    this.index = built.result.index;
+    this.buildStats = built.result.stats;
+    this.reader = await openFileReader(this.path);
+    this.snapshot = await this.currentSnapshot();
+    // 行号已全变：坏行集合与「已全量扫描」结论一并作废。
+    this.badLinesComplete = false;
+    this.knownBadLines.clear();
+  }
+
+  /**
+   * 多行记录写坏时的回滚：用当前（重建后）索引重新定位该记录，把 `beforeText`
+   * （多行原文）按其尾行尾**原样**写回，再次重建索引。返回空串表示成功。
+   */
+  private async rollbackRecordEdit(
+    line: number,
+    beforeText: string,
+    tailEnding: LineEnding
+  ): Promise<string> {
+    try {
+      const li = this.index!;
+      const rr = li.recordRange(line);
+      const replacement = Buffer.concat([
+        Buffer.from(beforeText, 'utf8'),
+        lineEndingBytes(tailEnding),
+      ]);
+      await replaceRange(this.path, { start: rr.startOffset, end: rr.endOffset }, replacement, {});
+      await this.rebuildIndex();
+      return '';
+    } catch (e) {
+      return e instanceof Error ? e.message : String(e);
+    }
   }
 
   /**
@@ -1492,19 +1599,28 @@ export class DataService {
       });
     }
 
-    const targets = DataService.normalizeLines(lines, li.totalLines);
-    if (targets.length === 0) return DataService.deleteManyFailure('没有可删除的行');
+    const targets = DataService.normalizeLines(lines, li.totalRecords);
+    if (targets.length === 0) return DataService.deleteManyFailure('没有可删除的记录');
     if (targets.length > MAX_SELECTION_LINES) {
       return DataService.deleteManyFailure(
         `一次最多删除 ${MAX_SELECTION_LINES} 行，当前选中 ${targets.length} 行。`
       );
     }
 
+    // 记录号 → 物理行集合（多行记录展开为连续行区间；紧凑文件下 == 记录号本身）
+    const wantedLines = new Set<number>();
+    for (const no of targets) {
+      const rr = li.recordRange(no);
+      for (let l = rr.startLine; l <= rr.endLine; l++) wantedLines.add(l);
+    }
+    const firstRecRange = li.recordRange(targets[0]);
+    const lastRecRange = li.recordRange(targets[targets.length - 1]);
+
     // 一次顺序扫过目标区间，取每行的字节范围与原文（含行尾 —— 撤销要原样插回）
-    const wanted = new Set(targets);
+    const wanted = wantedLines;
     const rows: { line: number; start: number; end: number; bytes: number; content: string }[] = [];
     let skipped = 0;
-    for await (const r of li.scan(reader, targets[0], targets[targets.length - 1] + 1)) {
+    for await (const r of li.scan(reader, firstRecRange.startLine, lastRecRange.endLine + 1)) {
       if (!wanted.has(r.line)) continue;
       // 超长行（scan 以 error 标记）无法安全取出内容：跳过而非删一半。
       if (r.error) {
@@ -1552,14 +1668,19 @@ export class DataService {
     this.editing = true;
     try {
       const res = await this.rewriteAtomic(edits, opts);
-      // 倒序应用索引删除（见方法文档）
-      let idx = li;
-      for (let i = rows.length - 1; i >= 0; i--) {
-        idx = idx.applyLineDelete(rows[i].line, rows[i].end - rows[i].start);
+      if (li.multiline) {
+        // 多行文件：删除改变行号结构，recordEndLines 无法增量平移 —— 全量重建。
+        await this.rebuildIndex();
+      } else {
+        // 倒序应用索引删除（见方法文档）
+        let idx = li;
+        for (let i = rows.length - 1; i >= 0; i--) {
+          idx = idx.applyLineDelete(rows[i].line, rows[i].end - rows[i].start);
+        }
+        this.index = idx;
+        this.remapBadLinesAfterDeletes(wanted);
+        await this.refreshSnapshot();
       }
-      this.index = idx;
-      this.remapBadLinesAfterDeletes(wanted);
-      await this.refreshSnapshot();
       this.pushHistory({ kind: 'deleteMany', ranges }, res.bytesDelta);
 
       return {
@@ -1929,7 +2050,7 @@ export class DataService {
       lines: truncated ? all.slice(0, MAX_BAD_LINES) : all,
       partial: !this.badLinesComplete,
       // 未做过范围扫描时无「已扫描行数」可言，填 0（与 partial=true 一致）。
-      scanned: this.badLinesComplete ? (this.index?.totalLines ?? 0) : 0,
+      scanned: this.badLinesComplete ? (this.index?.totalRecords ?? 0) : 0,
       totalLines: this.index?.totalLines ?? 0,
       truncated,
       costMs: 0,
@@ -2051,6 +2172,7 @@ export class DataService {
     return {
       uri: this.uri,
       totalLines: li.totalLines,
+      totalRecords: li.totalRecords,
       totalBytes: li.totalBytes,
       buildMs: this.buildStats?.buildMs ?? li.buildMs,
       eof: this.buildStats?.eof ?? li.eof,
@@ -2059,6 +2181,11 @@ export class DataService {
 
   get totalLines(): number {
     return this.index?.totalLines ?? 0;
+  }
+
+  /** 逻辑记录总数（紧凑文件==行数；pretty 文件按记录分组）。 */
+  get totalRecords(): number {
+    return this.index?.totalRecords ?? 0;
   }
 
   /** 返回当前索引（尚未构建则 undefined），用于惰性进度/概要栏。 */

@@ -452,7 +452,7 @@ export function main(): void {
   const editPanel = createEditPanel({
     getOverview: () =>
       state.overview
-        ? { totalBytes: state.overview.totalBytes, totalLines: state.overview.totalLines }
+        ? { totalBytes: state.overview.totalBytes, totalRecords: state.overview.totalRecords }
         : undefined,
     /**
      * 提交编辑。
@@ -476,7 +476,7 @@ export function main(): void {
             );
 
       const ov = state.overview;
-      const cost = ov === null ? 0 : estimateEditCost(ov.totalBytes, ov.totalLines, info.line);
+      const cost = ov === null ? 0 : estimateEditCost(ov.totalBytes, ov.totalRecords, info.line);
       const showProgress = cost >= EDIT_COST_WARN_BYTES;
       if (showProgress) {
         activeEdit = { requestId: req.requestId };
@@ -690,9 +690,9 @@ export function main(): void {
   function applyRowCountChange(line: number, mode: 'insert' | 'delete'): void {
     state.cache.clear();
     if (state.overview) {
-      const totalLines = state.overview.totalLines + (mode === 'insert' ? 1 : -1);
-      state.overview = { ...state.overview, totalLines };
-      list.setTotalRows(Math.max(0, totalLines));
+      const totalRecords = state.overview.totalRecords + (mode === 'insert' ? 1 : -1);
+      state.overview = { ...state.overview, totalRecords };
+      list.setTotalRows(Math.max(0, totalRecords));
     }
     if (mode === 'insert') {
       // 插入后把选中锚点落到新行上（与「光标停在新行」的编辑器习惯一致）。
@@ -702,7 +702,7 @@ export function main(): void {
     }
     if (state.selectedLine === undefined) return;
     state.selectedLine = state.selectedLine > line ? state.selectedLine - 1 : state.selectedLine;
-    const maxLine = Math.max(0, (state.overview?.totalLines ?? 1) - 1);
+    const maxLine = Math.max(0, (state.overview?.totalRecords ?? 1) - 1);
     if (state.selectedLine > maxLine) state.selectedLine = maxLine;
     list.select(state.selectedLine);
   }
@@ -821,9 +821,9 @@ export function main(): void {
   function applyBulkDelete(deleted: number): void {
     state.cache.clear();
     if (state.overview) {
-      const totalLines = Math.max(0, state.overview.totalLines - deleted);
-      state.overview = { ...state.overview, totalLines };
-      list.setTotalRows(totalLines);
+      const totalRecords = Math.max(0, state.overview.totalRecords - deleted);
+      state.overview = { ...state.overview, totalRecords };
+      list.setTotalRows(totalRecords);
     }
     clearSelection();
     state.selectedLine = undefined;
@@ -1081,7 +1081,7 @@ export function main(): void {
 
   /** 获取当前可见记录总数（考虑过滤态）。 */
   function getTotalVisible(): number {
-    return state.filterMap ? state.filterMap.length : (state.overview?.totalLines ?? 0);
+    return state.filterMap ? state.filterMap.length : (state.overview?.totalRecords ?? 0);
   }
 
   /** 将展示位索引转为真实行号（过滤态/全量态统一）。 */
@@ -1096,7 +1096,7 @@ export function main(): void {
     if (state.filterMap) {
       return state.filterMap.indexOf(line);
     }
-    if (state.overview && line >= 0 && line < state.overview.totalLines) return line;
+    if (state.overview && line >= 0 && line < state.overview.totalRecords) return line;
     return -1;
   }
 
@@ -1164,6 +1164,15 @@ export function main(): void {
       return;
     }
     fieldPanel.open(segs, value);
+  };
+
+  // 原地编辑（双击字段值）：与浮层共用同一条提交链路（jsonSpan 定位 → 整行编辑）。
+  // 失败原因由编辑态红框显示；成功后 commitFieldEdit 内部会重建详情树。
+  navHandlers.onInlineEdit = (segs, _from, to) => {
+    if (!state.detailRaw) {
+      return { ok: false, error: '该记录的原文不可用，无法定位字段。' };
+    }
+    return commitFieldEdit(segs, to);
   };
 
   /**
@@ -1349,7 +1358,7 @@ export function main(): void {
   async function fetchWindow(win: { first: number; lastExclusive: number }): Promise<boolean> {
     const ov = state.overview;
     if (!ov) return false;
-    const total = ov.totalLines;
+    const total = ov.totalRecords;
     const s = clamp(win.first, 0, total);
     const e = clamp(win.lastExclusive, s, total);
     const missing = computeFetchWindow(
@@ -1419,11 +1428,11 @@ export function main(): void {
       statusText: ov ? '就绪' : '连接中…',
     };
     if (ov) {
-      info.totalLines = ov.totalLines;
+      info.totalRecords = ov.totalRecords;
       info.loadedLines = state.cache.size;
       // 翻页式目录：展示当前页的真实行闭区间（1 起）；空页兜底到全量。
       const bounds = list.getCurrentPageRealBounds();
-      info.range = bounds ?? ([0, Math.max(0, ov.totalLines - 1)] as [number, number]);
+      info.range = bounds ?? ([0, Math.max(0, ov.totalRecords - 1)] as [number, number]);
       info.buildMs = ov.buildMs;
     }
     toolbar.update(info);
@@ -1466,14 +1475,14 @@ export function main(): void {
     }
     state.overview = payload;
     state.persistKey = stateKey(payload.uri);
-    list.setTotalRows(payload.totalLines);
+    list.setTotalRows(payload.totalRecords);
     updateToolbar();
     updateNavEnabled();
     // reload 会清空宿主侧的坏行集合，从零重新积累 —— 徽章须同步（否则会残留旧数字）。
     void refreshBadLines();
 
     // 打开文件默认选中第一条并展示其 JSON；右侧细节树已内置「仅展开顶层、嵌套折叠」的默认态。
-    if (state.selectedLine === undefined && payload.totalLines > 0) {
+    if (state.selectedLine === undefined && payload.totalRecords > 0) {
       state.selectedLine = 0;
       list.select(0); // 首帧不加 scrollToLine（避免入场动画/重建导致打开时闪一次）
       void showDetailForLine(0);
@@ -1498,7 +1507,7 @@ export function main(): void {
       .promise.then((ov) => {
         if (!ov) return;
         state.overview = ov;
-        list.setTotalRows(ov.totalLines);
+        list.setTotalRows(ov.totalRecords);
         updateToolbar();
         updateNavEnabled();
       })
@@ -1553,7 +1562,7 @@ export function main(): void {
    * 抽成独立函数供两条路径共用（手动「重新加载」与宿主推送的文档复位）——复位清单一旦
    * 在两处各写一遍，迟早会漂移，届时表现为「某条路径漏清了过滤/搜索」这类难查的脏状态。
    */
-  function resetLocalState(totalLines: number): void {
+  function resetLocalState(totalRecords: number): void {
     state.cache.clear();
     state.pending.clear();
     state.maxLoaded = 0;
@@ -1573,7 +1582,7 @@ export function main(): void {
     toolbar.setSearchResult(0, 0);
     toolbar.setFilterTruncated(false);
     list.setTranslation(null);
-    list.setTotalRows(totalLines);
+    list.setTotalRows(totalRecords);
     updateToolbar();
     updateNavEnabled();
   }
@@ -1613,7 +1622,7 @@ export function main(): void {
       if (!ov) return;
       state.overview = ov;
       // 索引重建后，旧的缓存 / 搜索 / 过滤结果全部失效，整体复位。
-      resetLocalState(ov.totalLines);
+      resetLocalState(ov.totalRecords);
       detail.clear();
       fetchFields();
     } catch (e) {
@@ -1638,7 +1647,7 @@ export function main(): void {
   bus.onDocumentReset((payload) => {
     cancelAllInFlight();
     state.selectedLine = undefined;
-    resetLocalState(state.overview?.totalLines ?? 0);
+    resetLocalState(state.overview?.totalRecords ?? 0);
     detail.clear();
     fetchFields();
     banner.show(payload.message ?? '已从磁盘重新加载。');

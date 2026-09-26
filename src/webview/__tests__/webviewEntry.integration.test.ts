@@ -30,6 +30,7 @@ type Msg = { type?: unknown; requestId?: unknown; [k: string]: unknown };
 const BASE_INIT = {
   uri: 'file:///tmp/a.jsonl',
   totalLines: 100,
+  totalRecords: 100,
   totalBytes: 4096,
   buildMs: 7,
   eof: true,
@@ -101,6 +102,7 @@ const searchInput = (app: HTMLElement): HTMLInputElement =>
 type WinCtor = {
   Event: new (t: string, o?: unknown) => Event;
   MouseEvent: new (t: string, o?: unknown) => MouseEvent;
+  KeyboardEvent: new (t: string, o?: unknown) => KeyboardEvent;
 };
 const win = (): WinCtor => (globalThis as unknown as { window: WinCtor }).window;
 
@@ -247,7 +249,7 @@ describe('webviewEntry 装配层（集成）', () => {
 
       assert.strictEqual(text(app.querySelector('.jlv-filename')), 'file:///tmp/a.jsonl');
       assert.match(text(app.querySelector('.jlv-sub')), /就绪/);
-      assert.match(text(app.querySelector('.jlv-sub')), /100 行/);
+      assert.match(text(app.querySelector('.jlv-sub')), /100 条记录/);
       assert.strictEqual(card(app, 0)?.classList.contains('selected'), true, '默认选中首行');
       // 详情头部此时仍是占位（readRecord 未回执），回执后由 detailTree 更新为 Record #1。
       assert.strictEqual(text(app.querySelector('.jlv-dh-line')), 'Record #—');
@@ -256,17 +258,21 @@ describe('webviewEntry 装配层（集成）', () => {
     it('init 后回执 getOverview 覆盖总行数并刷新分页信息', async () => {
       const { host, app } = boot();
       initWith(host);
-      reply(host, lastReq(host, HostEndpoint.GET_OVERVIEW)!, { ...BASE_INIT, totalLines: 5000 });
+      reply(host, lastReq(host, HostEndpoint.GET_OVERVIEW)!, {
+        ...BASE_INIT,
+        totalLines: 5000,
+        totalRecords: 5000,
+      });
       await sleep(10);
 
-      assert.match(text(app.querySelector('.jlv-sub')), /5,000 行/);
-      assert.match(text(app.querySelector('.jlv-pager-summary')), /5,000 行/);
+      assert.match(text(app.querySelector('.jlv-sub')), /5,000 条记录/);
+      assert.match(text(app.querySelector('.jlv-pager-summary')), /5,000 条记录/);
       assert.ok(pagerButton(app, '末页'), '页数变化后分页条已更新');
     });
 
     it('init 总行数为 0 时不自动选中，也不拉详情', () => {
       const { host, app } = boot();
-      initWith(host, { totalLines: 0 });
+      initWith(host, { totalLines: 0, totalRecords: 0 });
 
       assert.strictEqual(reqs(host, HostEndpoint.READ_RECORD).length, 0, '不拉详情');
       assert.strictEqual(card(app, 0), null, '无卡片');
@@ -456,7 +462,7 @@ describe('webviewEntry 装配层（集成）', () => {
         truncated: false,
       });
       await sleep(20);
-      assert.match(text(app.querySelector('.jlv-pager-summary')), /3 行/, '已进入过滤态');
+      assert.match(text(app.querySelector('.jlv-pager-summary')), /3 条记录/, '已进入过滤态');
 
       fireStale(host, '文件已更改');
       await sleep(10);
@@ -468,7 +474,7 @@ describe('webviewEntry 装配层（集成）', () => {
 
       const banner = app.querySelector<HTMLElement>('.jlv-banner')!;
       assert.strictEqual(banner.hidden, true, '横幅收起');
-      assert.match(text(app.querySelector('.jlv-pager-summary')), /100 行/, '过滤态已清除');
+      assert.match(text(app.querySelector('.jlv-pager-summary')), /100 条记录/, '过滤态已清除');
       assert.ok(app.querySelector('.jlv-tree-hint'), '详情回到未选中提示');
       assert.strictEqual(
         reqs(host, HostEndpoint.GET_SAMPLE_FIELDS).length,
@@ -566,7 +572,7 @@ describe('webviewEntry 装配层（集成）', () => {
 
       reply(host, f!, { matches: [0, 2, 4], total: 3, truncated: false });
       await sleep(20);
-      assert.match(text(app.querySelector('.jlv-pager-summary')), /3 行/, '展示行数=命中数');
+      assert.match(text(app.querySelector('.jlv-pager-summary')), /3 条记录/, '展示行数=命中数');
     });
 
     it('loadState 先到、字段后到：字段到位后再应用持久化', async () => {
@@ -1274,7 +1280,7 @@ describe('webviewEntry 装配层（集成）', () => {
       await sleep(40);
 
       assert.strictEqual(selBar(app).hidden, true, '删除后选区清空（行号已失效）');
-      assert.match(text(app.querySelector('.jlv-pager-summary')), /97 行/, '总行数减少 3');
+      assert.match(text(app.querySelector('.jlv-pager-summary')), /97 条记录/, '总记录数减少 3');
       assert.match(bannerText(app), /已删除 3 行/);
     });
 
@@ -1686,6 +1692,68 @@ describe('webviewEntry 装配层（集成）', () => {
       await sleep(20);
 
       assert.strictEqual(hasEntry(app), false, '缺原文 → 不给入口');
+    });
+
+    it('双击字段值原地编辑：Enter 后走与铅笔相同的提交链路（v1.9.0 原地编辑）', async () => {
+      const { host, app } = await bootWithRecords();
+      replyDetail(host, { status: 'pending' }, '{"status":"pending"}');
+      await sleep(20);
+
+      // 双击 status 的值元素 → 原地输入框
+      const valueEl = Array.from(app.querySelectorAll<HTMLElement>('.jlv-tree-row'))
+        .find((r) => r.querySelector('.jlv-key')?.textContent === 'status')
+        ?.querySelector<HTMLElement>('.jlv-value');
+      assert.ok(valueEl, '存在 status 值元素');
+      valueEl!.dispatchEvent(new (win().MouseEvent)('dblclick', { bubbles: true }));
+      await sleep(20);
+      const inlineInput = valueEl!.querySelector<HTMLInputElement>('input.jlv-inline-edit');
+      assert.ok(inlineInput, '双击后原地出现输入框');
+
+      // 改值 → Enter 提交
+      inlineInput!.value = 'done';
+      inlineInput!.dispatchEvent(
+        new (win().KeyboardEvent)('keydown', { key: 'Enter', bubbles: true })
+      );
+      await sleep(40);
+
+      const edit = lastReq(host, HostEndpoint.EDIT_RECORD);
+      assert.ok(edit, 'Enter 触发编辑写入');
+      assert.strictEqual(edit!.text, '{"status":"done"}', '新行文本由 jsonSpan 外科式替换产出');
+
+      // 回执成功：编辑态收起
+      host.receive({
+        type: HostReply.EDIT_RESULT,
+        requestId: edit!.requestId,
+        payload: { ok: true, line: 0, bytesDelta: 0, inPlace: true, movedBytes: 0, costMs: 1 },
+      });
+      await sleep(30);
+      assert.strictEqual(valueEl!.querySelector('input.jlv-inline-edit'), null, '成功后编辑态收起');
+    });
+
+    it('双击后按 Esc 取消：不发起任何写入，值原样恢复', async () => {
+      const { host, app } = await bootWithRecords();
+      replyDetail(host, { status: 'pending' }, '{"status":"pending"}');
+      await sleep(20);
+
+      const valueEl = Array.from(app.querySelectorAll<HTMLElement>('.jlv-tree-row'))
+        .find((r) => r.querySelector('.jlv-key')?.textContent === 'status')
+        ?.querySelector<HTMLElement>('.jlv-value');
+      valueEl!.dispatchEvent(new (win().MouseEvent)('dblclick', { bubbles: true }));
+      await sleep(20);
+      const inlineInput = valueEl!.querySelector<HTMLInputElement>('input.jlv-inline-edit')!;
+      inlineInput.value = 'changed';
+
+      inlineInput.dispatchEvent(
+        new (win().KeyboardEvent)('keydown', { key: 'Escape', bubbles: true })
+      );
+      await sleep(20);
+
+      assert.strictEqual(reqs(host, HostEndpoint.EDIT_RECORD).length, 0, 'Esc 取消绝不发起写入');
+      assert.strictEqual(
+        valueEl!.querySelector('input.jlv-inline-edit'),
+        null,
+        '编辑态收起，值原样恢复'
+      );
     });
 
     it('切换选中行后入口消失（避免拿上一行的原文改到新行上）', async () => {

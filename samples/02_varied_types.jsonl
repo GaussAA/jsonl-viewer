@@ -1,5 +1,5 @@
 {"kind": "string", "value": "plain text"}
-{"kind": "integer", "value": 42}
+{"kind":"int","value":42}
 {"kind": "float", "value": 3.14159}
 {"kind": "negative", "value": -17}
 {"kind": "exp", "value": 6.02e23}

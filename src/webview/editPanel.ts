@@ -41,7 +41,7 @@ export interface EditPanelDeps {
   /** 提交成功后的回调（刷新列表卡片 / 详情树）。 */
   onCommitted?(info: { line: number; mode: EditMode }): void;
   /** 取概览用于成本预估；索引未就绪时返回 undefined。 */
-  getOverview?(): { totalBytes: number; totalLines: number } | undefined;
+  getOverview?(): { totalBytes: number; totalRecords: number } | undefined;
 }
 
 export interface EditPanelController {
@@ -150,7 +150,7 @@ export function createEditPanel(deps: EditPanelDeps): EditPanelController {
   function refreshHint(): void {
     const overview = deps.getOverview?.();
     const warn = overview
-      ? editCostWarning(estimateEditCost(overview.totalBytes, overview.totalLines, currentLine))
+      ? editCostWarning(estimateEditCost(overview.totalBytes, overview.totalRecords, currentLine))
       : undefined;
     hint.textContent = warn ?? '';
     hint.hidden = warn === undefined;

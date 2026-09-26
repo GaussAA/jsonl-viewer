@@ -22,11 +22,11 @@ export const EDIT_COST_WARN_BYTES = 32 * 1024 * 1024;
  * 真实成本 = `totalBytes - 该行末尾偏移`，前端没有精确偏移，故用剩余行数占比近似。
  * 对位于文件前部的行会略高估（安全方向），对末行返回 0（确实无需搬移）。
  */
-export function estimateEditCost(totalBytes: number, totalLines: number, line: number): number {
-  if (!Number.isFinite(totalBytes) || !Number.isFinite(totalLines)) return 0;
-  if (totalBytes <= 0 || totalLines <= 0 || line < 0) return 0;
-  const remaining = Math.max(0, totalLines - line - 1);
-  return Math.floor((totalBytes * remaining) / totalLines);
+export function estimateEditCost(totalBytes: number, totalRecords: number, line: number): number {
+  if (!Number.isFinite(totalBytes) || !Number.isFinite(totalRecords)) return 0;
+  if (totalBytes <= 0 || totalRecords <= 0 || line < 0) return 0;
+  const remaining = Math.max(0, totalRecords - line - 1);
+  return Math.floor((totalBytes * remaining) / totalRecords);
 }
 
 /** 提交前校验结果。 */

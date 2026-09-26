@@ -66,6 +66,12 @@ async function handle(msg: WorkerRequest): Promise<void> {
           buildMs: li.buildMs,
           eof: li.eof,
           interval: li.interval,
+          records: li.multiline
+            ? {
+                endLines: [...(li.recordEndLines as number[])],
+                endOffsets: [...(li.recordEndOffsets as number[])],
+              }
+            : undefined,
         });
         return;
       }

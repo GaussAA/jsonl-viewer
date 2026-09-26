@@ -713,7 +713,7 @@ export class VirtualRecordList {
 
     const summary = document.createElement('div');
     summary.className = 'jlv-pager-summary';
-    summary.textContent = `${this.pageSize}/页 · ${this.totalRows.toLocaleString('en-US')} 行`;
+    summary.textContent = `${this.pageSize}/页 · ${this.totalRows.toLocaleString('en-US')} 条记录`;
     this.sideEl.appendChild(summary);
   }
 

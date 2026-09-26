@@ -171,7 +171,7 @@ export async function inferFields(
 ): Promise<InferFieldsResult> {
   const sampleLines = opts.sampleLines ?? SAMPLE_SCAN_LINES;
   const sampleMaxLen = opts.sampleMaxLen ?? 120;
-  const scanned = Math.min(sampleLines, li.totalLines);
+  const scanned = Math.min(sampleLines, li.totalRecords);
 
   const map = new Map<string, Entry>();
   const errorLines: number[] = [];

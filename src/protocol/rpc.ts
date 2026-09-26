@@ -124,6 +124,8 @@ export const HostReply = {
 export interface OverviewPayload {
   uri: string;
   totalLines: number;
+  /** 逻辑记录总数（紧凑文件 == totalLines；pretty/多行文件按记录分组计数）。 */
+  totalRecords: number;
   totalBytes: number;
   buildMs: number;
   eof: boolean;

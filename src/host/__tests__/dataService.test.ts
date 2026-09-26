@@ -13,6 +13,9 @@ import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DataService } from '../dataService.ts';
+import { searchLines } from '../../host/searchEngine.ts';
+import type { LineIndex } from '../../indexer/lineIndex.ts';
+import type { ByteReader } from '../../parser/jsonParser.ts';
 import { MAX_SELECTION_LINES, MAX_HISTORY_ENTRIES, MAX_BAD_LINES } from '../../constants.ts';
 
 async function makeFile(dir: string, lines: string[]): Promise<string> {
@@ -406,7 +409,7 @@ test('editRecord：JSON 非法或行号越界 → 拒绝且不写盘', async () 
 
     const oob = await ds.editRecord(99, '{"x":1}');
     assert.equal(oob.ok, false);
-    assert.match(oob.error ?? '', /无效行号/);
+    assert.match(oob.error ?? '', /无效记录号/);
 
     assert.equal(await readFile(file, 'utf8'), original, '拒绝时必须保持文件原样');
 
@@ -2101,6 +2104,84 @@ test('editRecord 写后验证：正常编辑全部通过（验证不得拦截合
     assert.equal(res.ok, true, `编辑应成功：${res.ok ? '' : res.error}`);
     assert.equal((await ds.readRecord(1)).ok, true, '编辑后的行读回仍是合法 JSON（含转义内容）');
     assert.equal((await ds.readRecord(2)).ok, true, '下一行验证通过');
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+/* ====================== 多行记录（pretty JSON）端到端 ====================== */
+
+test('多行文件：解析、读取、编辑、搜索全链路', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    // pretty 记录 0（3 行）+ 紧凑记录 1 + pretty 记录 2（3 行）
+    const file = join(dir, 'pretty.jsonl');
+    await writeFile(
+      file,
+      '{\n  "name": "alice",\n  "age": 30\n}\n{"name":"bob"}\n[\n  1,\n  2\n]\n'
+    );
+    const ds = makeService(file);
+    const ov = await ds.getOverview();
+    assert.equal(ov.totalRecords, 3, '3 条逻辑记录');
+    assert.equal(ov.totalLines, 9);
+
+    // ① 记录 0（多行对象）
+    const r0 = await ds.readRecord(0);
+    assert.equal(r0.ok, true);
+    assert.deepEqual(r0.value, { name: 'alice', age: 30 });
+    // ② 记录 1（紧凑单行）
+    const r1 = await ds.readRecord(1);
+    assert.deepEqual(r1.value, { name: 'bob' });
+    // ③ 记录 2（多行数组）
+    const r2 = await ds.readRecord(2);
+    assert.deepEqual(r2.value, [1, 2]);
+
+    // ④ 编辑多行记录 0：整体区间替换为单行（记录数不变），后续记录仍正确读回
+    const res = await ds.editRecord(0, '{"name":"alice","age":31}');
+    assert.equal(res.ok, true, '编辑应成功：' + (res.ok ? '' : res.error));
+    assert.equal(ds.totalRecords, 3, '记录数不变');
+    const v0 = await ds.readRecord(0);
+    assert.deepEqual(v0.value, { name: 'alice', age: 31 });
+    assert.equal((await ds.readRecord(1)).ok, true, '后续记录读回正常');
+    assert.deepEqual((await ds.readRecord(2)).value, [1, 2], '多行数组记录不受影响');
+
+    // ⑤ 搜索：多行记录聚合文本参与匹配
+    const idx = await (ds as unknown as { ensureIndex(): Promise<LineIndex> }).ensureIndex();
+    const search = await searchLines((ds as unknown as { reader: ByteReader }).reader!, idx, {
+      query: 'alice',
+    });
+    assert.deepEqual(search.matches, [0], '命中记录 0（聚合文本匹配）');
+
+    // ⑥ 删除多行记录 2：区间整体移除
+    const del = await ds.deleteRecords([2]);
+    assert.equal(del.ok, true, '删除应成功：' + (del.ok ? '' : del.error));
+    assert.equal(ds.totalRecords, 2);
+    assert.deepEqual((await ds.readRecord(1)).value, { name: 'bob' });
+
+    // ⑦ 文件未被写坏：逐字节 parse
+    const disk = (await readFile(file, 'utf8')).split('\n').filter((l) => l !== '');
+    assert.equal(disk.length, 2);
+    for (const l of disk) assert.doesNotThrow(() => JSON.parse(l));
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('多行文件：写后验证与下一条记录保护同样生效', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const file = join(dir, 'p2.jsonl');
+    await writeFile(file, '{\n  "a": 1\n}\n{"b":2}\n');
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    // 编辑多行记录 0 → 合法单行：成功且读回正常
+    const res = await ds.editRecord(0, '{"a":2}');
+    assert.equal(res.ok, true);
+    assert.deepEqual((await ds.readRecord(0)).value, { a: 2 });
+    assert.equal((await ds.readRecord(1)).ok, true, '下一条记录（写后验证覆盖对象）读回正常');
     await ds.dispose();
   } finally {
     await rm(dir, { recursive: true, force: true });

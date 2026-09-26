@@ -18,7 +18,7 @@ const req = (type: string): unknown => ({ type });
 /** 各端点的默认 handler：返回完整 HostResponse（含 reply 类型与 requestId）。 */
 const baseHandlers: HostHandlerMap = {
   [HostEndpoint.READY]: () =>
-    initReply({ uri: 'u', totalLines: 0, totalBytes: 0, buildMs: 0, eof: true }),
+    initReply({ uri: 'u', totalLines: 0, totalRecords: 0, totalBytes: 0, buildMs: 0, eof: true }),
   [HostEndpoint.GET_OVERVIEW]: (r) =>
     okReply(HostReply.OVERVIEW, r.requestId, {
       uri: 'u',
@@ -160,6 +160,7 @@ test('READY 握手能返回 init 回执（此前 isHostRequest 误杀导致宿�
   const overview: OverviewPayload = {
     uri: 'file:///x.jsonl',
     totalLines: 3,
+    totalRecords: 3,
     totalBytes: 9,
     buildMs: 1,
     eof: true,

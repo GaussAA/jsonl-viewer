@@ -1064,6 +1064,19 @@ body {
   border-color: color-mix(in srgb, var(--jlv-focus) 35%, transparent);
   color: var(--jlv-info);
 }
+.jlv-value.inline-editable { cursor: text; }
+.jlv-value.editing { min-width: 80px; }
+.jlv-value.editing .jlv-inline-edit {
+  width: 100%; min-width: 120px;
+  font: inherit; color: inherit;
+  background: var(--jlv-bg);
+  border: 1px solid var(--jlv-focus);
+  border-radius: 3px;
+  padding: 1px 4px;
+  outline: none;
+}
+.jlv-value.error .jlv-inline-edit { border-color: var(--jlv-error); }
+
 .jlv-field-bool { display: flex; gap: 8px; }
 .jlv-field-applyall {
   display: flex; align-items: center; gap: 6px;

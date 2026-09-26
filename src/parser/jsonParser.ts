@@ -135,53 +135,128 @@ export async function readLineBuffer(
 }
 
 /** 基于稀疏索引 scan，按需读取并解析第 line 行（单次顺序 IO，从最近检查点扫到该行）。 */
+/**
+ * 读取一条逻辑记录并解析。
+ *
+ * 「记录」是 JSONL 的逻辑单位：紧凑文件里一条记录占一个物理行（`recordNo == line`，
+ * 行为与旧版完全一致）；pretty/多行文件里一条记录可跨多物理行，此时把记录区间内的
+ * 物理行按序聚合（内部行的换行是内容的组成部分），整体交给 JSON 解析。
+ *
+ * `rawBytes` 是聚合文本的字节数（CRLF 行尾的 \r 被扫描层剥离，与旧口径一致）——
+ * 与 `editRecord` 内部的聚合口径相同，保证乐观锁比对一致。
+ */
 export async function readRecord(
-  line: number,
+  recordNo: number,
   lineIndex: LineIndex,
   reader: ByteReader,
   opts: ReadRecordOpts = {}
 ): Promise<RecordResult> {
-  if (line < 0 || line >= lineIndex.totalLines) {
-    return { line, ok: false, error: '无效行号' };
+  if (recordNo < 0 || recordNo >= lineIndex.totalRecords) {
+    return { line: recordNo, ok: false, error: '无效记录号' };
   }
   const scanOpts = opts.maxLineBytes != null ? { maxLineBytes: opts.maxLineBytes } : undefined;
-  for await (const r of lineIndex.scan(reader, line, line + 1, scanOpts)) {
-    if (r.error) return { line, ok: false, error: r.error };
-    const rawText = r.bytes.toString('utf8');
-    const parsed = parseJsonLine(rawText);
-    if (parsed.ok) {
-      return { line, ok: true, value: parsed.value, rawText, rawBytes: r.bytes.length };
-    }
-    // 坏行同样回原文：编辑要支持「把坏行改好」这一最常见的修复动作。
-    return { line, ok: false, error: parsed.error, rawText, rawBytes: r.bytes.length };
+  const range = lineIndex.recordRange(recordNo);
+  const lines: string[] = [];
+  for await (const r of lineIndex.scan(reader, range.startLine, range.endLine + 1, scanOpts)) {
+    if (r.error) return { line: recordNo, ok: false, error: r.error };
+    lines.push(r.bytes.toString('utf8'));
   }
-  return { line, ok: false, error: '行不存在' };
+  // 多行记录：物理行按序以 \n 连接（内部行的换行是记录内容的组成部分）。
+  const rawText = lines.join('\n');
+  const rawBytes = Buffer.byteLength(rawText, 'utf8');
+  const parsed = parseJsonLine(rawText);
+  if (parsed.ok) {
+    return { line: recordNo, ok: true, value: parsed.value, rawText, rawBytes };
+  }
+  // 坏记录同样回原文：编辑要支持「把坏记录改好」这一最常见的修复动作。
+  return { line: recordNo, ok: false, error: parsed.error, rawText, rawBytes };
 }
 
 /** 读取并解析 [startLine, startLine+count) 的一批行（虚拟滚动请求可视区用，连续顺序扫）。 */
+/**
+ * 批量读取记录（虚拟滚动可视区用）：[startRecord, startRecord+count) 单遍扫描聚合。
+ *
+ * 紧凑文件下与逐行读取完全等价；多行文件下把记录区间内的物理行聚合后再解析，
+ * 单遍顺序 IO 完成（边界来自 recordRange，行 → 记录的归组用 recordEndLines 推进）。
+ */
+/**
+ * 记录流式扫描生成器：把 [from, to) 内的每条逻辑记录聚合为 {recordNo, text, buf}。
+ *
+ * readBatch / 搜索 / 过滤 / 坏记录扫描共用这一分组骨架 —— 行→记录的归组逻辑只有
+ * 这一份，任何一处改错都只改这里。多行记录的内部换行是内容组成部分（join('\n')）。
+ */
+export async function* scanRecords(
+  from: number,
+  to: number,
+  lineIndex: LineIndex,
+  reader: ByteReader,
+  scanOpts?: { maxLineBytes?: number; shouldCancel?: () => boolean }
+): AsyncGenerator<{ recordNo: number; text: string; buf: Buffer }> {
+  if (from >= to || from < 0) return;
+  const firstRange = lineIndex.recordRange(from);
+  const lastRange = lineIndex.recordRange(to - 1);
+  const endLines = lineIndex.multiline
+    ? (lineIndex.recordEndLines as ReadonlyArray<number>)
+    : undefined;
+
+  let recordNo = from;
+  let lines: string[] = [];
+  let bytes: Buffer[] = [];
+  let total = 0;
+
+  for await (const r of lineIndex.scan(
+    reader,
+    firstRange.startLine,
+    lastRange.endLine + 1,
+    scanOpts?.maxLineBytes != null ? { maxLineBytes: scanOpts.maxLineBytes } : undefined
+  )) {
+    if (scanOpts?.shouldCancel?.()) return;
+    if (!r.error) {
+      lines.push(r.bytes.toString('utf8'));
+      bytes.push(r.bytes);
+      total += r.bytes.length;
+    }
+    // 行 → 记录归组：到达当前记录的结束行即产出，推进到下一条。
+    const groupEnd =
+      endLines !== undefined
+        ? recordNo < endLines.length
+          ? endLines[recordNo]
+          : r.line
+        : recordNo;
+    if (r.line >= groupEnd) {
+      yield { recordNo, text: lines.join('\n'), buf: Buffer.concat(bytes, total) };
+      recordNo++;
+      lines = [];
+      bytes = [];
+      total = 0;
+    }
+  }
+  if (lines.length > 0) {
+    yield { recordNo, text: lines.join('\n'), buf: Buffer.concat(bytes, total) };
+  }
+}
+
 export async function readBatch(
-  startLine: number,
+  startRecord: number,
   count: number,
   lineIndex: LineIndex,
   reader: ByteReader,
   opts: ReadBatchOpts = {}
 ): Promise<RecordResult[]> {
-  if (count <= 0 || startLine < 0) return [];
-  const n = Math.min(count, Math.max(0, lineIndex.totalLines - startLine));
-  const scanOpts = opts.maxLineBytes != null ? { maxLineBytes: opts.maxLineBytes } : undefined;
+  if (count <= 0 || startRecord < 0) return [];
+  const lastRecord = Math.min(startRecord + count, lineIndex.totalRecords) - 1;
+  if (startRecord > lastRecord) return [];
   const out: RecordResult[] = [];
-  for await (const r of lineIndex.scan(reader, startLine, startLine + n, scanOpts)) {
-    // 真正的可中断：宿主 CancelToken 置位 → 立即停（不再扫剩余行）。
-    if (opts.shouldCancel?.()) break;
-    if (r.error) {
-      out.push({ line: r.line, ok: false, error: r.error });
-      continue;
-    }
-    const parsed = parseJsonLine(r.bytes.toString('utf8'));
+  for await (const rec of scanRecords(startRecord, lastRecord + 1, lineIndex, reader, {
+    maxLineBytes: opts.maxLineBytes,
+    shouldCancel: opts.shouldCancel,
+  })) {
+    const parsed = parseJsonLine(rec.text);
+    const rawBytes = Buffer.byteLength(rec.text, 'utf8');
     out.push(
       parsed.ok
-        ? { line: r.line, ok: true, value: parsed.value }
-        : { line: r.line, ok: false, error: parsed.error }
+        ? { line: rec.recordNo, ok: true, value: parsed.value, rawText: rec.text, rawBytes }
+        : { line: rec.recordNo, ok: false, error: parsed.error, rawText: rec.text, rawBytes }
     );
   }
   return out;

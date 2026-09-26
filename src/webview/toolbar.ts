@@ -10,7 +10,7 @@ import { formatBuildMs, formatCount } from './logic.ts';
 
 export interface ToolbarInfo {
   fileName: string;
-  totalLines: number;
+  totalRecords: number;
   loadedLines: number;
   range: [number, number];
   buildMs: number | undefined;
@@ -41,7 +41,7 @@ export interface ToolbarHandlers {
 
 export interface ToolbarStatsEls {
   fileNameEl: HTMLElement;
-  totalLinesEl: HTMLElement;
+  totalRecordsEl: HTMLElement;
   loadedEl: HTMLElement;
   rangeEl: HTMLElement;
   buildMsEl: HTMLElement;
@@ -120,7 +120,7 @@ export function createToolbar(
   statusDot.className = 'jlv-dot-ok';
   const statusEl = document.createElement('span');
   statusEl.textContent = '…';
-  const totalLinesEl = document.createElement('span');
+  const totalRecordsEl = document.createElement('span');
   const loadedEl = document.createElement('span');
   loadedEl.hidden = true;
   const buildMsEl = document.createElement('span');
@@ -130,7 +130,7 @@ export function createToolbar(
   badLinesBtn.className = 'jlv-bad-chip';
   badLinesBtn.hidden = true;
   badLinesBtn.addEventListener('click', () => handlers.onOpenBadLines?.());
-  statusRootEl.append(statusDot, statusEl, totalLinesEl, badLinesBtn, loadedEl, buildMsEl);
+  statusRootEl.append(statusDot, statusEl, totalRecordsEl, badLinesBtn, loadedEl, buildMsEl);
 
   titleBox.append(fileNameEl, statusRootEl);
   header.append(icon, titleBox);
@@ -660,7 +660,7 @@ export function createToolbar(
   /* ---------- update / els ---------- */
   const els: ToolbarStatsEls = {
     fileNameEl,
-    totalLinesEl,
+    totalRecordsEl,
     loadedEl,
     rangeEl,
     buildMsEl,
@@ -671,8 +671,8 @@ export function createToolbar(
 
   const update = (info: Partial<ToolbarInfo> & { fileName?: string }): void => {
     if (info.fileName !== undefined) fileNameEl.textContent = info.fileName;
-    if (info.totalLines !== undefined)
-      totalLinesEl.textContent = ` · ${formatCount(info.totalLines)} 行`;
+    if (info.totalRecords !== undefined)
+      totalRecordsEl.textContent = ` · ${formatCount(info.totalRecords)} 条记录`;
     if (info.buildMs !== undefined) buildMsEl.textContent = ` · ${formatBuildMs(info.buildMs)}`;
     if (info.range) rangeEl.textContent = `${info.range[0] + 1}–${info.range[1] + 1}`;
     if (info.badLines) {

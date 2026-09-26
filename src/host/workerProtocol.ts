@@ -48,6 +48,8 @@ export type WorkerResponse =
       buildMs: number;
       eof: boolean;
       interval: number;
+      /** 记录分组（仅多行/含空行文件存在；紧凑文件 undefined = 记录号==行号）。 */
+      records?: { endLines: number[]; endOffsets: number[] };
     }
   /** 构建进度（大文件构建期间供宿主反馈，避免用户误判为卡死）。 */
   | { type: 'progress'; requestId: number; bytesRead: number; lines: number }

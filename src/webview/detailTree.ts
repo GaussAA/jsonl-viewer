@@ -25,7 +25,7 @@ import {
   TreeState,
 } from './detailLogic.ts';
 import type { PathSeg } from './detailLogic.ts';
-import { isFieldEditableKind } from './editLogic.ts';
+import { isFieldEditableKind, parseFieldInput } from './editLogic.ts';
 
 /** 挂在 `.jlv-tree-node` 上的懒展开元数据（替代散落的 as unknown as 链式断言）。 */
 interface TreeNodeMeta {
@@ -64,6 +64,16 @@ export interface DetailTreeNavHandlers {
    * 本模块只把「用户点了哪个字段」这件事报出去。
    */
   onEditField?(segs: PathSeg[], value: unknown): void;
+  /**
+   * 原地编辑：双击字段值后，把新值交装配层落盘（Enter 提交时调用）。
+   * 返回 `{ ok: false, error }` 时编辑态保持并显示错误；成功后由装配层重建详情树。
+   * 未提供时双击不进入编辑态（铅笔浮层仍是可用入口）。
+   */
+  onInlineEdit?(
+    segs: PathSeg[],
+    from: unknown,
+    to: unknown
+  ): Promise<{ ok: boolean; error?: string }> | { ok: boolean; error?: string };
 }
 
 export interface DetailTreeController {
@@ -380,6 +390,77 @@ export function createDetailTree(
   /** 递归构建单个节点及其（已展开的）子树。
    *  节点 = 块容器（.jlv-tree-node）：header 行在上、子树块（.jlv-tree-block）在其下方逐级缩进；
    *  避免旧版「子节点作为 flex 项横向堆积到父标签右侧」造成深层嵌套水平压缩的问题。 */
+  /**
+   * 原地编辑一个标量字段：值 span 原地变输入框，Enter 提交 / Esc 取消 / blur 还原。
+   *
+   * 与铅笔浮层并存：双击是快速通道（所见即所改），浮层提供「应用到全部」等高级选项。
+   * 失败（定位失败/宿主拒绝）时输入框红框并显示原因，编辑态保持 —— 用户就在原地，
+   * 改完再试，不丢输入。成功后装配层会整体重建详情树，此处的 DOM 随之被替换。
+   */
+  function beginInlineEdit(
+    valueEl: HTMLElement,
+    segs: readonly PathSeg[],
+    original: string | number | boolean,
+    kind: 'string' | 'number' | 'boolean'
+  ): void {
+    if (valueEl.classList.contains('editing')) return; // 已在编辑态，忽略重复双击
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'jlv-inline-edit';
+    input.value = String(original);
+    input.spellcheck = false;
+
+    let settled = false;
+    const finish = (restore: boolean): void => {
+      if (settled) return; // 提交开始后 blur 不再还原（成功由重建更新）
+      settled = true;
+      valueEl.classList.remove('editing', 'error');
+      valueEl.textContent = restore ? formatScalar(original, kind).text : '';
+      input.remove();
+    };
+
+    valueEl.classList.add('editing');
+    valueEl.textContent = '';
+    valueEl.appendChild(input);
+    input.focus();
+    input.setSelectionRange(input.value.length, input.value.length);
+
+    input.addEventListener('keydown', (e) => {
+      e.stopPropagation(); // 防止冒泡到树行的键盘导航
+      if (e.key === 'Escape') {
+        finish(true);
+        return;
+      }
+      if (e.key !== 'Enter') return;
+      const parsed = parseFieldInput(input.value, kind);
+      if (!parsed.ok) {
+        valueEl.classList.add('error');
+        input.title = parsed.error;
+        return;
+      }
+      settled = true; // 提交开始
+      void Promise.resolve(navHandlers.onInlineEdit?.([...segs], original, parsed.value))
+        .then((res) => {
+          if (res && res.ok === false) {
+            settled = false;
+            valueEl.classList.add('error');
+            input.title = res.error ?? '保存失败';
+            input.focus();
+          } else {
+            valueEl.classList.remove('editing', 'error');
+            input.remove();
+          }
+        })
+        .catch((e: unknown) => {
+          settled = false;
+          valueEl.classList.add('error');
+          input.title = e instanceof Error ? e.message : String(e);
+          input.focus();
+        });
+    });
+    input.addEventListener('blur', () => finish(true));
+  }
+
   function buildNode(parent: HTMLElement, segs: PathSeg[], depth: number, value: unknown): void {
     const kind = jsonKindOf(value);
     const container = isContainer(value);
@@ -441,6 +522,17 @@ export function createDetailTree(
       // 容器不给入口 —— 改整个对象/数组应走整行编辑，那是更诚实的入口。
       // 可编辑类型的判定复用 editLogic 的单一来源：入口显示了而浮层拒绝打开，
       // 比不显示入口更糟。
+      // 原地编辑：双击标量值 → 值 span 原地变输入框（Enter 提交 / Esc 取消）。
+      // 与铅笔浮层并存：双击是快速通道（所见即所改），浮层提供「应用到全部」等高级选项。
+      if (rawTextAvailable && navHandlers.onInlineEdit && isFieldEditableKind(kind)) {
+        v.classList.add('inline-editable');
+        v.title = (v.title ? v.title + ' · ' : '') + '双击可原地编辑';
+        v.addEventListener('dblclick', (e) => {
+          e.stopPropagation();
+          beginInlineEdit(v, segs, value as string | number | boolean, kind);
+        });
+      }
+
       if (rawTextAvailable && navHandlers.onEditField && isFieldEditableKind(kind)) {
         const editBtn = document.createElement('button');
         editBtn.type = 'button';

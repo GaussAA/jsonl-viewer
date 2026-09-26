@@ -413,3 +413,82 @@ test('applyLineInsert(0)：多检查点场景下开头插入后仍能扫出全�
   assert.deepEqual(lines, ['x', 'a', 'b', 'c'], '开头插入后仍能顺读全部行');
   assert.equal(shifted.checkpoints[0].line, 0, '锚点仍在最前');
 });
+
+/* ====================== 记录分组（多行记录支持） ====================== */
+
+test('recordRange：多行 pretty 记录正确分组，紧凑记录单行成组', async () => {
+  // 8 个物理行：{ / "a": 1 / } / {"b":2} / [ / 1, / 2 / ]
+  const s = '{\n  "a": 1\n}\n{"b":2}\n[\n 1,\n 2\n]\n';
+  const li = await buildFromString(s, 4);
+  assert.equal(li.multiline, true);
+  assert.equal(li.totalRecords, 3);
+  assert.equal(li.totalLines, 8);
+
+  assert.deepEqual(
+    { ...li.recordRange(0) },
+    { startLine: 0, endLine: 2, startOffset: 0, endOffset: 13 }
+  );
+  assert.deepEqual(li.recordRange(1), { startLine: 3, endLine: 3, startOffset: 13, endOffset: 21 });
+  assert.deepEqual(li.recordRange(2), { startLine: 4, endLine: 7, startOffset: 21, endOffset: 32 });
+  assert.equal(li.totalBytes, 32);
+});
+
+test('recordRange：紧凑文件走零内存快路径（记录号==行号）', async () => {
+  const li = await buildFromString('{"a":1}\n{"b":2}\n', 3);
+  assert.equal(li.multiline, false, '无空行、无跨行 → 不存分组数组');
+  assert.equal(li.totalRecords, 2);
+  assert.equal(li.recordRange(1).startLine, 1);
+  assert.equal(li.recordRange(1).endLine, 1);
+});
+
+test('recordRange：字符串内的换行与括号不干扰分组', async () => {
+  // 值里含转义引号、字面 { } [ ] 与物理换行（JSON 不允许裸换行，但分组扫描须容忍）
+  const s = '{"a":"he said \\"hi\\"","b":"x{[y]\\nz"}\n{"c":3}\n';
+  const li = await buildFromString(s, 5);
+  assert.equal(li.multiline, false, '字符串内的括号与换行转义不影响闭合判定，仍每行一条');
+  assert.equal(li.totalRecords, 2);
+});
+
+test('recordRange：空行跳过，不构成记录也不打断分组', async () => {
+  const s = '{"a":1}\n\n{"b":2}\n';
+  const li = await buildFromString(s, 3);
+  assert.equal(li.multiline, true);
+  assert.equal(li.totalRecords, 2, '空行不算记录');
+  // 记录 1 的区间从空行后起（含前导空行无害，parse 走 trim）
+  assert.equal(li.recordRange(1).startLine, 1);
+  assert.equal(li.recordRange(1).endLine, 2);
+});
+
+test('recordRange：悬空到 EOF 的残缺记录以 EOF 收尾（坏记录）', async () => {
+  const s = '{"a":1}\n{"b":\n1\n';
+  const li = await buildFromString(s, 3);
+  assert.equal(li.multiline, true);
+  assert.equal(li.totalRecords, 2);
+  assert.equal(li.recordRange(1).startLine, 1);
+  assert.equal(li.recordRange(1).endLine, 2, '悬空记录吞并后续行直到 EOF');
+  assert.equal(li.recordRange(1).endOffset, li.totalBytes);
+});
+
+test('recordRange：深度钳制 —— 多余右括号按单行坏记录处理', async () => {
+  const s = '{"a":1}}\n{"b":2}\n';
+  const li = await buildFromString(s, 3);
+  // 第二个 } 使深度触底（钳 0），该行即结束 —— 不得吞并下一行
+  assert.equal(li.totalRecords, 2);
+  assert.equal(li.recordRange(0).endLine, 0);
+  assert.equal(li.recordRange(1).startLine, 1);
+});
+
+test('recordNoByStartLine：多行文件按起始行反查记录号', async () => {
+  const s = '{\n  "a": 1\n}\n{"b":2}\n';
+  const li = await buildFromString(s, 4);
+  assert.equal(li.recordNoByStartLine(0), 0);
+  assert.equal(li.recordNoByStartLine(3), 1);
+  assert.equal(li.recordNoByStartLine(1), -1, '多行记录的中间行不是任何记录的起始');
+});
+
+test('recordRange：单个顶层标量也是一条记录', async () => {
+  const s = '123\n"str"\ntrue\n';
+  const li = await buildFromString(s, 3);
+  assert.equal(li.totalRecords, 3);
+  assert.equal(li.multiline, false, '顶层标量单行即闭合');
+});

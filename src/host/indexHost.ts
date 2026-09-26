@@ -229,10 +229,14 @@ export class WorkerIndexHost implements IndexHost {
       const p = this.pending.get(m.requestId);
       if (p) {
         this.pending.delete(m.requestId);
-        const index = new LineIndex(m.checkpoints, m.totalBytes, m.totalLines, m.interval, {
-          buildMs: m.buildMs,
-          eof: m.eof,
-        });
+        const index = new LineIndex(
+          m.checkpoints,
+          m.totalBytes,
+          m.totalLines,
+          m.interval,
+          { buildMs: m.buildMs, eof: m.eof },
+          m.records
+        );
         p.resolve({
           index,
           stats: {

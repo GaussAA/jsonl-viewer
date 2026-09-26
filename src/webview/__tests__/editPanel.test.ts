@@ -25,7 +25,7 @@ interface SubmitResult {
 }
 
 function makePanel(
-  opts: { result?: SubmitResult; overview?: { totalBytes: number; totalLines: number } } = {}
+  opts: { result?: SubmitResult; overview?: { totalBytes: number; totalRecords: number } } = {}
 ) {
   const calls: Array<{ line: number; text: string; mode: string }> = [];
   const committed: Array<{ line: number; mode: string }> = [];
@@ -172,7 +172,7 @@ test('editPanel：格式化按钮做单行规范化（恒单行）；非法内�
 });
 
 test('editPanel：成本超阈值提示「需搬移」，未超阈值不打扰', () => {
-  const big = makePanel({ overview: { totalBytes: 100 * 1024 * 1024, totalLines: 10 } });
+  const big = makePanel({ overview: { totalBytes: 100 * 1024 * 1024, totalRecords: 10 } });
   try {
     big.panel.open(0, '{}'); // 首行 → 估算约 90MB > 32MB 阈值
     const hint = q<HTMLElement>(big.panel.root, '.jlv-edit-hint');
@@ -182,7 +182,7 @@ test('editPanel：成本超阈值提示「需搬移」，未超阈值不打扰',
     big.panel.dispose();
   }
 
-  const small = makePanel({ overview: { totalBytes: 1024, totalLines: 10 } });
+  const small = makePanel({ overview: { totalBytes: 1024, totalRecords: 10 } });
   try {
     small.panel.open(9, '{}'); // 末行 → 零搬移
     assert.equal(q<HTMLElement>(small.panel.root, '.jlv-edit-hint').hidden, true);

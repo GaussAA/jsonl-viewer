@@ -48,9 +48,10 @@ test('前 N 行抽样正确性：只扫前 sampleLines 行', async () => {
 test('坏行与空行跳过：不计入字段，且出现在 errorLines', async () => {
   const s = '{"a":1}\nnot-valid\n\n{"a":2,"b":3}\n{"a":3,"b":4}\n';
   const res = await inferFromString(s, { sampleLines: 100 });
-  // 有效记录 = 行0,3,4 → total 3
+  // 有效记录 = 记录0,2,3 → total 3
   assert.equal(res.total, 3);
-  assert.deepEqual(res.errorLines, [1, 2]); // 坏行 + 空行
+  // 记录分组语义：空行不构成记录（被跳过，并入下一条记录的区间），只有坏记录入 errorLines
+  assert.deepEqual(res.errorLines, [1]);
   const a = res.fields.find((f) => f.key === 'a')!;
   const b = res.fields.find((f) => f.key === 'b')!;
   assert.equal(a.freq, 3);

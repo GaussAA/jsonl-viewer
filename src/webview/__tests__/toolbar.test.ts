@@ -92,7 +92,7 @@ describe('createToolbar（视图层覆盖率补强）', () => {
     const h = makeToolbar();
     h.tb.update({
       fileName: 'big.jsonl',
-      totalLines: 1000,
+      totalRecords: 1000,
       loadedLines: 42,
       range: [0, 20],
       buildMs: 12,
@@ -100,7 +100,7 @@ describe('createToolbar（视图层覆盖率补强）', () => {
     });
 
     assert.strictEqual(h.tb.els.fileNameEl.textContent, 'big.jsonl', '文件名');
-    assert.match(h.tb.els.totalLinesEl.textContent ?? '', /1,000/, '总行数（千分位）');
+    assert.match(h.tb.els.totalRecordsEl.textContent ?? '', /1,000/, '总行数（千分位）');
     assert.strictEqual(h.tb.els.rangeEl.textContent, '1–21', '当前范围按 1 起展示');
     assert.match(h.tb.els.buildMsEl.textContent ?? '', /12ms/, '构建耗时');
     assert.strictEqual(h.tb.els.statusEl.textContent, '就绪', '状态文案');
@@ -112,7 +112,7 @@ describe('createToolbar（视图层覆盖率补强）', () => {
 
     h.tb.update({
       fileName: 'a',
-      totalLines: 0,
+      totalRecords: 0,
       loadedLines: 0,
       range: [0, 0],
       buildMs: undefined,
@@ -123,7 +123,7 @@ describe('createToolbar（视图层覆盖率补强）', () => {
 
     h.tb.update({
       fileName: 'a',
-      totalLines: 0,
+      totalRecords: 0,
       loadedLines: 0,
       range: [0, 0],
       buildMs: undefined,
@@ -308,7 +308,7 @@ describe('createToolbar（视图层覆盖率补强）', () => {
     const h = makeToolbar();
     h.tb.update({
       fileName: 'a',
-      totalLines: 5,
+      totalRecords: 5,
       loadedLines: 5,
       range: [0, 5],
       buildMs: 1,
@@ -362,7 +362,7 @@ describe('createToolbar（视图层覆盖率补强）', () => {
     h.tb.update({ badLines: { count: 2, partial: false } });
     // updateToolbar() 会被频繁调用且不携带 badLines —— 若它顺手重置徽章，
     // 用户每次滚动都会看到徽章闪一下。
-    h.tb.update({ totalLines: 100, loadedLines: 20, range: [0, 19], status: 'ready' });
+    h.tb.update({ totalRecords: 100, loadedLines: 20, range: [0, 19], status: 'ready' });
     assert.strictEqual(chipEl(h).hidden, false, '常规刷新不得改动徽章');
     assert.match(chipEl(h).textContent ?? '', /2 坏行/);
   });
