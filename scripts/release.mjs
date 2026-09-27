@@ -34,7 +34,8 @@ const execWithRetry = (cmd, opts) => {
     try {
       return execSync(cmd, { cwd: root, ...opts });
     } catch (e) {
-      if (attempt >= 3 || !String(e?.message ?? '').includes('EBUSY')) throw e;
+      const busy = String(e?.message ?? '').includes('EBUSY') || (e && e.code === 'EBUSY');
+      if (attempt >= 3 || !busy) throw e;
       console.warn(`[release] 命令被占用（EBUSY），1 秒后重试（${attempt}/2）…`);
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000);
     }
