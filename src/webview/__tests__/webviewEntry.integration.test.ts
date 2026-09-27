@@ -282,6 +282,51 @@ describe('webviewEntry 装配层（集成）', () => {
   });
 
   describe('记录按需拉取（ThrottleQueue）', () => {
+    it('多行记录文件（pretty JSONL）：列表按记录数渲染，卡片全部非错误态', async () => {
+      // 复刻 01_basic.jsonl 场景：前 2 条 pretty（各 7 行）、后 3 条紧凑 —— totalLines=19 但 totalRecords=5
+      const { host, app } = await boot();
+      host.receive({
+        type: HostReply.INIT,
+        payload: { ...BASE_INIT, totalLines: 19, totalRecords: 5 },
+      });
+      await sleep(FLUSH_MS);
+      replyFields(host, ['id', 'name']);
+
+      const rr = lastReq(host, HostEndpoint.READ_RECORDS);
+      assert.ok(rr, '存在首屏批量请求');
+      reply(host, rr, {
+        items: [
+          { line: 0, ok: true, value: { id: 1, name: 'Alice' } },
+          { line: 1, ok: true, value: { id: 2, name: 'Bob' } },
+          { line: 2, ok: true, value: { id: 3, name: 'Carol' } },
+          { line: 3, ok: true, value: { id: 4, name: 'Dave' } },
+          { line: 4, ok: true, value: { id: 5, name: 'Eve' } },
+        ],
+        hasMore: false,
+      });
+      await sleep(FLUSH_MS);
+
+      // 5 张卡片（按 totalRecords，而非 19 个物理行），全部非错误态
+      const rendered = cards(app);
+      assert.strictEqual(rendered.length, 5, `应渲染 5 张卡片（实际 ${rendered.length}）`);
+      for (let i = 0; i < 5; i++) {
+        assert.ok(!/error/.test(rendered[i].className), `卡片 ${i} 不是错误态`);
+      }
+      assert.match(text(app.querySelector('.jlv-sub')), /5 条记录/);
+
+      // 详情：多行记录的 readRecord 回执（宿主已聚合解析），树正常渲染字段
+      const dr = lastReq(host, HostEndpoint.READ_RECORD);
+      assert.ok(dr, '存在详情请求');
+      reply(host, dr, {
+        ok: true,
+        value: { id: 1, name: 'Alice' },
+        rawText: '{\n  "id": 1,\n  "name": "Alice"\n}',
+        rawBytes: 42,
+      });
+      await sleep(FLUSH_MS);
+      assert.match(text(app.querySelector('.jlv-col-detail')), /Alice/, '详情树渲染多行记录的字段');
+    });
+
     it('init 触发节流窗口后按当前页发起一次 readRecords', async () => {
       const { host, app } = await bootWithRecords();
       const rr = reqs(host, HostEndpoint.READ_RECORDS);
