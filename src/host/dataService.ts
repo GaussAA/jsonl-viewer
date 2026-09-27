@@ -21,6 +21,7 @@ import {
   parseJsonLine,
   readLineAt,
   readRecord as readRecordAt,
+  scanRecords,
 } from '../parser/jsonParser.ts';
 import { inferFields } from '../infer/inferFields.ts';
 import {
@@ -485,23 +486,19 @@ export class DataService {
     if (n <= 0) return buildRecordsPayload(startLine, [], li.totalRecords);
 
     // 阶段三（UI 热路径）：列表态不整条解析、不缓存整条巨物。
-    // - 普通行（≤ 内联阈值，见 constants.ts 的 RECORD_INLINE_MAX_BYTES）：JSON.parse 后附带「有界摘要」；
-    // - 超大行（> 阈值）：跳过整条 parse，浅扫描得类型/顶层条目数/预览并标记 truncated，
+    // - 普通记录（≤ 内联阈值，见 constants.ts 的 RECORD_INLINE_MAX_BYTES）：JSON.parse 后附带「有界摘要」；
+    // - 超大记录（> 阈值）：跳过整条 parse，浅扫描得类型/顶层条目数/预览并标记 truncated，
     //   完整值仍由 readRecord 按需拉取。如此 list 内存只与「可见窗口 + 有界摘要」成正比。
+    // **必须走 scanRecords（记录分组聚合）而非裸 scan**：多行（pretty）文件里一条记录
+    // 跨多个物理行，裸 scan 会把每个物理行当记录判定 —— 首行只剩 `{`，全列表皆错
+    // （v1.9.0 实机事故：01_basic.jsonl 前 2 条 pretty 记录全显示为 error）。
     const items: RecordsPayloadItem[] = [];
-    for await (const r of li.scan(reader, startLine, startLine + n)) {
-      // 真正的可中断：CancelToken 置位时逐行检测并提前停（不扫剩余行）。
-      if (shouldCancel?.()) break;
-      if (r.error) {
-        items.push({ line: r.line, ok: false, error: r.error });
-        this.knownBadLines.add(r.line);
-        continue;
-      }
-      const byteLen = r.bytes.length;
+    for await (const rec of scanRecords(startLine, startLine + n, li, reader, { shouldCancel })) {
+      const byteLen = rec.buf.length;
       if (isOversized(byteLen)) {
-        const raw = summarizeRawLine(r.bytes);
+        const raw = summarizeRawLine(rec.buf);
         items.push({
-          line: r.line,
+          line: rec.recordNo,
           ok: true,
           value: undefined,
           truncated: true,
@@ -511,15 +508,15 @@ export class DataService {
         });
         continue;
       }
-      const parsed = parseJsonLine(r.bytes.toString('utf8'));
+      const parsed = parseJsonLine(rec.text);
       if (!parsed.ok) {
-        items.push({ line: r.line, ok: false, error: parsed.error });
-        this.knownBadLines.add(r.line);
+        items.push({ line: rec.recordNo, ok: false, error: parsed.error });
+        this.knownBadLines.add(rec.recordNo);
         continue;
       }
       const value = parsed.value;
       items.push({
-        line: r.line,
+        line: rec.recordNo,
         ok: true,
         value,
         summary: makeSummary(value),
@@ -989,6 +986,14 @@ export class DataService {
       return DataService.replaceFailure(conflict.error ?? '文件已被外部修改', { conflict: true });
     }
 
+    // 多行（pretty）文件暂不支持批量文本替换：替换以物理行为单位，会跨记录边界
+    // 破坏多行记录的结构。逐条编辑（双击/铅笔）在多行文件下完全可用。
+    if (li.multiline) {
+      return DataService.replaceFailure(
+        '多行（pretty）文件暂不支持批量替换：替换以物理行为单位，会破坏跨行记录的结构。请逐条编辑。'
+      );
+    }
+
     // ① 搜索定位（走 host：worker 或主线程兜底）
     const found = await this.search(query, undefined, 'all');
     if (found.truncated) {
@@ -1157,6 +1162,14 @@ export class DataService {
 
     const li = await this.ensureIndex();
     const reader = this.reader!;
+
+    // 多行（pretty）文件暂不支持批量字段替换：按记录聚合替换的写入路径尚未打通。
+    // 逐条编辑（双击/铅笔）在多行文件下完全可用。
+    if (li.multiline) {
+      return DataService.replaceFailure(
+        '多行（pretty）文件暂不支持批量字段替换。请逐条编辑（双击字段值或点铅笔）。'
+      );
+    }
 
     const conflict = await this.detectWriteConflict(-1);
     if (conflict) {
@@ -1871,19 +1884,28 @@ export class DataService {
       text: '',
     });
 
-    const targets = DataService.normalizeLines(lines, li.totalLines);
-    if (targets.length === 0) return empty('没有可复制的行');
+    const targets = DataService.normalizeLines(lines, li.totalRecords);
+    if (targets.length === 0) return empty('没有可复制的记录');
     if (targets.length > MAX_SELECTION_LINES) {
       return empty(`一次最多复制 ${MAX_SELECTION_LINES} 行，当前选中 ${targets.length} 行。`);
     }
 
-    const wanted = new Set(targets);
+    // 记录号 → 物理行集合（多行记录展开为连续行区间，复制得到完整的多行原文）
+    const wantedLines = new Set<number>();
+    for (const no of targets) {
+      const rr = li.recordRange(no);
+      for (let l = rr.startLine; l <= rr.endLine; l++) wantedLines.add(l);
+    }
+    const firstCopyRange = li.recordRange(targets[0]);
+    const lastCopyRange = li.recordRange(targets[targets.length - 1]);
+
+    const wanted = wantedLines;
     const parts: string[] = [];
     let bytes = 0;
     let skipped = 0;
     let truncated = false;
 
-    for await (const r of li.scan(reader, targets[0], targets[targets.length - 1] + 1)) {
+    for await (const r of li.scan(reader, firstCopyRange.startLine, lastCopyRange.endLine + 1)) {
       if (!wanted.has(r.line)) continue;
       if (r.error) {
         skipped++;
@@ -2083,7 +2105,11 @@ export class DataService {
     let processedBytes = 0;
     let lastTick = 0;
 
-    for await (const r of li.scan(reader, 0, li.totalLines)) {
+    // 记录分组聚合扫描：多行（pretty）文件里一条记录跨多个物理行，
+    // 必须整体 parse —— 裸扫物理行会把 pretty 的中间行全部误判为坏行。
+    for await (const rec of scanRecords(0, li.totalRecords, li, reader, {
+      shouldCancel: opts.shouldCancel,
+    })) {
       if (opts.shouldCancel?.()) {
         // 取消即**不**替换已发现集合：半份结果看起来像「文件很干净」，比没有结果更糟。
         return {
@@ -2097,25 +2123,23 @@ export class DataService {
         };
       }
       scanned++;
-      processedBytes += r.end - r.start;
+      processedBytes = rec.endOffset; // 绝对偏移（含行尾），终态恰为 totalBytes
 
       // 进度按字节节流；**终态必发**（停在 96% 的进度条比没有进度条更糟）。
       const now = performance.now();
-      if (scanned >= li.totalLines || now - lastTick >= PROGRESS_THROTTLE_MS) {
+      if (scanned >= li.totalRecords || now - lastTick >= PROGRESS_THROTTLE_MS) {
         lastTick = now;
         opts.onProgress?.({ processedBytes, totalBytes });
       }
 
-      const bad = r.error
-        ? true
-        : isOversized(r.bytes.length)
-          ? false // 与列表口径一致：超大行不解析，视作合法
-          : !parseJsonLine(r.bytes.toString('utf8')).ok;
+      const bad = isOversized(rec.buf.length)
+        ? false // 与列表口径一致：超大记录不解析，视作合法
+        : !parseJsonLine(rec.text).ok;
       if (!bad) continue;
 
-      // 超上限后只标记不记录 —— 载荷与前端 DOM 都不该随坏行数无界增长。
+      // 超上限后只标记不记录 —— 载荷与前端 DOM 都不该随坏记录数无界增长。
       if (lines.length >= MAX_BAD_LINES) truncated = true;
-      else lines.push(r.line);
+      else lines.push(rec.recordNo);
     }
 
     // 扫描成功即权威全量，**整体替换**而非合并：合并会让「已被改好的行」永远留在列表里。

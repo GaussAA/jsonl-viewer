@@ -191,7 +191,7 @@ export async function* scanRecords(
   lineIndex: LineIndex,
   reader: ByteReader,
   scanOpts?: { maxLineBytes?: number; shouldCancel?: () => boolean }
-): AsyncGenerator<{ recordNo: number; text: string; buf: Buffer }> {
+): AsyncGenerator<{ recordNo: number; text: string; buf: Buffer; endOffset: number }> {
   if (from >= to || from < 0) return;
   const firstRange = lineIndex.recordRange(from);
   const lastRange = lineIndex.recordRange(to - 1);
@@ -203,6 +203,7 @@ export async function* scanRecords(
   let lines: string[] = [];
   let bytes: Buffer[] = [];
   let total = 0;
+  let lastEnd = 0; // 最近一次 scan 行的独占结束偏移（含行尾）
 
   for await (const r of lineIndex.scan(
     reader,
@@ -211,6 +212,7 @@ export async function* scanRecords(
     scanOpts?.maxLineBytes != null ? { maxLineBytes: scanOpts.maxLineBytes } : undefined
   )) {
     if (scanOpts?.shouldCancel?.()) return;
+    lastEnd = r.end;
     if (!r.error) {
       lines.push(r.bytes.toString('utf8'));
       bytes.push(r.bytes);
@@ -224,7 +226,12 @@ export async function* scanRecords(
           : r.line
         : recordNo;
     if (r.line >= groupEnd) {
-      yield { recordNo, text: lines.join('\n'), buf: Buffer.concat(bytes, total) };
+      yield {
+        recordNo,
+        text: lines.join('\n'),
+        buf: Buffer.concat(bytes, total),
+        endOffset: lastEnd,
+      };
       recordNo++;
       lines = [];
       bytes = [];
@@ -232,7 +239,12 @@ export async function* scanRecords(
     }
   }
   if (lines.length > 0) {
-    yield { recordNo, text: lines.join('\n'), buf: Buffer.concat(bytes, total) };
+    yield {
+      recordNo,
+      text: lines.join('\n'),
+      buf: Buffer.concat(bytes, total),
+      endOffset: lastEnd,
+    };
   }
 }
 

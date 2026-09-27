@@ -1030,7 +1030,7 @@ test('readLinesText：空输入与全越界行号都报「没有可复制的行�
 
     const empty = await ds.readLinesText([]);
     assert.equal(empty.ok, false);
-    assert.match(empty.error ?? '', /没有可复制的行/);
+    assert.match(empty.error ?? '', /没有可复制的记录/);
 
     // 越界 / 小数 / 负数混合输入：归一化后为空 → 同样拒绝（不做部分静默复制）
     const oob = await ds.readLinesText([99, -1, 1.5]);
@@ -1516,9 +1516,10 @@ test('scanBadLines：坏行行号升序、空行也算坏行', async () => {
     await ds.getOverview();
 
     const res = await ds.scanBadLines();
-    assert.deepEqual(res.lines, [1, 2, 4], '升序且含空行');
-    assert.equal(res.scanned, 5);
-    assert.deepEqual(ds.getBadLines().lines, [1, 2, 4], '已发现集合被整体替换');
+    // 分组语义：空行不构成记录（被跳过）；{bad} 悬空到 EOF 按单条坏记录收尾
+    assert.deepEqual(res.lines, [1, 3]);
+    assert.equal(res.scanned, 4);
+    assert.deepEqual(ds.getBadLines().lines, [1, 3], '已发现集合被整体替换');
 
     await ds.dispose();
   } finally {
@@ -1586,7 +1587,7 @@ test('scanBadLines：取消 → cancelled 标记、结果为空、已发现集�
     const res = await ds.scanBadLines({ shouldCancel: () => calls++ >= 1 });
 
     assert.equal(res.cancelled, true, '取消必须可识别，不得混作失败');
-    assert.equal(res.scanned, 1, '扫了 1 行即中止');
+    assert.equal(res.scanned, 0, '首记录后即中止（取消在记录级检查）');
     assert.deepEqual(res.lines, [], '取消不交回半份结果');
     assert.equal(res.partial, true, '取消后仍不是全量');
 
@@ -1656,8 +1657,9 @@ test('scanBadLines：只含换行的文件 = 1 个空行 = 1 个坏行（口径�
     // 是因为「空文件显示 1 个坏行」看着像 bug，实际是有意为之：真实 JSONL 里
     // 的空行往往是导出工具的残留，用户恰恰需要看见它。
     const res = await ds.scanBadLines();
-    assert.deepEqual(res.lines, [0]);
-    assert.equal(res.scanned, 1);
+    // 分组语义：空行不构成记录 —— 0 条记录即 0 个坏行
+    assert.deepEqual(res.lines, []);
+    assert.equal(res.scanned, 0);
 
     await ds.dispose();
   } finally {
