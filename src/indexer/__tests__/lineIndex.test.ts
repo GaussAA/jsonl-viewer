@@ -13,7 +13,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { LineIndex } from '../lineIndex.ts';
+import { LineIndex, applyIndexOps, type IndexDeltaOp } from '../lineIndex.ts';
 import { MemoryReader, readLineBuffer, type ByteReader } from '../../parser/jsonParser.ts';
 
 /** 把字符串切成极小 chunk，强制 \n 落在块边界、跨块定位。 */
@@ -491,4 +491,59 @@ test('recordRange：单个顶层标量也是一条记录', async () => {
   const li = await buildFromString(s, 3);
   assert.equal(li.totalRecords, 3);
   assert.equal(li.multiline, false, '顶层标量单行即闭合');
+});
+
+/* ---------------------- applyIndexOps（两侧索引同源的共用底座） ---------------------- */
+
+test('applyIndexOps：空 ops 返回同一实例（零分配）', async () => {
+  const li = await buildFromString('{"a":1}\n{"b":2}\n');
+  assert.equal(applyIndexOps(li, []), li, '无变更时不该产生新对象');
+});
+
+test('applyIndexOps：按序应用 replace / insert / delete 三种 op', async () => {
+  const li = await buildFromString('{"a":1}\n{"b":2}\n{"c":3}\n');
+  const after = applyIndexOps(li, [
+    { kind: 'replace', line: 1, delta: 10 },
+    { kind: 'insert', line: 0, bytes: 5 },
+    { kind: 'delete', line: 3, bytes: 7 },
+  ]);
+  assert.equal(after.totalLines, 3, '插入 1 行 + 删除 1 行 → 行数不变');
+  assert.equal(after.totalBytes, li.totalBytes + 10 + 5 - 7);
+  assert.equal(after.checkpoints[0]?.line, 0, '首检查点必须仍是第 0 行（scan 的顺读起点）');
+});
+
+test('applyIndexOps：顺序敏感 —— 重排会让行号漂移（调用方必须自己排好序）', async () => {
+  // interval=1：每行都有检查点，行号漂移才看得见（默认 1024 行一个小文件时只有 {0,0}）。
+  const li = await buildFromString('{"a":1}\n{"b":2}\n{"c":3}\n', 3, { checkpointInterval: 1 });
+  // 先删后插（合法倒序）
+  const delThenInsert = applyIndexOps(li, [
+    { kind: 'delete', line: 2, bytes: 7 },
+    { kind: 'insert', line: 1, bytes: 4 },
+  ]);
+  // 先插后删（同一批 op 换了顺序，语义已变：删除的是另一行）
+  const insertThenDel = applyIndexOps(li, [
+    { kind: 'insert', line: 1, bytes: 4 },
+    { kind: 'delete', line: 2, bytes: 7 },
+  ]);
+  assert.notDeepEqual(
+    delThenInsert.checkpoints.map((c) => [c.line, c.offset]),
+    insertThenDel.checkpoints.map((c) => [c.line, c.offset]),
+    '两种顺序必须不同 —— 若相同，说明 op 的行号漂移语义被抹平了'
+  );
+});
+
+test('applyIndexOps：同一批 op 可让两份索引实例完全对齐（宿主同步的前提）', async () => {
+  // 场景即「主线程 DataService.index」与「worker 内那份」：起点相同 + 同一批 op ⇒ 结果相同。
+  const ops: IndexDeltaOp[] = [
+    { kind: 'replace', line: 0, delta: 12 },
+    { kind: 'insert', line: 2, bytes: 9 },
+    { kind: 'delete', line: 1, bytes: 6 },
+  ];
+  const a = await buildFromString('{"a":1}\n{"b":2}\n{"c":3}\n{"d":4}\n');
+  const b = await buildFromString('{"a":1}\n{"b":2}\n{"c":3}\n{"d":4}\n');
+  const ra = applyIndexOps(a, ops);
+  const rb = applyIndexOps(b, ops);
+  assert.deepEqual(ra.checkpoints, rb.checkpoints);
+  assert.equal(ra.totalBytes, rb.totalBytes);
+  assert.equal(ra.totalLines, rb.totalLines);
 });

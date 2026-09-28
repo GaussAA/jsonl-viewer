@@ -306,4 +306,44 @@ describe('WorkerIndexHost 分支（覆盖率补强）', () => {
     const host = createIndexHost(undefined);
     assert.strictEqual(host.kind, 'main');
   });
+  it('applyIndexOps：发出 applyIndexOps 请求并等 ack（回填失败必须可被观测）', async () => {
+    const { host, worker } = makeHost();
+    const p = host.applyIndexOps([{ kind: 'replace', line: 3, delta: 12 }]);
+
+    const req = worker.lastOf('applyIndexOps');
+    assert.ok(req && req.type === 'applyIndexOps', '已发出增量回填请求');
+    if (req?.type === 'applyIndexOps') {
+      assert.deepStrictEqual(req.ops, [{ kind: 'replace', line: 3, delta: 12 }]);
+    }
+
+    // 未收到 ack 前不得结算（否则「回填失败」会变成静默成功）
+    let settled = false;
+    void p.then(() => {
+      settled = true;
+    });
+    await wait(10);
+    assert.strictEqual(settled, false, 'ack 到达前请求应仍在途中');
+
+    worker.emitMessage({ type: 'ack', requestId: req?.requestId ?? 0 });
+    await p;
+    assert.strictEqual(settled, true, 'ack 后结算');
+
+    await host.dispose();
+  });
+
+  it('applyIndexOps：worker 回执 error 时拒绝（调用方据此降级为重建）', async () => {
+    const { host, worker } = makeHost();
+    const p = host.applyIndexOps([{ kind: 'delete', line: 1, bytes: 5 }]);
+    const req = worker.lastOf('applyIndexOps');
+    assert.ok(req && req.type === 'applyIndexOps');
+
+    worker.emitMessage({
+      type: 'error',
+      requestId: req?.requestId ?? 0,
+      message: '索引尚未就绪',
+    });
+    await assert.rejects(p, /索引尚未就绪/, '回填失败必须向上传播，不能静默吞掉');
+
+    await host.dispose();
+  });
 });
