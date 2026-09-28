@@ -160,3 +160,55 @@
   既绕开 cmd.exe 的启动风险，也顺带免疫引号/转义与 PATH 差异。
   适用范围：**只对 git 这类"本身是独立可执行文件"的命令直调**；`pnpm typecheck && pnpm test`
   这类依赖 shell 语义（`&&`）的仍走 `execWithRetry`。（2026-09-28）
+
+---
+
+## [编辑之后搜索/过滤给出错行号（且不报错）] → [索引有两份实例，编辑只 patch 了一份] → [增量 op 回填 + 失同步重建兜底]
+
+- **现象**（静态追查发现，未由用户报告 —— 正因它不报错）：任何**长度发生变化**的编辑
+  （变长替换 / 插入 / 删除）之后，宿主内的索引仍停在搬迁前的偏移上，于是
+  `search` / `filter` 顺着旧检查点读搬迁后的文件：
+  - 增删行后 `totalLines` 是旧值 → **新插入的行搜不到**（实测命中集为空）；
+  - 变长编辑后其后每个检查点整体失配 → 行号**系统性偏移**（块内偏移一位）；
+  - `replaceText` 的第一步就是 `search()` → 命中集错位会**把改动写到错误的行上**
+    （实测残留未替换行 `{"i":1062,"status":"pending"}`）。
+- **根因**：进程内存在**两份** `LineIndex` —— `DataService.index`（随机读/编辑定位）
+  与 `IndexHost` 内部那份（`search`/`filter` 唯独用它）。编辑只做
+  `this.index = li.applyLineXxx(...)`，而 `IndexHost` 接口自始至终**没有任何回写通道**，
+  worker 线程内那份更是只能靠 `build()` 赋值。既有测试恰好用等长编辑
+  （`{"id":2}`→`{"id":3}`，偏移不变）掩盖了它。
+- **正解**：
+  1. `indexer` 新增 `IndexDeltaOp` 与**共用的** `applyIndexOps()` —— 把「如何应用 op」
+     收敛成一个函数，主线程与 worker 两侧才可能同步演化（各写一份循环 = 迟早漂移）；
+  2. `IndexHost.applyIndexOps()` 作为回填通道，worker 侧经新消息 `applyIndexOps` 下发给
+     `indexWorker`；传 op 而非整份索引（检查点可达数万条，跨线程序列化整份纯属浪费）；
+  3. `DataService` 以 `stageIndexOps()` **收口全部 7 处写路径**（此后禁止再直接赋值
+     `this.index`），经既有的 `refreshSnapshot()` —— 所有写路径共同的唯一收口点 —— 统一回填；
+  4. 回填失败**不向上抛**（此刻磁盘已是新内容，抛出去就是把内部不一致谎报成写入失败），
+     而是置 `hostDirty`，下一次 `search` / `filter` 前经 `ensureFreshHost()` 重建兜底。
+- **预防**：新增 `src/host/__tests__/dataServiceHostSync.test.ts`（8 例），全部是
+  「**先编辑 → 再查询 → 逐字节核对磁盘**」的形态 —— 单看编辑或单看查询都正确，
+  只有相连才暴露，这正是它能潜伏至今的原因。**回滚验证过：修复前 8/8 失败、修复后 8/8 通过。**
+  给 `DataServiceOptions` 加了 `hostFactory` 测试接缝（与既有 `WorkerLike` 接缝同理念），
+  使「是否 dispose 旧宿主」这类生命周期正确性可被测到；伪 worker 采用
+  「协议通道是真的 + 计算由真引擎承担」的替身写法，不 spawn 线程也能测通消息链路。
+  （2026-09-29）
+
+---
+
+## [多行文件反复编辑后插件退化主线程] → [rebuildIndex 覆写 this.host，旧宿主/worker 从不释放] → [换宿主前先 dispose]
+
+- **现象**：多行（pretty）文件每做一次破坏行号结构的编辑（`deleteRecords` / 多行记录编辑）
+  就新建一个索引宿主 —— worker 路径下即一根新线程 + 新文件句柄，旧的永不 `terminate`。
+  累计超过 `MAX_ACTIVE_WORKERS=8` 后，`createIndexHost` **永久退化主线程**，
+  `STABILITY_AUDIT` 里专门修过的 worker 可用性防线对用户静默失效。
+- **根因**：`rebuildIndex()` 直接 `this.host = built.host` 覆盖，与 `dispose()` 里
+  「先关 reader 再 dispose host」的写法不一致 —— 生命周期的**收口点只有一处，却漏了这一处**。
+- **正解**：`rebuildIndex()` 先 `await prev.dispose()` 再换新宿主，并清空待回填队列、
+  复位 `hostDirty`（旧 op 随旧宿主一并作废，重放只会把新索引搞坏）。
+- **顺带修掉同源隐患**：`indexWorker` 的 error 回执此前只对 `build` / `search` / `filter`
+  带 `requestId`，`releaseFile` / `reacquireFile` 一旦失败，主线程对应的 pending
+  **永不结算** → `rewriteAtomic` 永久挂起，且**无任何报错**（表现为批量替换卡住）。
+  现改为对所有带 `requestId` 的消息统一回传（`const requestId = 'requestId' in msg ? ... : undefined`）。
+- **预防**：同上的回归测试文件另设两例 —— `SpyHost`（主线程路径）与伪 worker（worker 路径）
+  分别断言「第 N 次重建前，第 N-1 个宿主已被 dispose / 上一根 worker 已 terminate」。（2026-09-29）
