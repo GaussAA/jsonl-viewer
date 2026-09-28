@@ -545,13 +545,14 @@ export function createToolbar(
 
     const pinnedSet = new Set(panelLayout.pinned);
     const hiddenSet = new Set(panelLayout.hidden);
-    const shown = [...panelLayout.pinned, ...panelLayout.order];
+    // 用 Set 存「应显示」的字段：下方对每个字段都要判定一次，数组 includes 是 O(n) 线性扫。
+    const shownSet = new Set([...panelLayout.pinned, ...panelLayout.order]);
     const seen = new Set<string>();
 
     for (const f of panelFields) {
       if (seen.has(f.key)) continue;
       seen.add(f.key);
-      const isShown = shown.includes(f.key) && !hiddenSet.has(f.key);
+      const isShown = shownSet.has(f.key) && !hiddenSet.has(f.key);
       const row = document.createElement('label');
       row.className = 'jlv-layout-row jlv-field-item';
       row.dataset.key = f.key;

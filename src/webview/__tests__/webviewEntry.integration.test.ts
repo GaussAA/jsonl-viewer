@@ -2,7 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { setupWebviewDom, type FakeHost } from './domHarness.ts';
-import { HostEndpoint, HostReply } from '../../protocol/rpc.ts';
+import { HostEndpoint, HostReply, PROTOCOL_VERSION } from '../../protocol/rpc.ts';
 import type { BadLinesPayload } from '../../protocol/rpc.ts';
 import { main } from '../webviewEntry.ts';
 
@@ -29,6 +29,7 @@ type Msg = { type?: unknown; requestId?: unknown; [k: string]: unknown };
 
 const BASE_INIT = {
   uri: 'file:///tmp/a.jsonl',
+  protocolVersion: PROTOCOL_VERSION,
   totalLines: 100,
   totalRecords: 100,
   totalBytes: 4096,
@@ -803,6 +804,66 @@ describe('webviewEntry 装配层（集成）', () => {
       assert.strictEqual(delReq!.line, 0);
     });
 
+    it('写后权威校正使选中行越界 → 收敛并重拉详情（不残留旧行内容）', async () => {
+      const { host, app } = await bootWithRecords();
+      reply(host, lastReq(host, HostEndpoint.READ_RECORDS)!, {
+        startLine: 0,
+        items: makeItems(0, 20),
+        hasMore: true,
+      });
+      await sleep(FLUSH_MS);
+
+      // ① 选中第 3 行并让详情到位（原文是字段编辑的依据）
+      card(app, 2)!.dispatchEvent(new (win().MouseEvent)('click', { bubbles: true }));
+      await sleep(20);
+      const detailReq = lastReq(host, HostEndpoint.READ_RECORD)!;
+      assert.strictEqual(detailReq.line, 2, '点击即选中该行并拉详情');
+      reply(host, detailReq, { ok: true, value: { id: 2 }, rawText: '{"id":2}', rawBytes: 8 });
+      await sleep(20);
+
+      // ② 经编辑浮层提交一次写入 —— 写后必取宿主权威行数（refreshOverview）。
+      //    此处刻意不走右键菜单：菜单容器是模块级单例，同进程内只有首次右键可用。
+      detailBtn(app, '编辑当前记录的 JSON')!.click();
+      await sleep(20);
+      reply(host, lastReq(host, HostEndpoint.READ_RECORD)!, {
+        ok: true,
+        value: { id: 2 },
+        rawText: '{"id":2}',
+        rawBytes: 8,
+      });
+      await sleep(20);
+      const panel = globalThis.document.querySelector<HTMLElement>('.jlv-edit-backdrop')!;
+      panel.querySelector<HTMLTextAreaElement>('.jlv-edit-input')!.value = '{"id":22}';
+      Array.from(panel.querySelectorAll<HTMLButtonElement>('.jlv-edit-btn'))
+        .find((b) => b.textContent === '保存')!
+        .click();
+      await sleep(20);
+      reply(host, lastReq(host, HostEndpoint.EDIT_RECORD)!, {
+        ok: true,
+        line: 2,
+        bytesDelta: 1,
+        inPlace: false,
+        movedBytes: 0,
+        costMs: 1,
+      });
+      await sleep(20);
+
+      // ③ 宿主说只剩 1 行 → 选中行越界 → 必须收敛**并重拉详情**
+      //    （此前只改行号不重拉：详情面板停在旧行内容，用户在该状态下做字段编辑
+      //      会基于旧行原文把改动写到新行上 —— 不可逆的错改）
+      const before = reqs(host, HostEndpoint.READ_RECORD).length;
+      reply(host, lastReq(host, HostEndpoint.GET_OVERVIEW)!, {
+        ...BASE_INIT,
+        totalRecords: 1,
+        totalLines: 1,
+      });
+      await sleep(40);
+
+      const after = reqs(host, HostEndpoint.READ_RECORD);
+      assert.ok(after.length > before, '收敛后必须重拉详情');
+      assert.strictEqual(after.at(-1)!.line, 0, '重拉的是收敛后的新行');
+    });
+
     it('beforeunload 触发清理，重复派发安全', async () => {
       const { app } = await bootWithRecords();
       assert.doesNotThrow(() => {
@@ -939,29 +1000,24 @@ describe('webviewEntry 装配层（集成）', () => {
       assert.strictEqual(banner.hidden, true, 'init 到达即收起提示');
     });
 
-    it('折叠与拖拽调宽的偏好落盘（localStorage）', async () => {
-      const { app } = await bootWithRecords();
-      const store = globalThis.localStorage;
+    it('折叠与拖拽调宽的偏好落盘（webview state，由 VS Code 托管）', async () => {
+      const { host, app } = await bootWithRecords();
 
       app
         .querySelector<HTMLElement>('.jlv-resizer')!
         .dispatchEvent(new (win().MouseEvent)('dblclick', { bubbles: true }));
-      assert.strictEqual(store.getItem('jsonlViewer.listWidth'), '320', '双击复位并落盘宽度');
+      assert.strictEqual(host.state().listWidth, 320, '双击复位并落盘宽度到 webview state');
 
       app.querySelector<HTMLButtonElement>('.jlv-resizer__toggle')!.click();
       await sleep(400); // 收起动画 300ms + 落定余量
-      assert.strictEqual(store.getItem('jsonlViewer.listCollapsed'), '1', '收起态落盘');
+      assert.strictEqual(host.state().listCollapsed, true, '收起态落盘');
     });
 
-    it('localStorage 写入失败时交互仍安全（异常被吞）', async () => {
-      const { app } = await bootWithRecords();
-      const store = globalThis.localStorage;
-      const original = store.setItem.bind(store);
-      Object.defineProperty(store, 'setItem', {
-        configurable: true,
-        value: () => {
-          throw new Error('QuotaExceededError');
-        },
+    it('state 写入失败时交互仍安全（异常被吞）', async () => {
+      const { host, app } = await bootWithRecords();
+      // 模拟宿主 state 写入失败（配额 / 沙箱限制）：偏好写不进去不该影响布局可用。
+      host.setStateImpl(() => {
+        throw new Error('QuotaExceededError');
       });
 
       assert.doesNotThrow(() => {
@@ -972,7 +1028,6 @@ describe('webviewEntry 装配层（集成）', () => {
       });
       await sleep(400); // 动画落定后仍应无未捕获异常
 
-      Object.defineProperty(store, 'setItem', { configurable: true, value: original });
       assert.ok(app.querySelector('.jlv-list-wrap'), '布局仍可用');
     });
   });

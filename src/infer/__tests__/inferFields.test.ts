@@ -35,10 +35,11 @@ test('前 N 行抽样正确性：只扫前 sampleLines 行', async () => {
 
   assert.equal(res.scanned, 100);
   assert.equal(res.total, 100);
-  const keys = res.fields.map((f) => f.key);
-  assert.ok(keys.includes('id'));
-  assert.ok(keys.includes('name'));
-  assert.ok(!keys.includes('lateOnly'), 'lateOnly 不应出现在前 100 行抽样中');
+  // 用 Set 判定存在性：字段数多时避免多次线性扫（也符合 lint 的 prefers-set 约定）。
+  const keys = new Set(res.fields.map((f) => f.key));
+  assert.ok(keys.has('id'));
+  assert.ok(keys.has('name'));
+  assert.ok(!keys.has('lateOnly'), 'lateOnly 不应出现在前 100 行抽样中');
   // 前 100 行每行都有 id/name → freq 应为 100, coverage 1
   const id = res.fields.find((f) => f.key === 'id')!;
   assert.equal(id.freq, 100);

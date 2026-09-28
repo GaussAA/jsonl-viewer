@@ -11,57 +11,40 @@
  * 给 Task 6；这里都用注入钩子/字段预留，不改动协议即可对接。
  */
 
-import { computeFetchWindow, LRUCache, segmentSortedLines, ThrottleQueue } from './logic.ts';
+import { computeFetchWindow, segmentSortedLines, ThrottleQueue } from './logic.ts';
 import type { FieldLike } from './logic.ts';
-import type { RecordEntry } from './virtualScroll.ts';
 import { VirtualRecordList } from './virtualScroll.ts';
 import { createToolbar } from './toolbar.ts';
 import type { ToolbarInfo } from './toolbar.ts';
 import { createDetailTree, type DetailTreeNavHandlers } from './detailTree.ts';
 import { createEditPanel } from './editPanel.ts';
 import { createHistoryPanel } from './historyPanel.ts';
-import { createBadLinesPanel, scanProgressText } from './badLinesPanel.ts';
-import { createFieldPanel } from './fieldPanel.ts';
-import { toPathParts, pathToString } from './detailLogic.ts';
-import type { PathSeg } from './detailLogic.ts';
-import { replaceValueAtPath } from '../core/jsonSpan.ts';
+import { scanProgressText } from './badLinesPanel.ts';
 import {
-  describeEditFailure,
   editProgressText,
   estimateEditCost,
-  fieldReplaceConfirmText,
-  replaceConfirmText,
   replaceProgressText,
   EDIT_COST_WARN_BYTES,
 } from './editLogic.ts';
 import { createColumnLayout, type ColumnLayout } from './columnLayout.ts';
 import { createQueryActions, type QueryActions } from './queryActions.ts';
 import { createPersistence } from './persistence.ts';
+import { createNavigation } from './navigation.ts';
+import { createSelection } from './selection.ts';
+import { createEditOps } from './editOps.ts';
+import { createFieldEdit } from './fieldEdit.ts';
+import { createBadLinesOps } from './badLinesOps.ts';
+import { createPersistRestore } from './persistRestore.ts';
+import { createFocusTarget } from './focusTarget.ts';
 import { createVSCodeApi, RpcBus } from './rpc.ts';
-import { mergePersistedState, summarizeWithLayout } from './queryLogic.ts';
-import type { FieldCondition, FieldLayout } from './queryLogic.ts';
+import { createAppState } from './appState.ts';
+import type { VSCodeApi } from './rpc.ts';
+import { summarizeWithLayout } from './queryLogic.ts';
 import { HostEndpoint } from '../protocol/rpc.ts';
-import type {
-  BadLinesPayload,
-  CopyLinesResultPayload,
-  DeleteManyResultPayload,
-  EditResultPayload,
-  HistoryPayload,
-  HistoryResultPayload,
-  ReplaceResultPayload,
-} from '../protocol/rpc.ts';
+import type { EditResultPayload, HistoryPayload, HistoryResultPayload } from '../protocol/rpc.ts';
 import type { InitPayload, OverviewPayload, RecordsPayload } from '../protocol/rpc.ts';
 import { CSS_TEXT } from './styles.ts';
-import { describeReplaceOutcome } from '../core/replaceLogic.ts';
-import {
-  BAD_LINES_REFRESH_DEBOUNCE_MS,
-  INIT_TIMEOUT_MS,
-  MAX_SELECTION_LINES,
-  RPC_HEAVY_TIMEOUT_MS,
-} from '../constants.ts';
-
-/** 渲染用的记录形状（与 LRUCache 值一致）。 */
-export type CachedRecord = RecordEntry & { value?: unknown };
+import { INIT_TIMEOUT_MS, RPC_HEAVY_TIMEOUT_MS } from '../constants.ts';
 
 function injectStyle(): void {
   const style = document.createElement('style');
@@ -148,81 +131,60 @@ function createBanner(): {
   return ctrl;
 }
 
-interface AppState {
-  overview: OverviewPayload | null;
-  /** 行号 -> 记录（LRU，容量受限，逐出即释放底层值对象）。 */
-  cache: LRUCache<number, CachedRecord>;
-  /** 正被在途请求覆盖的行号，避免对同一缺失窗口重复发射。 */
-  pending: Set<number>;
-  /** 当前在途 readRecords 的 supersede 标记。 */
-  inFlight: { rid: string; superseded: boolean } | null;
-  fields: readonly FieldLike[] | null;
-  /** 字段显示定制布局（驱动摘要卡片）。 */
-  fieldLayout: FieldLayout;
-  /** 已解析到的最大行号（概要栏「已解析」）。 */
-  maxLoaded: number;
-  selectedLine: number | undefined;
-  /** 当前在途 readRecord（详情）请求的 supersede 标记，切换选中行时取消。 */
-  detailInFlight: { rid: string } | null;
-  /**
-   * 当前详情所展示行的**磁盘原文**与字节数。
-   *
-   * 字段级编辑必须在原文里定位并只替换目标值那一段（不能用解析后的值重新序列化 ——
-   * 那会重排用户的键序与空白）。`bytes` 同时用作编辑请求的乐观锁断言。
-   */
-  detailRaw: { text: string; bytes: number } | null;
-
-  /* Task 6：搜索 / 过滤 / 持久化 */
-  searchQuery: string;
-  /** 最近一次搜索结果匹配的真实行号（升序）。 */
-  searchMatches: number[];
-  /** 是否因 host 截断尚有未列出的匹配（不影响 ±1 导航，仅提示）。 */
-  searchTruncated: boolean;
-  searchInFlight: { rid: string; superseded: boolean } | null;
-  /** 过滤态：展示位 -> 真实行号；null = 全量。 */
-  filterMap: number[] | null;
-  filterCond: FieldCondition | null;
-  filterInFlight: { rid: string; superseded: boolean } | null;
-  /** 偏好持久化键（jsonlViewer.state.<uri>）；init 后赋值。 */
-  persistKey: string | null;
-  persistTimer: ReturnType<typeof setTimeout> | undefined;
+/**
+ * 会话级 UI 偏好（左栏宽度 / 折叠态）—— 存 **VS Code 托管的 webview state**
+ * （`acquireVsCodeApi().getState/setState`），而非 `localStorage`。
+ *
+ * 为何换成它：
+ *   1. `localStorage` 是浏览器侧存储，在 webview 里可能被策略禁用或随沙箱重置而丢失，
+ *      表现为「上次调好的栏宽又回默认了」；
+ *   2. webview state 由 VS Code 在面板重建（隐藏后恢复 / 重开窗口）时**原样交回**，
+ *      正是为这类「视图自身状态」设计的通道；
+ *   3. 它与「文件级偏好走宿主 workspaceState」形成清晰分层：**视图自身状态同步读**、
+ *      **跨会话的文件偏好异步落宿主** —— 栏宽必须在首帧同步可用，否则会先闪一下默认宽度。
+ *
+ * 注意：不要用 workspaceState 存栏宽 —— 那要经过一次异步 RPC，首帧拿不到，
+ * 用户会看到宽度跳变。
+ */
+interface UiState {
+  listWidth?: number;
+  listCollapsed?: boolean;
 }
 
-/** 记录缓存容量上限（可视区 + overscan 的常数倍；逐出即释放内存）。 */
-const CACHE_MAX_ENTRIES = 600;
+/** 当前 webview 的 VS Code API 句柄（main 中赋值，供本模块级读写函数使用）。 */
+let vscodeApi: VSCodeApi | null = null;
 
-/** 左栏可调宽度持久化键（拖拽分栏用）。 */
-const LIST_WIDTH_KEY = 'jsonlViewer.listWidth';
-/** 左栏折叠状态持久化键。 */
-const LIST_COLLAPSED_KEY = 'jsonlViewer.listCollapsed';
+function readUiState(): UiState {
+  try {
+    const s = vscodeApi?.getState?.();
+    return s && typeof s === 'object' ? (s as UiState) : {};
+  } catch {
+    return {}; // state 不可用不应影响功能
+  }
+}
 
-/** 便捷：返回左栏宽度持久化键。 */
+function writeUiState(patch: UiState): void {
+  try {
+    vscodeApi?.setState?.({ ...readUiState(), ...patch });
+  } catch {
+    /* 写入失败（配额 / 沙箱）忽略：栏宽不是关键数据 */
+  }
+}
+
+/** 读取持久化的左栏宽度（首帧同步可用）。 */
 function listWidthFromStore(): number | null {
-  const raw = localStorage.getItem(LIST_WIDTH_KEY);
-  const n = Number(raw);
-  return Number.isFinite(n) && n > 0 ? n : null;
+  const n = readUiState().listWidth;
+  return typeof n === 'number' && Number.isFinite(n) && n > 0 ? n : null;
 }
 function saveListWidth(w: number): void {
-  try {
-    localStorage.setItem(LIST_WIDTH_KEY, String(w));
-  } catch {
-    /* localStorage 不可用时忽略（不影响功能）。 */
-  }
+  writeUiState({ listWidth: w });
 }
 
 function listCollapsedFromStore(): boolean {
-  try {
-    return localStorage.getItem(LIST_COLLAPSED_KEY) === '1';
-  } catch {
-    return false;
-  }
+  return readUiState().listCollapsed === true;
 }
 function saveListCollapsed(collapsed: boolean): void {
-  try {
-    localStorage.setItem(LIST_COLLAPSED_KEY, collapsed ? '1' : '0');
-  } catch {
-    /* ignore */
-  }
+  writeUiState({ listCollapsed: collapsed });
 }
 
 /** 偏好持久化键命名空间。 */
@@ -234,6 +196,8 @@ export function main(): void {
   injectStyle();
 
   const api = createVSCodeApi();
+  // 供模块级的 UI 偏好读写函数使用（webview state 由 VS Code 托管，见 readUiState）。
+  vscodeApi = api;
   const rootEl = document.getElementById('app');
   if (!rootEl) return;
 
@@ -244,27 +208,7 @@ export function main(): void {
   }
   const bus = new RpcBus(api);
 
-  const state: AppState = {
-    overview: null,
-    cache: new LRUCache<number, CachedRecord>(CACHE_MAX_ENTRIES),
-    pending: new Set(),
-    inFlight: null,
-    fields: null,
-    fieldLayout: { pinned: [], order: [], hidden: [], maxKeys: 4 },
-    maxLoaded: 0,
-    selectedLine: undefined,
-    detailInFlight: null,
-    detailRaw: null,
-    searchQuery: '',
-    searchMatches: [],
-    searchTruncated: false,
-    searchInFlight: null,
-    filterMap: null,
-    filterCond: null,
-    filterInFlight: null,
-    persistKey: null,
-    persistTimer: undefined,
-  };
+  const state = createAppState();
 
   /* ---------------- 搜索 / 过滤 / 字段定制动作 ---------------- */
   // 已抽至 queryActions.ts（T5 #31）：supersede / jumpToMatch / runSearch / stepSearch /
@@ -281,9 +225,9 @@ export function main(): void {
     state,
     getList: () => list,
     getToolbar: () => toolbar,
-    showDetailForLine: (line) => void showDetailForLine(line),
-    selectLine: (line) => selectSingle(line),
-    updateNavEnabled,
+    // 详情展示由 selectLine → selection.selectSingle → focus 统一负责，不在这里重复拉
+    selectLine: (line) => selection.selectSingle(line),
+    updateNavEnabled: () => nav.updateNavEnabled(),
     schedulePersist,
   });
 
@@ -292,9 +236,9 @@ export function main(): void {
     onSearch: (query) => actions.runSearch(query),
     onSearchPrev: () => actions.stepSearch(-1),
     onSearchNext: () => actions.stepSearch(1),
-    onReplaceAll: (query, replacement) => replaceAll(query, replacement),
+    onReplaceAll: (query, replacement) => editOps.replaceAll(query, replacement),
     onOpenHistory: () => historyPanel.open(),
-    onOpenBadLines: () => badLinesPanel.open(),
+    onOpenBadLines: () => badLinesOps.open(),
     onApplyFilter: (cond) => actions.runFilter(cond),
     onApplyLayout: (layout) => actions.applyLayout(layout),
   });
@@ -383,8 +327,28 @@ export function main(): void {
   // 宿主返回的通用错误（如 init/索引构建失败）当前无 requestId 关联，
   // 这里统一透出到横幅，便于定位问题。
   bus.onError((e) => {
-    console.error('[jsonl-viewer][webview] host error:', e.message);
+    console.error('[jsonl-viewer][webview] host error:', e.code ?? 'INTERNAL', e.message);
+    // 按错误码分情况，而非一律「宿主错误」：取消是零风险的静默收场，
+    // 冲突要引导重新加载，超时要给出可重试的暗示 —— 混成一句会让人无从行动。
+    if (e.code === 'CANCELLED') return;
+    if (e.code === 'CONFLICT') {
+      banner.show(`文件已被外部修改：${e.message}`, '重新加载', () => void reloadFile());
+      return;
+    }
+    if (e.code === 'TIMEOUT') {
+      banner.show(`请求超时：${e.message}（可重试）`, undefined);
+      return;
+    }
     banner.show(`宿主错误：${e.message}`, undefined);
+  });
+
+  // 协议版本不匹配：扩展更新后 VS Code 可能仍复用旧版 webview 脚本。
+  // 不提示的话，用户只会看到「点了没反应 / 字段全空」这类无法归因的现象。
+  bus.onProtocolMismatch(({ host, web }) => {
+    banner.show(
+      `扩展已更新（宿主协议 v${host}，当前界面 v${web}）——请关闭并重新打开该文件以加载新版界面。`,
+      undefined
+    );
   });
 
   // 握手超时：**柔性提示**而非报错。
@@ -405,7 +369,7 @@ export function main(): void {
     getRecord: (line) => state.cache.get(line),
     getFields: () => state.fields,
     summarize: (value) => summarizeWithLayout(value, state.fields, state.fieldLayout),
-    onSelect: (line, mods) => handleSelect(line, mods),
+    onSelect: (line, mods) => selection.handleSelect(line, mods),
     onRangeChange: (displayFirst, displayLast) => {
       // 分页/翻页已改变当前可视页 → 立即刷新范围文本（不依赖后面是否有实际拉取）。
       updateToolbar();
@@ -426,14 +390,14 @@ export function main(): void {
       void bus.request(HostEndpoint.JUMP_TO_SOURCE, { line }).promise.catch(() => {});
     },
     // 右键「编辑第 N 行」：打开编辑浮层（初始文本取磁盘原文）。
-    onEditRecord: (line) => void openEditForLine(line),
+    onEditRecord: (line) => void editOps.openEditForLine(line),
     // 右键「在第 N 行前插入」：无需拉原文，直接以空文本打开插入模式的浮层。
     onInsertRecord: (line) => editPanel.open(line, '', 'insert'),
     // 右键「删除第 N 行」：先横幅二次确认，再落盘。
-    onDeleteRecord: (line) => deleteRecordAt(line),
+    onDeleteRecord: (line) => editOps.deleteRecordAt(line),
     // 右键菜单的批量项（选区 > 1 行时出现）
-    onDeleteSelected: () => confirmDeleteSelection(),
-    onCopySelected: () => void copySelection(),
+    onDeleteSelected: () => selection.confirmDelete(),
+    onCopySelected: () => void selection.copy(),
     onClearFilter: () => actions.clearFilterForCond(),
     // 截断态「复制该行 JSON」：按需拉完整值（列表缓存不持有超大对象）。
     onRequestRecord: (line) =>
@@ -443,11 +407,33 @@ export function main(): void {
         { timeoutMs: RPC_HEAVY_TIMEOUT_MS }
       ).promise,
   });
+  /* ---------------- prev / next 导航（已抽至 navigation.ts） ----------------
+   * 纯状态推导：展示位 ↔ 真实行号映射 + 选中位置 + 边界可用性。
+   * 必须在 createColumnLayout 之前装配：布局初始化会同步回调 updateNavEnabled。 */
+  /* ---------------- 选中行的唯一写入口（focusTarget.ts） ----------------
+   * 此前 state.selectedLine 散落 11 处写入、跨 5 个模块，配套动作（作废旧原文 /
+   * 取消在途详情 / 重拉详情）极易漏 —— refreshOverview 的越界收敛就漏了。
+   * 收敛成单一入口后，这类"漏一步"在结构上不可能再发生。
+   * 位置要求：早于 nav/selection/editOps/badLinesOps（它们都要注入它）。 */
+  const focus = createFocusTarget({
+    state,
+    showDetail: (line) => void showDetailForLine(line),
+    clearDetail: () => detail.clear(),
+    cancelDetailRequest: () => cancelDetailRequest(),
+  });
+
+  const nav = createNavigation({
+    state,
+    list,
+    detail,
+    navHandlers,
+    focus,
+    openEditForLine: (line) => void editOps.openEditForLine(line),
+  });
+
   /* ---------------- 行编辑浮层（编辑能力） ----------------
    * 初始文本一律取**磁盘原文**（readRecord 的 rawText），而非用 value 重新序列化的结果：
    * 后者会把用户原有的键序与空白重排掉，字节长度随之变化、放大变长编辑的搬移成本。 */
-  /** 编辑前记下的旧行字节长度：作为乐观锁断言（磁盘上该行若已变化则拒绝写入）。 */
-  let editExpectedBytes: number | undefined;
 
   const editPanel = createEditPanel({
     getOverview: () =>
@@ -471,7 +457,7 @@ export function main(): void {
             )
           : bus.request<EditResultPayload>(
               HostEndpoint.EDIT_RECORD,
-              { line: info.line, text: info.text, expectedBytes: editExpectedBytes },
+              { line: info.line, text: info.text, expectedBytes: editOps.getExpectedBytes() },
               { timeoutMs: RPC_HEAVY_TIMEOUT_MS }
             );
 
@@ -500,13 +486,15 @@ export function main(): void {
         state.cache.delete(line);
       } else {
         // 行增删会改变其后每一行的行号 → 整个以行号为键的缓存都失效，必须清空。
-        applyRowCountChange(line, mode);
+        editOps.applyRowCountChange(line, mode);
       }
       list.refresh();
       if (state.selectedLine !== undefined) void showDetailForLine(state.selectedLine);
       updateToolbar();
       // 编辑可能把坏行改好（也可能因行增删而位移）→ 徽章要跟上。
-      scheduleBadLinesRefresh();
+      badLinesOps.scheduleRefresh();
+      // 本地行数是乐观推算 —— 用宿主权威值校正（并发写 / 冲突下推算会失真）。
+      void editOps.refreshOverview();
     },
   });
   rootEl.appendChild(editPanel.root);
@@ -549,490 +537,80 @@ export function main(): void {
       updateToolbar();
       if (state.selectedLine !== undefined) void showDetailForLine(state.selectedLine);
       // 撤销/重做可能把行改回来、也可能删掉一批 → 徽章须重算。
-      scheduleBadLinesRefresh();
+      badLinesOps.scheduleRefresh();
+      // 撤销/重做会增删行 → 总行数必须回到宿主的权威值。
+      void editOps.refreshOverview();
     },
     notify: (message) => banner.show(message, undefined),
   });
   rootEl.appendChild(historyPanel.root);
 
-  /* ---------------- 坏行诊断浮层（惰性发现 + 显式全量扫描） ---------------- */
-
-  /** 扫描是否在进行中（浮层据此禁用按钮 —— 也是「不允许并发第二次扫描」的闸门）。 */
-  let scanningBadLines = false;
-  /** 读批后的刷新防抖句柄：滚动会连续读批，逐次拉取只是无意义的 IPC 压力。 */
-  let badLinesRefreshTimer: ReturnType<typeof setTimeout> | undefined;
-
-  /** 宿主无响应时的兜底：标记为 partial —— 不假装是权威全量。 */
-  function emptyBadLines(): BadLinesPayload {
-    return { lines: [], partial: true, scanned: 0, totalLines: 0, truncated: false };
-  }
-
-  /** 拉取坏行计数并更新徽章。失败静默：它只是辅助提示，不该打断主流程。 */
-  async function refreshBadLines(): Promise<void> {
-    try {
-      const res = await bus.request<BadLinesPayload>(HostEndpoint.GET_BAD_LINES, {}).promise;
-      if (res) toolbar.update({ badLines: { count: res.lines.length, partial: res.partial } });
-    } catch {
-      // 取不到就不显示徽章 —— 为一条辅助信息弹错误横幅只会打扰用户。
-    }
-  }
-
-  /** 防抖刷新（滚动浏览会连续触发读批）。 */
-  function scheduleBadLinesRefresh(): void {
-    if (badLinesRefreshTimer) clearTimeout(badLinesRefreshTimer);
-    badLinesRefreshTimer = setTimeout(() => {
-      badLinesRefreshTimer = undefined;
-      void refreshBadLines();
-    }, BAD_LINES_REFRESH_DEBOUNCE_MS);
-  }
-
-  /** 跳转到某行（坏行定位）：选中 + 滚动 + 详情，走单一入口保证视觉与选区一致。 */
-  function jumpToLine(line: number): void {
-    selectSingle(line);
-    list.scrollToLine(line);
-    void showDetailForLine(line);
-    updateNavEnabled();
-  }
-
-  /**
-   * 把坏行写入选区，返回实际选中数。
-   *
-   * 超上限**拒绝而非截断**：静默截断会让用户以为「坏行都选上了」，随后一次删除
-   * 删掉的可就不只是坏行 —— 这类后果不可逆。
-   */
-  function selectBadLines(lines: readonly number[]): number {
-    if (lines.length === 0) return 0;
-    if (lines.length > MAX_SELECTION_LINES) {
-      banner.show(
-        `坏行过多（${lines.length} 行，超过单次选择上限 ${MAX_SELECTION_LINES}）——` +
-          '请分批处理，或改用外部清洗工具。',
-        undefined
-      );
-      return 0;
-    }
-    selectedLines.clear();
-    for (const l of lines) selectedLines.add(l);
-    selAnchor = lines[0];
-    state.selectedLine = lines[0];
-    list.select(lines[0]);
-    syncSelection();
-    return selectedLines.size;
-  }
-
-  const badLinesPanel = createBadLinesPanel({
-    fetchBadLines: async () => {
-      const res = await bus.request<BadLinesPayload>(HostEndpoint.GET_BAD_LINES, {}).promise;
-      return res ?? emptyBadLines();
+  /* ---------------- 坏行诊断（已抽至 badLinesOps.ts） ----------------
+   * 徽章 → 面板 → 跳转/全选 是一条自洽的诊断链，整体切出。
+   * selection 以访问器注入 —— 选区在本模块之后才装配（交互时才访问，运行时已就绪）。 */
+  const badLinesOps = createBadLinesOps({
+    bus,
+    list,
+    toolbar,
+    banner,
+    selection: {
+      replace: (lines) => selection.replace(lines),
+      selectSingle: (line) => selection.selectSingle(line),
     },
-    scanBadLines: async () => {
-      scanningBadLines = true;
-      try {
-        const { requestId, promise } = bus.request<BadLinesPayload>(
-          HostEndpoint.SCAN_BAD_LINES,
-          {},
-          { timeoutMs: RPC_HEAVY_TIMEOUT_MS }
-        );
-        // 扫描大文件要数秒：横幅给进度与取消。取消**只发 CANCEL、不 settle 本地
-        // Promise** —— 要等宿主回执才能如实说「坏行集合未被改动」，本地草草收尾
-        // 会让用户不确定文件到底动了没有。
-        activeScan = { requestId };
-        banner.show(scanProgressText(0, 0), '取消', () => {
-          bus.post(HostEndpoint.CANCEL, { requestId });
-        });
-        const res = await promise;
-        // 直接用扫描结果更新徽章，省一次往返。
-        if (res && !res.cancelled) {
-          toolbar.update({ badLines: { count: res.lines.length, partial: res.partial } });
-        }
-        return res ?? emptyBadLines();
-      } finally {
-        activeScan = null;
-        scanningBadLines = false;
-      }
+    focus,
+    updateNavEnabled: () => nav.updateNavEnabled(),
+    setActiveScan: (rid) => {
+      activeScan = rid === null ? null : { requestId: rid };
     },
-    isScanning: () => scanningBadLines,
-    jumpTo: (line) => jumpToLine(line),
-    selectLines: (lines) => selectBadLines(lines),
-    notify: (message) => banner.show(message, undefined),
   });
-  rootEl.appendChild(badLinesPanel.root);
+  rootEl.appendChild(badLinesOps.root);
 
-  /**
-   * 打开编辑浮层：先按需拉取该行的磁盘原文（列表缓存里只有解析后的 value，不能当原文用），
-   * 拿到后再打开，避免把「重新序列化」的结果冒充用户原文。
-   */
-  async function openEditForLine(line: number): Promise<void> {
-    try {
-      const res = await bus.request<{
-        ok: boolean;
-        error?: string;
-        rawText?: string;
-        rawBytes?: number;
-      }>(HostEndpoint.READ_RECORD, { line }, { timeoutMs: RPC_HEAVY_TIMEOUT_MS }).promise;
-      if (res?.rawText === undefined) {
-        banner.show(res?.error ?? '无法读取该行内容', undefined);
-        return;
-      }
-      editExpectedBytes = res.rawBytes;
-      editPanel.open(line, res.rawText);
-    } catch (e) {
-      banner.show(e instanceof Error ? e.message : String(e), undefined);
-    }
-  }
+  /* ---------------- 写操作域（已抽至 editOps.ts） ----------------
+   * 编辑 / 删除 / 批量替换 / 写后复位，统一由 editOps 提供。
+   * 位置要求：晚于 editPanel（依赖它打开浮层）、早于 selection（后者需要 applyBulkDelete）。
+   * clearSelection 以访问器注入 —— selection 在本模块之后才装配。 */
+  const editOps = createEditOps({
+    state,
+    bus,
+    list,
+    editPanel,
+    banner,
+    toolbar,
+    focus,
+    showDetailForLine: (line) => void showDetailForLine(line),
+    updateToolbar,
+    scheduleBadLinesRefresh: () => badLinesOps.scheduleRefresh(),
+    clearSelection: () => selection.clear(),
+    setActiveReplace: (rid) => {
+      activeReplace = rid === null ? null : { requestId: rid };
+    },
+    rerunFilter: () => {
+      if (state.filterCond) actions.runFilter(state.filterCond);
+    },
+    rerunSearch: (query) => actions.runSearch(query),
+  });
 
-  /**
-   * 行增删成功后的本地状态调整。
-   *
-   * 与替换不同，增删会**改变其后所有行的行号**：以行号为键的列表缓存整体失效，
-   * 选中锚点也必须跟随位移（否则详情树会显示「原来是别的行」的内容）。
-   * 总行数在此本地维护，不必为一次增删再往返一次 getOverview。
-   */
-  function applyRowCountChange(line: number, mode: 'insert' | 'delete'): void {
-    state.cache.clear();
-    if (state.overview) {
-      const totalRecords = state.overview.totalRecords + (mode === 'insert' ? 1 : -1);
-      state.overview = { ...state.overview, totalRecords };
-      list.setTotalRows(Math.max(0, totalRecords));
-    }
-    if (mode === 'insert') {
-      // 插入后把选中锚点落到新行上（与「光标停在新行」的编辑器习惯一致）。
-      state.selectedLine = line;
-      list.select(line);
-      return;
-    }
-    if (state.selectedLine === undefined) return;
-    state.selectedLine = state.selectedLine > line ? state.selectedLine - 1 : state.selectedLine;
-    const maxLine = Math.max(0, (state.overview?.totalRecords ?? 1) - 1);
-    if (state.selectedLine > maxLine) state.selectedLine = maxLine;
-    list.select(state.selectedLine);
-  }
-
-  /**
-   * 删除某一行（右键入口）。
-   *
-   * webview 里 window.confirm 不可用（沙箱拦截阻塞式对话框），故复用顶部横幅做二次
-   * 确认 —— 删除是不可逆的磁盘写入，必须先问一句。
-   */
-  function deleteRecordAt(line: number): void {
-    banner.show(`确定删除第 ${line + 1} 行？该操作会立即写入磁盘。`, '确认删除', () => {
-      void (async () => {
-        try {
-          const res = await bus.request<EditResultPayload>(
-            HostEndpoint.DELETE_RECORD,
-            { line },
-            { timeoutMs: RPC_HEAVY_TIMEOUT_MS }
-          ).promise;
-          if (!res?.ok) {
-            banner.show(describeEditFailure(res ?? {}), undefined);
-            return;
-          }
-          banner.hide();
-          applyRowCountChange(line, 'delete');
-          list.refresh();
-          updateToolbar();
-          if (state.selectedLine !== undefined) void showDetailForLine(state.selectedLine);
-        } catch (e) {
-          banner.show(e instanceof Error ? e.message : String(e), undefined);
-        }
-      })();
-    });
-  }
-
-  /**
-   * 全文查找替换（工具栏「全部替换」）。
-   *
-   * 二次确认走顶部横幅 —— webview 里 `window.confirm` 不可用（沙箱拦截阻塞式对话框），
-   * 且批量改写会**立即落盘**，必须先问一句。
-   *
-   * 大文件会在确认文案里说明代价（整个文件需要重写），执行中显示**可取消**的进度：
-   * 重写 1GB 文件要数秒，没有进度也没有取消入口的等待是最难熬的 —— 用户只能
-   * 猜测程序是不是死了，然后去点第二次。
-   *
-   * 结果文案必须包含「跳过的行数」：用户点了「全部替换」后最危险的误解就是
-   * 以为全改完了，而实际有一批行因 JSON 非法被跳过。
-   */
-  function replaceAll(rawQuery: string, replacement: string): void {
-    const query = rawQuery.trim();
-    if (!query) {
-      banner.show('请先在搜索框填入要查找的内容。', undefined);
-      toolbar.toggleReplace(true);
-      return;
-    }
-    const totalBytes = state.overview?.totalBytes ?? 0;
-    banner.show(replaceConfirmText(query, replacement, totalBytes), '确认替换', () => {
-      void (async () => {
-        toolbar.setReplaceBusy(true);
-        try {
-          const { requestId, promise } = bus.request<ReplaceResultPayload>(
-            HostEndpoint.REPLACE_TEXT,
-            { query, replacement },
-            { timeoutMs: RPC_HEAVY_TIMEOUT_MS }
-          );
-          // 记下本次请求：进度推送据此渲染横幅，取消按钮据此发 CANCEL。
-          activeReplace = { requestId };
-          banner.show('正在替换…', '取消', () => {
-            // 只发 CANCEL，**不 settle 本地 Promise** —— 我们要等宿主回执 cancelled 的结果
-            // 才能如实告诉用户「文件未被修改」，而不是本地草草收尾。
-            bus.post(HostEndpoint.CANCEL, { requestId });
-          });
-
-          const res = await promise;
-          activeReplace = null;
-
-          if (res?.cancelled) {
-            banner.show('已取消：文件未被修改。', undefined);
-            return;
-          }
-          if (!res?.ok) {
-            banner.show(res?.error ?? '替换失败', undefined);
-            return;
-          }
-          // 改动可能散落全文件，无法逐行失效 —— 整体清空缓存并按需重拉。
-          state.cache.clear();
-          state.maxLoaded = 0;
-          list.refresh();
-          updateToolbar();
-          // 内容变了，过滤结果同样不再可信；有过滤条件就重算。
-          if (state.filterCond) actions.runFilter(state.filterCond);
-          // 重跑搜索刷新命中计数（原本命中的行可能已经不匹配）。
-          actions.runSearch(query);
-          if (state.selectedLine !== undefined) void showDetailForLine(state.selectedLine);
-          // 批量替换可能把成片的坏行改好 → 徽章要随之下降。
-          scheduleBadLinesRefresh();
-          const suffix = res.undoable ? '' : '；（改动量较大，本次未纳入撤销栈）';
-          banner.show(describeReplaceOutcome(res) + suffix, undefined);
-        } catch (e) {
-          banner.show(e instanceof Error ? e.message : String(e), undefined);
-        } finally {
-          activeReplace = null;
-          toolbar.setReplaceBusy(false);
-        }
-      })();
-    });
-  }
-
-  /**
-   * 批量删除后：总行数减少 N，选区与详情复位。
-   *
-   * 不做「行号位移推算」而直接整体复位：删掉的行散布在各处，剩余行的新行号取决于
-   * 它前面被删了几行 —— 用户看到的是一批内容消失，此时把选中状态留在某个「碰巧算对」
-   * 的行上，比清空更令人困惑。
-   */
-  function applyBulkDelete(deleted: number): void {
-    state.cache.clear();
-    if (state.overview) {
-      const totalRecords = Math.max(0, state.overview.totalRecords - deleted);
-      state.overview = { ...state.overview, totalRecords };
-      list.setTotalRows(totalRecords);
-    }
-    clearSelection();
-    state.selectedLine = undefined;
-    state.detailRaw = null; // 详情已清空，原文一并作废（避免对已消失的行发起字段编辑）
-    list.clearAllSelection();
-    detail.clear();
-    list.refresh();
-    updateToolbar();
-    // 删掉的可能正是一批坏行（「全选坏行 → 删除」正是本功能的主用途）→ 徽章必须降下来。
-    scheduleBadLinesRefresh();
-  }
-
-  /* ---------------- 多选：选区状态 + 浮动操作条 ---------------- */
-
-  /**
-   * 选中的行集合。与 `state.selectedLine` 是两个概念：后者是详情面板的来源，
-   * 前者是批量操作的对象。单选时两者一致。
-   *
-   * 状态**只放在这里**（列表只负责渲染 `setSelectedLines`）：同一份状态放两处，
-   * 迟早会在某条路径上不同步，而这类 bug 表现为「删掉了没选中的行」这种严重后果。
-   */
-  const selectedLines = new Set<number>();
-  /** Shift 范围选择的锚点。 */
-  let selAnchor: number | undefined;
-
-  /** 选区操作条（列表下方；选区 > 1 行时出现）。 */
-  const selBar = document.createElement('div');
-  selBar.className = 'jlv-selbar';
-  selBar.hidden = true;
-
-  const selText = document.createElement('span');
-  selText.className = 'jlv-selbar-text';
-
-  const selCopyBtn = document.createElement('button');
-  selCopyBtn.type = 'button';
-  selCopyBtn.className = 'jlv-btn';
-  selCopyBtn.textContent = '复制';
-  selCopyBtn.title = '复制选中行的原文到剪贴板';
-  selCopyBtn.addEventListener('click', () => void copySelection());
-
-  const selDeleteBtn = document.createElement('button');
-  selDeleteBtn.type = 'button';
-  selDeleteBtn.className = 'jlv-btn jlv-btn-danger';
-  selDeleteBtn.textContent = '删除';
-  selDeleteBtn.title = '删除选中的行（立即写入磁盘）';
-  selDeleteBtn.addEventListener('click', () => confirmDeleteSelection());
-
-  const selClearBtn = document.createElement('button');
-  selClearBtn.type = 'button';
-  selClearBtn.className = 'jlv-btn';
-  selClearBtn.textContent = '取消选择';
-  // 只清多选集合：详情面板仍停留在「最后点击的那一行」（它与多选是两个概念）。
-  selClearBtn.addEventListener('click', () => clearSelection());
-
-  selBar.append(selText, selCopyBtn, selDeleteBtn, selClearBtn);
-
-  /** 把选区状态同步到列表与操作条（所有改选区的路径都必须过它）。 */
-  function syncSelection(): void {
-    list.setSelectedLines(selectedLines);
-    const n = selectedLines.size;
-    selBar.hidden = n <= 1;
-    if (n > 1) selText.textContent = `已选中 ${n} 行`;
-  }
-
-  /** 清空选区（不改 `state.selectedLine`，详情仍可停留在原行）。 */
-  function clearSelection(): void {
-    selectedLines.clear();
-    selAnchor = undefined;
-    syncSelection();
-  }
-
-  /**
-   * 单选某行：**同时**设置详情来源与选区（两者一致）。
-   *
-   * 键盘导航、跳转搜索匹配、初始化等所有「非鼠标点击」的选中路径都应走它 ——
-   * 否则会出现「视觉上选中了、选区里却没有」的不一致，而批量操作按选区执行。
-   */
-  function selectSingle(line: number): void {
-    selectedLines.clear();
-    selectedLines.add(line);
-    selAnchor = line;
-    state.selectedLine = line;
-    list.select(line);
-    syncSelection();
-  }
-
-  /**
-   * 显示顺序上 a 与 b 之间的所有真实行号（含两端）；范围过大时返回 null。
-   *
-   * 无过滤时就是连续整数区间；**过滤态下只包含当前显示中的行** —— 用户看到的是一份
-   * 筛选后的列表，Shift 范围选择理应只覆盖看得见的那些行。
-   *
-   * 先算长度再决定是否分配：`Array.from({length: 1e6})` 会当场吃掉几十 MB。
-   */
-  function displayRangeBetween(a: number, b: number): number[] | null {
-    const map = state.filterMap;
-    if (!map) {
-      const lo = Math.min(a, b);
-      const hi = Math.max(a, b);
-      if (hi - lo + 1 > MAX_SELECTION_LINES) return null;
-      return Array.from({ length: hi - lo + 1 }, (_, i) => lo + i);
-    }
-    const ia = map.indexOf(a);
-    const ib = map.indexOf(b);
-    if (ia < 0 || ib < 0) return [a, b]; // 端点不在当前视图：退化为两端
-    const lo = Math.min(ia, ib);
-    const hi = Math.max(ia, ib);
-    if (hi - lo + 1 > MAX_SELECTION_LINES) return null;
-    return map.slice(lo, hi + 1);
-  }
-
-  /** 列表点击 → 更新选区。三种模式：普通单选 / Ctrl 切换 / Shift 范围。 */
-  function handleSelect(line: number, mods: { ctrl: boolean; shift: boolean }): void {
-    if (mods.shift && selAnchor !== undefined) {
-      const range = displayRangeBetween(selAnchor, line);
-      if (!range) {
-        banner.show(`一次最多选择 ${MAX_SELECTION_LINES} 行，请缩小范围后再试。`, undefined);
-      } else {
-        for (const l of range) selectedLines.add(l);
-        // Shift 不重置锚点，便于连续多次扩展
-      }
-    } else if (mods.ctrl) {
-      if (selectedLines.has(line)) selectedLines.delete(line);
-      else selectedLines.add(line);
-      selAnchor = line;
-    } else {
-      selectedLines.clear();
-      selectedLines.add(line);
-      selAnchor = line;
-    }
-    state.selectedLine = line;
-    list.select(line);
-    syncSelection();
-    void showDetailForLine(line);
-    updateNavEnabled();
-    // 窄容器抽屉：选中记录后收起目录抽屉，回到详情主视图
-    if (layout.isNarrow()) layout.setDrawer(false);
-  }
-
-  /**
-   * 复制选中的行。原文由宿主读取后写入剪贴板（`vscode.env.clipboard` 比 webview 侧的
-   * `navigator.clipboard` 可靠，不受 webview 权限限制）。
-   */
-  async function copySelection(): Promise<void> {
-    const lines = [...selectedLines].toSorted((a, b) => a - b);
-    if (lines.length === 0) return;
-    try {
-      const res = await bus.request<CopyLinesResultPayload>(
-        HostEndpoint.COPY_LINES,
-        { lines },
-        { timeoutMs: RPC_HEAVY_TIMEOUT_MS }
-      ).promise;
-      if (!res?.ok) {
-        banner.show(res?.error ?? '复制失败', undefined);
-        return;
-      }
-      const parts = [`已复制 ${res.count} 行到剪贴板`];
-      if (res.skipped > 0) parts.push(`${res.skipped} 行因过大跳过`);
-      if (res.truncated) parts.push('因超过上限已截断，请分批复制');
-      banner.show(parts.join('；'), undefined);
-    } catch (e) {
-      banner.show(e instanceof Error ? e.message : String(e), undefined);
-    }
-  }
-
-  /**
-   * 批量删除选中的行。不可逆的磁盘写入，先横幅二次确认（webview 里 `window.confirm`
-   * 不可用）。确认文案带上「几段连续」—— 用户能借此确认自己框对了吗。
-   */
-  function confirmDeleteSelection(): void {
-    const lines = [...selectedLines].toSorted((a, b) => a - b);
-    if (lines.length === 0) return;
-    let segments = 1;
-    for (let i = 1; i < lines.length; i++) {
-      if (lines[i] !== lines[i - 1] + 1) segments++;
-    }
-    // 多行时补一个前导空格，让「确定删除 3 行」而不是「确定删除3 行」（中文排版）。
-    const what =
-      lines.length === 1 ? `第 ${lines[0] + 1} 行` : ` ${lines.length} 行（${segments} 段连续）`;
-    banner.show(`确定删除${what}？该操作会立即写入磁盘。`, '确认删除', () => {
-      void (async () => {
-        try {
-          const res = await bus.request<DeleteManyResultPayload>(
-            HostEndpoint.DELETE_RECORDS,
-            { lines },
-            { timeoutMs: RPC_HEAVY_TIMEOUT_MS }
-          ).promise;
-          if (res?.cancelled) {
-            banner.show('已取消：文件未被修改。', undefined);
-            return;
-          }
-          if (!res?.ok) {
-            banner.show(res?.error ?? '删除失败', undefined);
-            return;
-          }
-          applyBulkDelete(res.deleted);
-          const skippedNote = res.skipped > 0 ? `；${res.skipped} 行因过大跳过` : '';
-          banner.show(`已删除 ${res.deleted} 行${skippedNote}`, undefined);
-        } catch (e) {
-          banner.show(e instanceof Error ? e.message : String(e), undefined);
-        }
-      })();
-    });
-  }
+  /* ---------------- 多选选区（已抽至 selection.ts） ----------------
+   * 选区状态**只存在这一处**：列表只渲染、详情来源是另一个概念。
+   * layout 以访问器注入——它在更后面才装配完成（直接传值会撞 TDZ）。 */
+  const selection = createSelection({
+    state,
+    bus,
+    list,
+    banner,
+    focus,
+    updateNavEnabled: () => nav.updateNavEnabled(),
+    layout: {
+      isNarrow: () => layout.isNarrow(),
+      setDrawer: (open) => layout.setDrawer(open),
+    },
+    applyBulkDelete: editOps.applyBulkDelete,
+  });
 
   // 组装两栏：左栏放入列头(toolbar) + 目录列表(分页)；右栏为详情面板；横幅浮层最后挂载。
   leftCol.appendChild(toolbar.root);
   leftCol.appendChild(list.scrollEl);
-  leftCol.appendChild(selBar); // 选区操作条紧贴列表下方（选中 > 1 行时出现）
+  leftCol.appendChild(selection.root); // 选区操作条紧贴列表下方（选中 > 1 行时出现）
   leftCol.appendChild(list.pagerEl);
   rootEl.appendChild(leftCol);
   rootEl.appendChild(resizer);
@@ -1070,218 +648,30 @@ export function main(): void {
     hamburger,
     backdrop,
     refreshList: () => list.refresh(),
-    updateNavEnabled,
+    updateNavEnabled: () => nav.updateNavEnabled(),
     saveListCollapsed,
     listCollapsedFromStore,
     listWidthFromStore,
     saveListWidth,
   });
 
-  /* ---------------- prev / next 导航 ---------------- */
-
-  /** 获取当前可见记录总数（考虑过滤态）。 */
-  function getTotalVisible(): number {
-    return state.filterMap ? state.filterMap.length : (state.overview?.totalRecords ?? 0);
-  }
-
-  /** 将展示位索引转为真实行号（过滤态/全量态统一）。 */
-  function displayToReal(d: number): number {
-    return state.filterMap ? state.filterMap[d] : d;
-  }
-
-  /** 获取当前选中行在展示序列中的索引；返回 -1 表示无选中或不在范围。 */
-  function selectedDisplayIndex(): number {
-    const line = state.selectedLine;
-    if (line === undefined) return -1;
-    if (state.filterMap) {
-      return state.filterMap.indexOf(line);
-    }
-    if (state.overview && line >= 0 && line < state.overview.totalRecords) return line;
-    return -1;
-  }
-
-  /** 更新详情面板导航按钮（上一条/下一条）的启用状态。 */
-  function updateNavEnabled(): void {
-    const total = getTotalVisible();
-    if (total <= 0) {
-      detail.setNavEnabled(false, false);
-      return;
-    }
-    const idx = selectedDisplayIndex();
-    if (idx < 0) {
-      // 无选中时：允许两边导航（会从第一条或最后一条开始）
-      detail.setNavEnabled(true, true);
-      return;
-    }
-    detail.setNavEnabled(idx > 0, idx < total - 1);
-  }
-
-  navHandlers.onPrevRecord = () => {
-    const total = getTotalVisible();
-    if (total <= 0) return;
-    const idx = selectedDisplayIndex();
-    const target = idx < 0 ? total - 1 : idx - 1;
-    if (target < 0) return;
-    const real = displayToReal(target);
-    list.focus(real);
-    state.selectedLine = real;
-    void showDetailForLine(real);
-    updateNavEnabled();
-  };
-  navHandlers.onNextRecord = () => {
-    const total = getTotalVisible();
-    if (total <= 0) return;
-    const idx = selectedDisplayIndex();
-    const target = idx < 0 ? 0 : idx + 1;
-    if (target >= total) return;
-    const real = displayToReal(target);
-    list.focus(real);
-    state.selectedLine = real;
-    void showDetailForLine(real);
-    updateNavEnabled();
-  };
-
-  // 详情工具「编辑」：编辑当前显示的那一行。
-  navHandlers.onEdit = () => {
-    if (state.selectedLine === undefined) return;
-    void openEditForLine(state.selectedLine);
-  };
-
-  /* ---------------- 字段级编辑（详情树上点某个字段的值） ---------------- */
-
-  const fieldPanel = createFieldPanel({
-    submit: (segs, next, extra) =>
-      extra?.applyAll ? commitFieldReplaceAll(segs, extra.from, next) : commitFieldEdit(segs, next),
-    notify: (message) => banner.show(message, undefined),
+  /* ---------------- 字段级编辑（已抽至 fieldEdit.ts） ----------------
+   * 与整行编辑对称：都是在磁盘原文上定位后走同一条落盘链路，
+   * 差别只在「新文本怎么算出来」（字段编辑由 jsonSpan 精确替换那一段字节）。 */
+  const fieldEdit = createFieldEdit({
+    state,
+    bus,
+    list,
+    banner,
+    navHandlers,
+    showDetailForLine: (line) => void showDetailForLine(line),
+    updateToolbar,
+    scheduleBadLinesRefresh: () => badLinesOps.scheduleRefresh(),
+    setActiveFieldReplace: (rid) => {
+      activeFieldReplace = rid === null ? null : { requestId: rid };
+    },
   });
-  rootEl.appendChild(fieldPanel.root);
-
-  navHandlers.onEditField = (segs, value) => {
-    // 入口侧已按「原文是否可用」判定过，此处再防一层：拿不到原文就无法安全定位，
-    // 与其让用户改完才发现失败，不如当场说清。
-    if (!state.detailRaw) {
-      banner.show('该行的原文不可用，请重新载入该记录后再编辑。', undefined);
-      return;
-    }
-    fieldPanel.open(segs, value);
-  };
-
-  // 原地编辑（双击字段值）：与浮层共用同一条提交链路（jsonSpan 定位 → 整行编辑）。
-  // 失败原因由编辑态红框显示；成功后 commitFieldEdit 内部会重建详情树。
-  navHandlers.onInlineEdit = (segs, _from, to) => {
-    if (!state.detailRaw) {
-      return { ok: false, error: '该记录的原文不可用，无法定位字段。' };
-    }
-    return commitFieldEdit(segs, to);
-  };
-
-  /**
-   * 提交字段编辑：**定位 → 外科式替换 → 走已有的整行编辑链路**。
-   *
-   * 之所以复用 `EDIT_RECORD` 而不为字段编辑新开一条写入路径：冲突检测、乐观锁、
-   * 索引增量、撤销栈、自写基线同步这五件事已经在那里做对了，复制一份必然漂移。
-   * 字段级编辑与整行编辑的差别只在「新文本怎么算出来」——那由 jsonSpan 负责。
-   */
-  async function commitFieldEdit(
-    segs: readonly PathSeg[],
-    next: unknown
-  ): Promise<{ ok: boolean; error?: string }> {
-    const line = state.selectedLine;
-    const raw = state.detailRaw;
-    if (line === undefined) return { ok: false, error: '没有选中的记录。' };
-    if (!raw) return { ok: false, error: '该行的原文不可用，请重新载入该记录后再编辑。' };
-
-    // ① 只在原文里替换目标值那一段字节 —— 键序、空白、其余字段的转义风格逐字节不变。
-    const replaced = replaceValueAtPath(raw.text, toPathParts(segs), next);
-    if (!replaced.ok) return { ok: false, error: replaced.error };
-
-    // ② 走整行编辑：`expectedBytes` 用宿主回传的原文字节数做乐观锁（外部改动即拒绝）。
-    let res: EditResultPayload | null = null;
-    try {
-      res = await bus.request<EditResultPayload>(
-        HostEndpoint.EDIT_RECORD,
-        { line, text: replaced.text, expectedBytes: raw.bytes },
-        { timeoutMs: RPC_HEAVY_TIMEOUT_MS }
-      ).promise;
-    } catch (e) {
-      return { ok: false, error: e instanceof Error ? e.message : String(e) };
-    }
-    if (!res?.ok) return { ok: false, error: describeEditFailure(res ?? {}) };
-
-    // ③ 落盘成功：该行缓存失效 → 重绘卡片 → **后台**重拉详情。
-    //    重拉必须 fire-and-forget：它要等宿主回执，若 await 它，保存就会显得卡住，
-    //    而且重拉失败还会被误当成保存失败（两者是两回事）。
-    //    重拉仍然必要 —— 详情树的原文会随之更新，否则下一次字段编辑会基于过期原文定位。
-    state.cache.delete(line);
-    list.refresh();
-    updateToolbar();
-    void showDetailForLine(line);
-    scheduleBadLinesRefresh();
-    return { ok: true };
-  }
-
-  /**
-   * 批量字段级替换：先横幅二次确认，再走 `REPLACE_FIELD`。
-   *
-   * 与整行批量替换**同一套交互**（确认 → 进度 → 取消 → 结果）—— 同类危险操作的交互
-   * 必须长一个样，用户学一次就会用。差别只在确认文案说的是「该路径下值相同的字段」。
-   *
-   * 注意浮层在批量提交时已自行关闭（为确认横幅让路），故结果只能走横幅反馈。
-   */
-  function commitFieldReplaceAll(
-    segs: readonly PathSeg[],
-    from: unknown,
-    to: unknown
-  ): Promise<{ ok: boolean; error?: string }> {
-    return new Promise((resolve) => {
-      const totalBytes = state.overview?.totalBytes ?? 0;
-      const pathText = pathToString([...segs]) || '$';
-      banner.show(fieldReplaceConfirmText(pathText, totalBytes), '确认替换', () => {
-        void (async () => {
-          try {
-            const { requestId, promise } = bus.request<ReplaceResultPayload>(
-              HostEndpoint.REPLACE_FIELD,
-              { path: toPathParts(segs), from, to },
-              { timeoutMs: RPC_HEAVY_TIMEOUT_MS }
-            );
-            // 记下 requestId：进度推送据此渲染横幅文字，取消据此发 CANCEL。
-            // 取消**只发 CANCEL、不 settle 本地 Promise** —— 要等宿主回执才能如实
-            // 说「文件未被修改」，与整行批量替换同一纪律。
-            activeFieldReplace = { requestId };
-            banner.show('正在替换…', '取消', () => {
-              bus.post(HostEndpoint.CANCEL, { requestId });
-            });
-            const res = await promise;
-            if (res?.cancelled) {
-              banner.show('已取消：文件未被修改。', undefined);
-              resolve({ ok: false, error: '已取消' });
-              return;
-            }
-            if (!res?.ok) {
-              banner.show(res?.error ?? '批量替换失败', undefined);
-              resolve({ ok: false, error: res?.error ?? '批量替换失败' });
-              return;
-            }
-            // 改动可能散落全文件，无法逐行失效 —— 整体清空缓存并按需重拉。
-            state.cache.clear();
-            state.maxLoaded = 0;
-            list.refresh();
-            updateToolbar();
-            scheduleBadLinesRefresh();
-            if (state.selectedLine !== undefined) void showDetailForLine(state.selectedLine);
-            banner.show(describeReplaceOutcome(res), undefined);
-            resolve({ ok: true });
-          } catch (e) {
-            const msg = e instanceof Error ? e.message : String(e);
-            banner.show(msg, undefined);
-            resolve({ ok: false, error: msg });
-          } finally {
-            activeFieldReplace = null;
-          }
-        })();
-      });
-    });
-  }
+  rootEl.appendChild(fieldEdit.root);
 
   /* ---------------- 详情面板：按需请求完整 JSON ---------------- */
 
@@ -1406,7 +796,7 @@ export function main(): void {
       list.refresh();
       // 这一轮可能刚发现新的坏行（宿主集合是惰性积累的）→ 防抖刷新徽章，
       // 让用户滚动浏览时就能看见「原来这里有几行是坏的」。
-      scheduleBadLinesRefresh();
+      badLinesOps.scheduleRefresh();
       return true;
     } catch {
       // 被 supersede 取消或超时：忽略（已有更新的窗口请求接手），避免 unhandled rejection。
@@ -1439,33 +829,15 @@ export function main(): void {
   }
 
   /* ---------------- init / 生命周期 ---------------- */
-  /* ---------------- 偏好持久化：恢复上次打开同一文件的状态 ---------------- */
-  let savedLoaded = false;
-  let savedState: unknown;
-  function tryApplyPersisted(): void {
-    if (!savedLoaded || !state.fields) return;
-    const known = new Set(state.fields.map((f) => f.key));
-    const merged = mergePersistedState(
-      savedState,
-      {
-        fieldLayout: state.fieldLayout,
-        filter: state.filterCond,
-        searchQuery: state.searchQuery,
-      },
-      known
-    );
-    if (merged.fieldLayout) {
-      state.fieldLayout = merged.fieldLayout;
-      toolbar.setLayout(state.fieldLayout);
-      list.refresh();
-    }
-    if (merged.filter) actions.runFilter(merged.filter);
-    if (merged.searchQuery) {
-      // 恢复搜索词（不自动触发搜索，避免打开即扫全文件；用户可按回车/触发）。
-      const input = toolbar.searchInput();
-      if (input && !input.value) input.value = merged.searchQuery;
-    }
-  }
+  /* ---------------- 偏好恢复（已抽至 persistRestore.ts） ----------------
+   * 两源合并（持久化状态 + 字段推断结果）的时序规则集中在那里，
+   * 包括「失败也标记已加载」这条容易漏掉的分支。 */
+  const persistRestore = createPersistRestore({
+    state,
+    toolbar,
+    list,
+    runFilter: (cond) => actions.runFilter(cond),
+  });
 
   bus.onInit((payload: InitPayload) => {
     // 索引已就绪：收起「正在构建索引…」柔性提示（若曾显示）。
@@ -1477,29 +849,22 @@ export function main(): void {
     state.persistKey = stateKey(payload.uri);
     list.setTotalRows(payload.totalRecords);
     updateToolbar();
-    updateNavEnabled();
+    nav.updateNavEnabled();
     // reload 会清空宿主侧的坏行集合，从零重新积累 —— 徽章须同步（否则会残留旧数字）。
-    void refreshBadLines();
+    void badLinesOps.refresh();
 
     // 打开文件默认选中第一条并展示其 JSON；右侧细节树已内置「仅展开顶层、嵌套折叠」的默认态。
     if (state.selectedLine === undefined && payload.totalRecords > 0) {
-      state.selectedLine = 0;
+      focus.set(0); // 详情由写入口一并拉取
       list.select(0); // 首帧不加 scrollToLine（避免入场动画/重建导致打开时闪一次）
-      void showDetailForLine(0);
-      updateNavEnabled();
+      nav.updateNavEnabled();
     }
 
-    // 读取已持久化偏好（无则 savedLoaded 仍置 true，便于后续在此刻合并）。
+    // 读取已持久化偏好（无数据时同样标记「已加载」，见 persistRestore）。
     void bus
       .request<unknown>(HostEndpoint.LOAD_STATE, { key: state.persistKey })
-      .promise.then((v) => {
-        savedState = v;
-        savedLoaded = true;
-        tryApplyPersisted();
-      })
-      .catch(() => {
-        savedLoaded = true;
-      });
+      .promise.then((v) => persistRestore.onLoaded(v))
+      .catch(() => persistRestore.onLoaded(undefined));
 
     // 拉一遍最新概览（构建索引后统计更精确），同时由列表的 onRangeChange 触发初始 readRecords。
     void bus
@@ -1509,7 +874,7 @@ export function main(): void {
         state.overview = ov;
         list.setTotalRows(ov.totalRecords);
         updateToolbar();
-        updateNavEnabled();
+        nav.updateNavEnabled();
       })
       .catch(() => {
         /* init 已含概览，这里失败可忽略；且不触发错误横幅。 */
@@ -1528,7 +893,7 @@ export function main(): void {
           toolbar.setFields(res.fields);
           toolbar.setLayout(state.fieldLayout);
           list.refresh();
-          tryApplyPersisted();
+          persistRestore.tryApply();
           // 抽样行**全部**无法解析：多半根本不是「UTF-8 编码的 JSONL」。
           // 与其让用户面对满屏坏行不知所措，不如给出可执行的解释。
           // 门槛 20 行，避免小文件 / 空文件误报。
@@ -1584,7 +949,7 @@ export function main(): void {
     list.setTranslation(null);
     list.setTotalRows(totalRecords);
     updateToolbar();
-    updateNavEnabled();
+    nav.updateNavEnabled();
   }
 
   /** 重新拉字段推断（摘要卡片 / 过滤下拉的数据源）。 */
@@ -1646,9 +1011,8 @@ export function main(): void {
    */
   bus.onDocumentReset((payload) => {
     cancelAllInFlight();
-    state.selectedLine = undefined;
     resetLocalState(state.overview?.totalRecords ?? 0);
-    detail.clear();
+    focus.clear(); // 清选中 + 作废旧原文 + 清详情面板（三者必须同步）
     fetchFields();
     banner.show(payload.message ?? '已从磁盘重新加载。');
   });
@@ -1677,15 +1041,10 @@ export function main(): void {
   const onKeyDown = (e: KeyboardEvent): void => {
     if (e.key !== 'Escape') return;
     // 浮层打开时让位给它们（各自的 Esc 负责关闭自身）
-    if (
-      editPanel.isOpen() ||
-      historyPanel.isOpen() ||
-      badLinesPanel.isOpen() ||
-      fieldPanel.isOpen()
-    )
+    if (editPanel.isOpen() || historyPanel.isOpen() || badLinesOps.isOpen() || fieldEdit.isOpen())
       return;
-    if (selectedLines.size > 0) {
-      clearSelection();
+    if (selection.lines.size > 0) {
+      selection.clear();
       e.preventDefault();
     }
   };
@@ -1702,9 +1061,8 @@ export function main(): void {
     detail.dispose();
     editPanel.dispose();
     historyPanel.dispose();
-    badLinesPanel.dispose();
-    fieldPanel.dispose();
-    if (badLinesRefreshTimer) clearTimeout(badLinesRefreshTimer);
+    badLinesOps.dispose();
+    fieldEdit.dispose();
     toolbar.destroy();
     document.removeEventListener('keydown', onKeyDown);
   };

@@ -342,7 +342,7 @@ describe('fieldPanel', () => {
     await wait(30);
   });
 
-  it('批量失败走横幅通知（浮层已让路，写进浮层没人看得见）', async () => {
+  it('批量失败：浮层不抢报 —— 完整原因由装配层写在横幅上', async () => {
     const h = makePanel();
     h.nextResult = { ok: false, error: '文件已被外部修改' };
     h.panel.open([key('a')], 'x');
@@ -351,11 +351,10 @@ describe('fieldPanel', () => {
     saveBtn().click();
     await wait(30);
 
-    assert.deepStrictEqual(
-      h.calls.notify,
-      ['文件已被外部修改'],
-      '失败原因必须走横幅，且不弹成功提示'
-    );
+    // 装配层（commitFieldReplaceAll）负责把宿主的**原始**原因写到横幅；
+    // 浮层若在此再 notify 一次，就会把那条更完整的信息覆盖成含糊的
+    // 「批量替换失败」—— 用户因此无法判断文件到底动没动。
+    assert.deepStrictEqual(h.calls.notify, [], '浮层不得重复（且更含糊地）播报');
     assert.strictEqual(h.submitted[0].extra?.applyAll, true);
   });
 

@@ -8,9 +8,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { CancelledError, createVSCodeApi, RpcBus } from '../rpc.ts';
+import { CancelledError, createVSCodeApi, RpcBus, RpcError } from '../rpc.ts';
 import type { VSCodeApi } from '../rpc.ts';
-import { HostReply } from '../../protocol/rpc.ts';
+import { HostReply, PROTOCOL_VERSION } from '../../protocol/rpc.ts';
 
 function makeApi(): { api: VSCodeApi; sent: unknown[] } {
   const sent: unknown[] = [];
@@ -110,4 +110,71 @@ test('dispose：清空 pending 与订阅，且重复调用安全', async () => {
 
 test('createVSCodeApi：无 acquireVsCodeApi 时返回 null', () => {
   assert.equal(createVSCodeApi({}), null);
+});
+
+/* ---------------------- 错误码（可分支处理） ---------------------- */
+
+test('ERROR 回执带 code → reject 为 RpcError 且 code 透传', async () => {
+  const { api } = makeApi();
+  const bus = new RpcBus(api);
+  const { requestId, promise } = bus.request('editRecord', { line: 0 });
+  deliver(bus, { type: HostReply.ERROR, requestId, message: '文件已被外部修改', code: 'CONFLICT' });
+  await assert.rejects(promise, (e: unknown) => e instanceof RpcError && e.code === 'CONFLICT');
+  bus.dispose();
+});
+
+test('超时 reject 的 code 为 TIMEOUT（前端可据此提示重试）', async () => {
+  const { api } = makeApi();
+  const bus = new RpcBus(api);
+  const { promise } = bus.request('readRecord', { line: 1 }, { timeoutMs: 20 });
+  await assert.rejects(promise, (e: unknown) => e instanceof RpcError && e.code === 'TIMEOUT');
+  bus.dispose();
+});
+
+test('无 code 的 ERROR 回执归类为 INTERNAL', async () => {
+  const { api } = makeApi();
+  const bus = new RpcBus(api);
+  const { requestId, promise } = bus.request('search', { query: 'a' });
+  deliver(bus, { type: HostReply.ERROR, requestId, message: '宿主内部异常' });
+  await assert.rejects(promise, (e: unknown) => e instanceof RpcError && e.code === 'INTERNAL');
+  bus.dispose();
+});
+
+/* ---------------------- 协议版本握手 ---------------------- */
+
+test('INIT 版本不一致 → onProtocolMismatch 触发（否则用户只看到无故失灵）', () => {
+  const { api } = makeApi();
+  const bus = new RpcBus(api);
+  let mismatch: { host: number; web: number } | undefined;
+  bus.onProtocolMismatch((info) => {
+    mismatch = info;
+  });
+
+  deliver(bus, {
+    type: HostReply.INIT,
+    payload: { uri: 'u', protocolVersion: PROTOCOL_VERSION + 1, totalLines: 0 },
+  });
+  assert.deepEqual(mismatch, { host: PROTOCOL_VERSION + 1, web: PROTOCOL_VERSION });
+  bus.dispose();
+});
+
+test('INIT 版本一致 → 不触发 mismatch，init 订阅照常收到', () => {
+  const { api } = makeApi();
+  const bus = new RpcBus(api);
+  let mismatch = false;
+  let inited = false;
+  bus.onProtocolMismatch(() => {
+    mismatch = true;
+  });
+  bus.onInit(() => {
+    inited = true;
+  });
+
+  deliver(bus, {
+    type: HostReply.INIT,
+    payload: { uri: 'u', protocolVersion: PROTOCOL_VERSION, totalLines: 0 },
+  });
+  assert.equal(mismatch, false);
+  assert.equal(inited, true);
+  bus.dispose();
 });

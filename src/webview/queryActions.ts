@@ -43,7 +43,6 @@ export interface QueryActionsDeps {
   /** 晚绑定：toolbar 在 main 中于本模块之后创建。 */
   getToolbar: () => ReturnType<typeof createToolbar>;
   /** 跳转到指定行并展示详情（main 提供）。 */
-  showDetailForLine: (line: number) => void;
   /**
    * 选中某行（main 提供）。
    *
@@ -79,9 +78,11 @@ export function createQueryActions(deps: QueryActionsDeps): QueryActions {
   }
 
   function jumpToMatch(line: number): void {
-    deps.selectLine(line); // 选中语义统一收口（含选区同步与详情来源）
+    // 选中语义统一收口：selectLine → selection.selectSingle → focusTarget.set，
+    // 后者会**一并**作废旧原文并拉取详情。此处再拉一次就会发出两条重复的
+    // READ_RECORD（既浪费往返，也让详情请求相互 supersede、产生无谓的闪烁）。
+    deps.selectLine(line);
     deps.getList().scrollToLine(line);
-    void deps.showDetailForLine(line);
     deps.updateNavEnabled();
   }
 

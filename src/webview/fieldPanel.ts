@@ -166,8 +166,10 @@ export function createFieldPanel(deps: FieldPanelDeps): FieldPanelController {
         if (!applyAll) deps.notify(`已更新 ${pathToString([...currentSegs]) || '$'}`);
         close();
       } else if (applyAll) {
-        // 浮层已为确认横幅让路，错误只能走横幅 —— 写进浮层没人看得见。
-        deps.notify(res.error ?? '批量替换失败');
+        // 批量模式下**不在这里再报一次**：装配层（commitFieldReplaceAll）已经把完整
+        // 原因写在横幅上了 —— 取消是「已取消：文件未被修改」、失败是宿主的原始错误。
+        // 此处若再 notify 一遍，就会把那条更完整、更关键的信息**覆盖**成含糊的
+        // 「已取消」/「批量替换失败」，用户因此无法判断文件到底动没动。
       } else {
         showError(res.error ?? '保存失败');
       }

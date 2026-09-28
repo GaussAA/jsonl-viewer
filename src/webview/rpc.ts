@@ -8,12 +8,19 @@
  * 协议类型与端点常量复用 ../protocol/rpc.ts（单一来源）。
  */
 
-import { HostEndpoint, HostReply, isRpcMessage, makeRequestId } from '../protocol/rpc.ts';
+import {
+  HostEndpoint,
+  HostReply,
+  isRpcMessage,
+  makeRequestId,
+  PROTOCOL_VERSION,
+} from '../protocol/rpc.ts';
 import type {
   DocumentResetPayload,
   EditProgressPayload,
   InitPayload,
   JumpToSourcePayload,
+  RpcErrorCode,
   RpcMessage,
   StaleFilePayload,
 } from '../protocol/rpc.ts';
@@ -45,6 +52,21 @@ export class CancelledError extends Error {
 }
 
 /**
+ * 带机器可读错误码的 RPC 错误。
+ *
+ * 有了 `code`，前端才能对失败**分情况处理**：冲突提示重新加载、取消静默收场、
+ * 超时可重试、参数非法提示改输入。只靠 message 文案分支既脆弱又无法本地化。
+ */
+export class RpcError extends Error {
+  readonly code: RpcErrorCode;
+  constructor(message: string, code: RpcErrorCode) {
+    super(message);
+    this.name = 'RpcError';
+    this.code = code;
+  }
+}
+
+/**
  * 从全局取出 VS Code 注入的 acquireVsCodeApi 并生成 API。
  * 传入可选的 global 对象以便单测注入假实现；默认读 globalThis。
  */
@@ -60,7 +82,20 @@ export type StaleHandler = (payload: StaleFilePayload) => void;
 export type ResetHandler = (payload: DocumentResetPayload) => void;
 /** 耗时写操作的进度推送（批量重写的全文件重写阶段）。 */
 export type EditProgressHandler = (payload: EditProgressPayload) => void;
-export type ErrorHandler = (e: { requestId?: string; message: string }) => void;
+export type ErrorHandler = (e: {
+  requestId?: string;
+  message: string;
+  code?: RpcErrorCode;
+}) => void;
+
+/**
+ * 协议版本不匹配的通知（宿主与 webview 不是同一版构建）。
+ *
+ * 典型场景：扩展更新后，VS Code 复用了 `retainContextWhenHidden` 保留的**旧 webview
+ * 脚本**。此时两端对消息形状的理解不一致，表现为「点了没反应 / 字段全 undefined」
+ * 这类无法归因的诡异行为。给出明确版本号，用户才知道该重新打开面板。
+ */
+export type ProtocolMismatchHandler = (info: { host: number; web: number }) => void;
 
 export interface RequestOptions {
   /** 超时（毫秒）。默认 15s；解析大行或构建索引时可放宽。 */
@@ -79,6 +114,7 @@ export class RpcBus {
   private readonly resetHandlers = new Set<ResetHandler>();
   private readonly editProgressHandlers = new Set<EditProgressHandler>();
   private readonly errorHandlers = new Set<ErrorHandler>();
+  private readonly mismatchHandlers = new Set<ProtocolMismatchHandler>();
   private readonly api: VSCodeApi;
 
   // 注意：不用参数属性语法（Node 类型擦除运行 TS 单测时不支持）。
@@ -104,6 +140,7 @@ export class RpcBus {
     this.resetHandlers.clear();
     this.editProgressHandlers.clear();
     this.errorHandlers.clear();
+    this.mismatchHandlers.clear();
   }
 
   onInit(cb: InitHandler): void {
@@ -125,6 +162,11 @@ export class RpcBus {
   }
   onError(cb: ErrorHandler): void {
     this.errorHandlers.add(cb);
+  }
+
+  /** 订阅「协议版本不匹配」（宿主与 webview 构建版本不同）。 */
+  onProtocolMismatch(cb: ProtocolMismatchHandler): void {
+    this.mismatchHandlers.add(cb);
   }
 
   /**
@@ -152,7 +194,7 @@ export class RpcBus {
       if (p.settled) return;
       p.settled = true;
       this.pending.delete(requestId);
-      p.reject(new Error(`request ${type} timed out after ${timeoutMs}ms`));
+      p.reject(new RpcError(`request ${type} timed out after ${timeoutMs}ms`, 'TIMEOUT'));
     }, timeoutMs);
     this.pending.set(requestId, p);
 
@@ -186,7 +228,14 @@ export class RpcBus {
     const msg = data as RpcMessage;
 
     if (msg.type === HostReply.INIT) {
-      for (const h of this.initHandlers) h((msg as { payload: InitPayload }).payload);
+      const payload = (msg as { payload: InitPayload }).payload;
+      // 握手即比对协议版本：版本不一致时消息形状的理解可能已经错位，
+      // 与其让用户遭遇一堆无法归因的怪现象，不如立刻明确告知。
+      const hostVersion = payload?.protocolVersion;
+      if (typeof hostVersion === 'number' && hostVersion !== PROTOCOL_VERSION) {
+        for (const h of this.mismatchHandlers) h({ host: hostVersion, web: PROTOCOL_VERSION });
+      }
+      for (const h of this.initHandlers) h(payload);
       return;
     }
     if (msg.type === HostReply.JUMP_TO_SOURCE) {
@@ -213,17 +262,20 @@ export class RpcBus {
         'requestId' in (msg as { requestId?: unknown }) && typeof msg.requestId === 'string'
           ? msg.requestId
           : undefined;
+      const code = 'code' in msg ? (msg as { code?: RpcErrorCode }).code : undefined;
       if (requestId) {
         const p = this.pending.get(requestId);
         if (p) {
           this.pending.delete(requestId);
           if (p.timer) clearTimeout(p.timer);
           p.settled = true;
-          p.reject(new Error(msg.message));
+          p.reject(new RpcError(msg.message, code ?? 'INTERNAL'));
           return;
         }
       }
-      for (const h of this.errorHandlers) h({ requestId, message: msg.message });
+      for (const h of this.errorHandlers) {
+        h({ requestId, message: msg.message, ...(code ? { code } : {}) });
+      }
       return;
     }
 

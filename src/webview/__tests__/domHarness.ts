@@ -6,6 +6,15 @@ export interface FakeHost {
   posted: unknown[];
   /** 模拟宿主向 webview 推送一条消息（经 globalThis 'message' 事件，RpcBus 据此分发）。 */
   receive(msg: unknown): void;
+  /**
+   * 读取当前 webview 自持久状态（`getState` 的落点）。
+   *
+   * 真实 VS Code 会在面板重建时把它原样交回；这里如实保存，便于断言
+   * 「栏宽 / 折叠态」这类 UI 偏好确实落盘。
+   */
+  state: () => Record<string, unknown>;
+  /** 替换 setState 实现（用于模拟写入失败等异常路径）。 */
+  setStateImpl: (fn: (s: unknown) => void) => void;
   dom: JSDOM;
 }
 
@@ -82,14 +91,19 @@ export function setupWebviewDom(): FakeHost {
   setGlobal('requestAnimationFrame', window.requestAnimationFrame.bind(window));
   setGlobal('cancelAnimationFrame', window.cancelAnimationFrame.bind(window));
 
-  // 伪 acquireVsCodeApi：仅记录 webview→宿主消息
+  // 伪 acquireVsCodeApi：记录 webview→宿主消息，并**如实保存** webview state
+  // （真实宿主会在面板重建时把它交回；保存起来才能断言 UI 偏好是否落盘）。
   const posted: unknown[] = [];
+  let webviewState: unknown = {};
+  let setStateImpl: (s: unknown) => void = (s: unknown) => {
+    webviewState = s;
+  };
   g.acquireVsCodeApi = () => ({
     postMessage: (msg: unknown) => {
       posted.push(msg);
     },
-    getState: () => ({}),
-    setState() {},
+    getState: () => webviewState,
+    setState: (s: unknown) => setStateImpl(s),
   });
 
   // 所有定时器 unref，避免挂载时的握手超时定时器（INIT_TIMEOUT_MS）阻塞测试进程退出。
@@ -108,6 +122,13 @@ export function setupWebviewDom(): FakeHost {
   const fakeHost: FakeHost = {
     posted,
     dom,
+    state: () =>
+      webviewState && typeof webviewState === 'object'
+        ? (webviewState as Record<string, unknown>)
+        : {},
+    setStateImpl: (fn) => {
+      setStateImpl = fn;
+    },
     receive(msg: unknown) {
       window.dispatchEvent(new window.MessageEvent('message', { data: msg }));
     },
