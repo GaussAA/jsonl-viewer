@@ -64,6 +64,15 @@ jobs:
       - name: Build
         run: pnpm build
 
+      # 清单一致性校验：`@types/vscode` 一旦越出 `engines.vscode`，vsce 会拒绝打包
+      # （"greater than engines.vscode"）。问题在于**只列清单不打包**也要执行到这里，
+      # 而 typecheck / test / build 全绿也不会暴露它 —— 2026-09 的事故正是如此：
+      # 依赖漂移到 ^1.138.0，直到发布当天才在 `vsce package` 一步炸掉
+      # （见 docs/error_ledger.md 对应条目）。
+      # 此处只做清单校验（秒级、不产出 vsix），让漂移在**提交时**就失败。
+      - name: Verify extension manifest (vsce ls)
+        run: pnpm exec vsce ls --no-dependencies
+
   # ── 层 1.2：静态质量门禁（lint + 格式） ───────────────────────────────────
   # 为何独立成 job 而非并入 verify：lint 与格式检查极快（oxlint 全仓约 20ms），
   # 单列可与 verify 的 Node 矩阵并行，且失败时定位清晰、不浪费矩阵重跑。

@@ -173,8 +173,8 @@ importers:
         specifier: ^26.6.2
         version: 26.6.2
       '@types/vscode':
-        specifier: ^1.100.0
-        version: 1.138.0
+        specifier: ~1.100.0
+        version: 1.100.0
       '@vscode/test-electron':
         specifier: ^3.1.0
         version: 3.1.0
@@ -702,8 +702,8 @@ packages:
   '@types/tough-cookie@4.0.5':
     resolution: {integrity: sha512-/Ad8+nIOV7Rl++6f1BdKxFSMgmoqEoYbHRpPcx3JEfv8VRsQe9Z4mCXeJBzxs7mbHY/XOZZuXlRNfhpVPbs6ZA==}
 
-  '@types/vscode@1.138.0':
-    resolution: {integrity: sha512-DhlvrucJa8n6EHst7qQcXOcjLKs/VRTQy55plLO+RN74jonYsr/t9dd66zBnAyz1tpDig0okQAxuoPHpVNje2g==}
+  '@types/vscode@1.100.0':
+    resolution: {integrity: sha512-4uNyvzHoraXEeCamR3+fzcBlh7Afs4Ifjs4epINyUX/jvdk0uzLnwiDY35UKDKnkCHP5Nu3dljl2H8lR6s+rQw==}
 
   '@typescript/typescript-aix-ppc64@7.0.2':
     resolution: {integrity: sha512-MTKKkWB7p/0E9xi1d1tHtZ5PiLkGEMIq88pK2CubZjOsLtYTLqhgIgi6zepFa+9GHZ6h05NMCkQxGKiPXMxXtQ==}
@@ -1835,7 +1835,7 @@ snapshots:
 
   '@types/tough-cookie@4.0.5': {}
 
-  '@types/vscode@1.138.0': {}
+  '@types/vscode@1.100.0': {}
 
   '@typescript/typescript-aix-ppc64@7.0.2':
     optional: true

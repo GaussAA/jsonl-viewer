@@ -20,7 +20,28 @@ dist/**
 !dist/indexWorker.js
 # 工作区会话记忆 / 助手元数据不进发布物
 .workbuddy/**
+# Git hooks 与 CI 配置属于仓库资产，不是运行时依赖 —— 不该进安装包。
+.husky/**
+.github/**
+# 开发原型与内部文档：
+#   · harness.html / prototype.html 是开发期调试页，运行时不加载
+#     （styles.ts 只在注释里提到 prototype.html，不是引用）；
+#   · docs/ 是研发与治理材料（事故台账、评审记录、稳定性审计），
+#     既非运行时依赖，也不适合随安装包分发。README.md 里的 docs/ 链接在
+#     仓库（GitHub）上照常可用。
+# 若将来需要随包分发某一篇，用取反例外单独放行，例如：!docs/DESIGN_SYSTEM.md
+harness.html
+prototype.html
+docs/**
+# 开发期配置（lint / 格式化 / git blame 忽略清单）：只服务于本仓库的研发流程。
+.oxlintrc.json
+.prettierignore
+.git-blame-ignore-revs
 # 开发工具 / 发布产物 / 示例样本不进最终 vsix（示例可从仓库获取，缩减安装体积）
 scripts/**
 releases/**
 samples/**
+# 临时工作区：一次性重构脚本、诊断输出、下载的工具二进制（如 actionlint）。
+# 它是 gitignore 目录，但 .vscodeignore 不读 gitignore —— 不显式排除就会把
+# 临时产物（含二进制，可达数 MB）一起打进 vsix。
+.scratch/**
