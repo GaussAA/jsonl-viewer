@@ -60,21 +60,39 @@ if (pkg.version !== version) {
 // 为何要它：@types/vscode 一旦越出 `engines.vscode`，vsce 会在**最后一步**（打包时）拒绝，
 // 而且抛的是 `Error: Command failed: npx vsce package ...` 的 Node 异常堆栈 —— 看起来像
 // 脚本 bug，实际是依赖声明问题。2026-09 因此连续踩过两次（详见 docs/error_ledger.md）。
-// `vsce ls` 只列清单、不打包，秒级；这里失败即给出**可执行的**修复提示。
-try {
-  shOut('npx vsce ls --no-dependencies');
-} catch {
-  console.error('[release] 预检未通过：扩展清单与依赖声明不一致（vsce 拒绝打包）。');
-  console.error(
-    '[release] 最常见原因：@types/vscode 的版本范围超出 package.json 的 engines.vscode。'
-  );
-  console.error('[release] 本项目约定：engines.vscode ^1.100.0 ⇒ @types/vscode 锁定 ~1.100.0。');
-  console.error('[release] 修复路径：');
-  console.error('  git checkout -- package.json pnpm-lock.yaml   # 还原被误改的声明与 lock');
-  console.error(
-    '  pnpm run typecheck                            # 顺带把 node_modules 校正回 lock 版本'
-  );
-  process.exit(1);
+//
+// 为何**不**用 `npx vsce ls` 来查（第一版如此实现，已废弃）：它要起子进程，在 Windows 上
+// 可能撞 EBUSY（文件被扫描/占用）而失败 —— 于是把"命令被占用"误报成"清单不一致"，
+// 把人引向错误方向。纯读 manifest 比对**零子进程、零误报**。
+//
+// 判据与 vsce 一致：@types/vscode 的基准版本不得高于 engines.vscode 的基准版本
+// （类型包不能声明比所支持的最低引擎版本更新的 API）。
+const parseMinVersion = (range) =>
+  String(range)
+    .replace(/^[\s^~>=<]*/, '')
+    .split('.')
+    .map((n) => Number.parseInt(n, 10) || 0);
+const compareVersions = (a, b) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
+
+const typesRange = pkg.devDependencies?.['@types/vscode'];
+const enginesRange = pkg.engines?.vscode;
+if (typesRange && enginesRange) {
+  const typesMin = parseMinVersion(typesRange);
+  const enginesMin = parseMinVersion(enginesRange);
+  if (compareVersions(typesMin, enginesMin) > 0) {
+    console.error('[release] 预检未通过：@types/vscode 高于 engines.vscode，vsce 会拒绝打包。');
+    console.error(`  engines.vscode = ${enginesRange}（基准 ${enginesMin.join('.')}）`);
+    console.error(`  @types/vscode  = ${typesRange}（基准 ${typesMin.join('.')}）`);
+    console.error('[release] 修复路径：');
+    console.error('  git checkout -- package.json pnpm-lock.yaml   # 还原被误改的声明与 lock');
+    console.error(
+      '  pnpm run typecheck                            # 顺带把 node_modules 校正回 lock 版本'
+    );
+    console.error(
+      `  约定：engines.vscode ${enginesRange} ⇒ @types/vscode 应为 ~${enginesMin.join('.')}`
+    );
+    process.exit(1);
+  }
 }
 
 mkdirSync(rel, { recursive: true });
