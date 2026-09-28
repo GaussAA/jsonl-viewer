@@ -55,6 +55,28 @@ if (pkg.version !== version) {
   process.exit(1);
 }
 
+// 清单一致性预检（**放在最前面，代价最低时失败**）。
+//
+// 为何要它：@types/vscode 一旦越出 `engines.vscode`，vsce 会在**最后一步**（打包时）拒绝，
+// 而且抛的是 `Error: Command failed: npx vsce package ...` 的 Node 异常堆栈 —— 看起来像
+// 脚本 bug，实际是依赖声明问题。2026-09 因此连续踩过两次（详见 docs/error_ledger.md）。
+// `vsce ls` 只列清单、不打包，秒级；这里失败即给出**可执行的**修复提示。
+try {
+  shOut('npx vsce ls --no-dependencies');
+} catch {
+  console.error('[release] 预检未通过：扩展清单与依赖声明不一致（vsce 拒绝打包）。');
+  console.error(
+    '[release] 最常见原因：@types/vscode 的版本范围超出 package.json 的 engines.vscode。'
+  );
+  console.error('[release] 本项目约定：engines.vscode ^1.100.0 ⇒ @types/vscode 锁定 ~1.100.0。');
+  console.error('[release] 修复路径：');
+  console.error('  git checkout -- package.json pnpm-lock.yaml   # 还原被误改的声明与 lock');
+  console.error(
+    '  pnpm run typecheck                            # 顺带把 node_modules 校正回 lock 版本'
+  );
+  process.exit(1);
+}
+
 mkdirSync(rel, { recursive: true });
 if (existsSync(out)) {
   console.error(`[release] 已存在 ${out}；如需重发请先删除该文件后再运行。`);
