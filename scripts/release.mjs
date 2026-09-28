@@ -15,7 +15,7 @@
  *   - 每个发布版本对应一个 git tag `v<version>`；
  *   - 产物可追溯（每个 vsix 附带 SHA-256 校验和）。
  */
-import { execSync } from 'node:child_process';
+import { execFileSync, execSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -42,7 +42,14 @@ const execWithRetry = (cmd, opts) => {
   }
 };
 const sh = (cmd) => execWithRetry(cmd, { stdio: 'inherit' });
-const shOut = (cmd) => execWithRetry(cmd, { encoding: 'utf8' });
+
+// git 命令一律**不经 shell**（execFileSync 直调 git）。为何：
+//   ① Windows 上 execSync 会先起 cmd.exe，实测出现过 spawn 失败（pid 0）而让发布
+//      “死在最后一步”——产物、SHA-256、LATEST 都已就绪，只差 tag，只能手工续尾；
+//      本项目已因此复发两次（见 docs/error_ledger.md）。
+//   ② 不经 shell 顺带免疫 cmd 的引号/转义差异与 PATH 依赖。
+const gitOut = (args) => execFileSync('git', args, { encoding: 'utf8', cwd: root });
+const gitRun = (args) => execFileSync('git', args, { stdio: 'inherit', cwd: root });
 const rel = join(root, 'releases');
 
 const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
@@ -117,7 +124,7 @@ writeFileSync(join(rel, 'LATEST'), `${version}\n`);
 console.log(`[release] SHA-256 = ${sha}`);
 console.log(`[release] LATEST  -> ${version}`);
 
-const dirty = shOut('git status --porcelain').trim();
+const dirty = gitOut(['status', '--porcelain']).trim();
 if (dirty) {
   console.warn(
     '[release] 提示：工作区有未提交改动，建议先 commit 再继续，否则 tag 不会指向本次代码。'
@@ -128,12 +135,12 @@ const tag = `v${version}`;
 let tagSha = '';
 try {
   // rev-parse 对不存在的 tag 返回非零退出码（execSync 会抛），用 try 容错表示「tag 不存在」。
-  tagSha = shOut(`git rev-parse -q --verify ${tag}`).trim();
+  tagSha = gitOut(['rev-parse', '-q', '--verify', tag]).trim();
 } catch {
   tagSha = '';
 }
 if (tagSha) {
-  const head = shOut('git rev-parse HEAD').trim();
+  const head = gitOut(['rev-parse', 'HEAD']).trim();
   if (tagSha !== head) {
     console.error(`[release] 错误：tag ${tag} 已存在但指向 ${tagSha}，而非当前 HEAD ${head}。`);
     console.error('[release] 请先提交本次代码并重跑，或手动删除/更新该 tag 后再发布。');
@@ -141,7 +148,7 @@ if (tagSha) {
   }
   console.log(`[release] tag ${tag} 已存在且指向当前 HEAD（幂等跳过）。`);
 } else {
-  sh(`git tag ${tag}`);
+  gitRun(['tag', tag]);
   console.log(`[release] git tag ${tag}`);
 }
 

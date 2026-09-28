@@ -149,6 +149,14 @@
   `ls releases/ | grep <ver>` 与 `cat releases/LATEST` 后，手动 `git tag v<version>`
   并 `sha256sum -c` 校验即可；不必重跑整个发布（重跑会因「vsix 已存在」被脚本拒绝）。
 - **预防**：~~遇到 release.mjs 中途失败，先核对产物清单再决定重跑还是续尾~~
-  **已治本（2026-09-25）**：`release.mjs` 的所有命令执行统一走 `execWithRetry`——
-  EBUSY 自动等 1 秒重试（至多 3 次），非 EBUSY 错误照常抛出。三个版本连续在同一
-  位置手工续尾后，不能再靠人肉兜底。（2026-09-24 首记，2026-09-25 修复）
+  **一轮修复（2026-09-25）**：`release.mjs` 的所有命令执行统一走 `execWithRetry`——
+  EBUSY 自动等 1 秒重试（至多 3 次），非 EBUSY 错误照常抛出。
+- **二轮复发（2026-09-28，v1.10.0）**：同一位置再次失败，但**形态不同** ——
+  `execSync` 报 `spawnargs: ['/d','/s','/c','"git status --porcelain"']`、`pid: 0`，
+  是 **shell 进程根本没起来**（非 EBUSY，故重试机制救不了）。产物、SHA-256、LATEST
+  仍然齐全，只有 tag 缺失 —— 第三次手工续尾，证明"加长重试"治不了根。
+- **二轮治本（2026-09-28，同版本内）**：git 调用**一律不经 shell** ——
+  `execFileSync('git', [...], { cwd: root })` 直调（`gitOut` / `gitRun` 两个助手）。
+  既绕开 cmd.exe 的启动风险，也顺带免疫引号/转义与 PATH 差异。
+  适用范围：**只对 git 这类"本身是独立可执行文件"的命令直调**；`pnpm typecheck && pnpm test`
+  这类依赖 shell 语义（`&&`）的仍走 `execWithRetry`。（2026-09-28）
