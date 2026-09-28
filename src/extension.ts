@@ -7,6 +7,9 @@ import {
   dispatchMessage,
   errReply,
   initReply,
+  isAllowedPersistKey,
+  isWithinPersistBudget,
+  isWithinTextBudget,
   okReply,
   requestIdOf,
   HostEndpoint,
@@ -14,7 +17,16 @@ import {
   RpcMessage,
 } from './protocol/rpc.ts';
 import type { FieldCondition } from './core/query.ts';
-import { FILE_STALE_POLL_MS } from './constants.ts';
+import { createLogger, makeTraceId } from './host/logging.ts';
+import type { LogFields } from './host/logging.ts';
+import {
+  FILE_STALE_POLL_MS,
+  MAX_LINE_BYTES,
+  MAX_PERSIST_VALUE_BYTES,
+  MAX_QUERY_LEN,
+  MAX_SELECTION_LINES,
+  PERSIST_KEY_PREFIX,
+} from './constants.ts';
 
 /** The `viewType` used by the standalone webview panel (命令 / 资源管理器右键菜单路径). */
 export const VIEW_TYPE = 'jsonlViewer.webview';
@@ -86,6 +98,15 @@ function makeDataService(
 
 /** 日志输出面板：用户可在"输出 → JSONL Viewer"中查看宿主收发情况，便于排障。 */
 let output: vscode.OutputChannel | undefined;
+
+/**
+ * 结构化日志器（**默认丢弃**）。
+ *
+ * `activate()` 里拿到 OutputChannel 后立即换成真实实现；在此之前宿主也可能走到日志
+ * 路径（比如早期异常），故默认给一个 no-op 而不是 undefined —— 省去每处判空。
+ */
+let logger = createLogger({ sink: () => {}, debugEnabled: () => false });
+
 /**
  * 调试日志开关，绑定配置项 `jsonlViewer.debug`（在设置里可随时开启，立即生效）。
  *
@@ -96,11 +117,15 @@ let debugLogging = false;
 function syncDebugFlag(): void {
   debugLogging = vscode.workspace.getConfiguration('jsonlViewer').get<boolean>('debug', false);
 }
-function hostLog(message: string): void {
-  if (output && debugLogging) output.appendLine(message);
+
+/** 结构化日志：debug 级（受 `jsonlViewer.debug` 控制），附加 traceId / 耗时等字段。 */
+function hostLog(message: string, fields?: LogFields): void {
+  logger.debug(message, fields);
 }
-function hostErr(message: string): void {
-  if (output) output.appendLine(`[ERROR] ${message}`); // 错误始终输出
+
+/** 结构化日志：error 级（**始终输出**，错误不该被开关藏起来）。 */
+function hostErr(message: string, fields?: LogFields): void {
+  logger.error(message, fields);
 }
 
 /**
@@ -321,9 +346,14 @@ function registerHostHandlers(deps: HostHandlerDeps): vscode.Disposable {
 
   return webview.onDidReceiveMessage((message: unknown) => {
     const incoming = (message as { type?: unknown }).type;
-    hostLog(`收到消息: ${String(incoming)}`);
+    // 追踪 ID：有 requestId 则与之同源（前端/宿主可对照），无则现生成一个
+    // （READY 等无 requestId 的握手消息）。同一次处理内的所有日志共享它。
+    const traceId = requestIdOf(message) ?? makeTraceId();
+    const startedAt = Date.now();
+    hostLog('收到消息', { traceId, endpoint: String(incoming) });
     void (async () => {
       let response: RpcMessage | undefined;
+      let outcome: 'ok' | 'error' = 'ok';
       try {
         response = (
           await dispatchMessage(message, {
@@ -350,6 +380,13 @@ function registerHostHandlers(deps: HostHandlerDeps): vscode.Disposable {
             // 插入/删除同样会搬移其后所有字节，故与编辑替换共用同一套进度与取消：
             // 否则同一个浮层里的取消按钮时灵时不灵，用户无从判断。
             [HostEndpoint.INSERT_RECORD]: async (req) => {
+              if (!isWithinTextBudget(req.text ?? '', MAX_LINE_BYTES)) {
+                return errReply(
+                  req.requestId,
+                  `插入内容过大（单行上限 ${MAX_LINE_BYTES} 字节），已拒绝。`,
+                  'TOO_LARGE'
+                );
+              }
               const result = await runCancellableEdit(req.requestId, () =>
                 data.insertRecord(req.at, req.text, {
                   shouldCancel: () => cancel.has(req.requestId),
@@ -384,6 +421,13 @@ function registerHostHandlers(deps: HostHandlerDeps): vscode.Disposable {
             },
             // 全文/字段搜索（宿主流式扫描；被 cancel 则中断）。
             [HostEndpoint.SEARCH]: async (req) => {
+              if (!isWithinTextBudget(req.query ?? '', MAX_QUERY_LEN)) {
+                return errReply(
+                  req.requestId,
+                  `搜索词过长（上限 ${MAX_QUERY_LEN} 字节）。`,
+                  'INVALID_ARG'
+                );
+              }
               const p = await data.search(req.query, req.field, req.scope, () =>
                 cancel.has(req.requestId)
               );
@@ -405,12 +449,40 @@ function registerHostHandlers(deps: HostHandlerDeps): vscode.Disposable {
               return okReply(HostReply.FILTER_RESULTS, req.requestId, p);
             },
             // 偏好持久化到 workspaceState（按 uri 命名空间键）。
+            // 键与值都来自 webview（不可信输入）：必须在写入前校验，否则前端可以
+            // 任意形状、任意体积地写宿主存储 —— 那是每次启动都要偿还的债。
             [HostEndpoint.PERSIST_STATE]: async (req) => {
+              if (!isAllowedPersistKey(req.key)) {
+                return errReply(
+                  req.requestId,
+                  `非法的偏好键（须以 ${PERSIST_KEY_PREFIX} 开头且仅含安全字符）：${String(req.key).slice(0, 40)}`,
+                  'INVALID_ARG'
+                );
+              }
+              if (!isWithinPersistBudget(req.value)) {
+                return errReply(
+                  req.requestId,
+                  `偏好数据超过 ${MAX_PERSIST_VALUE_BYTES} 字节预算或被循环引用，已拒绝保存。`,
+                  'TOO_LARGE'
+                );
+              }
               await context.workspaceState.update(req.key, req.value);
               return okReply(HostReply.RESULT, req.requestId, { ok: true });
             },
-            [HostEndpoint.LOAD_STATE]: async (req) =>
-              okReply(HostReply.RESULT, req.requestId, await context.workspaceState.get(req.key)),
+            [HostEndpoint.LOAD_STATE]: async (req) => {
+              if (!isAllowedPersistKey(req.key)) {
+                return errReply(
+                  req.requestId,
+                  `非法的偏好键：${String(req.key).slice(0, 40)}`,
+                  'INVALID_ARG'
+                );
+              }
+              return okReply(
+                HostReply.RESULT,
+                req.requestId,
+                await context.workspaceState.get(req.key)
+              );
+            },
             // 文件变更后 webview 点「重新加载」→ 重建索引并返回新概览。
             [HostEndpoint.RELOAD]: async (req) =>
               okReply(HostReply.OVERVIEW, req.requestId, await data.reload()),
@@ -422,6 +494,14 @@ function registerHostHandlers(deps: HostHandlerDeps): vscode.Disposable {
             // 才谈得上进度与取消 —— 故此处统一接线，是否真有回调由写入层决定
             // （无搬移即不轮询取消、不上报进度），前端据是否有推送自行决定是否弹横幅。
             [HostEndpoint.EDIT_RECORD]: async (req) => {
+              // 编辑文本上限与读取侧 MAX_LINE_BYTES 对齐：能读进来才谈得上写回去。
+              if (!isWithinTextBudget(req.text ?? '', MAX_LINE_BYTES)) {
+                return errReply(
+                  req.requestId,
+                  `编辑内容过大（单行上限 ${MAX_LINE_BYTES} 字节），已拒绝。`,
+                  'TOO_LARGE'
+                );
+              }
               const result = await (async () => {
                 try {
                   return await data.editRecord(req.line, req.text, req.expectedBytes, {
@@ -473,6 +553,18 @@ function registerHostHandlers(deps: HostHandlerDeps): vscode.Disposable {
             // 仅当本批替换具备撤销能力时才上报 —— 超限时如实告知（undoable=false），
             // 而不是静默地让用户以为 Ctrl+Z 能救回来。
             [HostEndpoint.REPLACE_TEXT]: async (req) => {
+              // 查询串与替换串都要卡长度：它们会参与逐行扫描与逐字节匹配，
+              // 超长输入既无实用意义，也会把 O(N×M) 的成本放大到不可接受。
+              if (
+                !isWithinTextBudget(req.query ?? '', MAX_QUERY_LEN) ||
+                !isWithinTextBudget(req.replacement ?? '', MAX_QUERY_LEN)
+              ) {
+                return errReply(
+                  req.requestId,
+                  `查找/替换文本过长（上限 ${MAX_QUERY_LEN} 字节）。`,
+                  'INVALID_ARG'
+                );
+              }
               const result = await (async () => {
                 try {
                   return await data.replaceText(req.query, req.replacement, {
@@ -521,6 +613,15 @@ function registerHostHandlers(deps: HostHandlerDeps): vscode.Disposable {
             // 批量删除多行（编辑能力 M2）：相邻行合并成连续区间后一次原子重写；
             // 回传的区间同时用于撤销（与删除共用同一组偏移）。
             [HostEndpoint.DELETE_RECORDS]: async (req) => {
+              // 协议层先卡规模：宿主内部同样有这道闸（不信任前端），
+              // 但在此拒绝可以省掉一次全文件扫描才发现超限。
+              if (req.lines.length > MAX_SELECTION_LINES) {
+                return errReply(
+                  req.requestId,
+                  `一次最多选择 ${MAX_SELECTION_LINES} 行，当前 ${req.lines.length} 行。`,
+                  'TOO_LARGE'
+                );
+              }
               const result = await (async () => {
                 try {
                   return await data.deleteRecords(req.lines, {
@@ -541,6 +642,13 @@ function registerHostHandlers(deps: HostHandlerDeps): vscode.Disposable {
             // 批量复制：宿主读取磁盘原文后由扩展侧写入剪贴板（vscode.env.clipboard
             // 比 webview 的 navigator.clipboard 可靠，不受 webview 权限限制）。
             [HostEndpoint.COPY_LINES]: async (req) => {
+              if (req.lines.length > MAX_SELECTION_LINES) {
+                return errReply(
+                  req.requestId,
+                  `一次最多复制 ${MAX_SELECTION_LINES} 行，当前 ${req.lines.length} 行。`,
+                  'TOO_LARGE'
+                );
+              }
               const res = await data.readLinesText(req.lines);
               const payload: Record<string, unknown> = {
                 ok: res.ok,
@@ -574,10 +682,22 @@ function registerHostHandlers(deps: HostHandlerDeps): vscode.Disposable {
           })
         ).response;
       } catch (e) {
-        hostErr('处理消息时异常: ' + (e instanceof Error ? e.stack || e.message : String(e)));
+        outcome = 'error';
+        hostErr('处理消息时异常', {
+          traceId,
+          endpoint: String(incoming),
+          error: e instanceof Error ? e.message : String(e),
+        });
         // T7：异常回执保留 requestId，使 webview 精确 reject 对应请求（而非升级为全局 error 横幅）。
         response = errReply(requestIdOf(message), e instanceof Error ? e.message : String(e));
       }
+      // 收尾必记：用户排障时最需要的是「这一步到底花了多久、结局是什么」。
+      hostLog('消息处理完成', {
+        traceId,
+        endpoint: String(incoming),
+        durationMs: Date.now() - startedAt,
+        outcome,
+      });
       // 回执发送同样纳入 try：避免「面板已销毁」等异常逃逸成未处理 rejection。
       if (response) {
         try {
@@ -875,6 +995,11 @@ class JsonlCustomEditorProvider
 export function activate(context: vscode.ExtensionContext): void {
   output = vscode.window.createOutputChannel('JSONL Viewer');
   syncDebugFlag();
+  // 日志落到输出面板：一行一条 JSON（ts/level/msg/traceId/…），可被工具直接聚合。
+  logger = createLogger({
+    sink: (line) => output?.appendLine(line),
+    debugEnabled: () => debugLogging,
+  });
 
   // T4/A4：共享状态在此**显式创建**并注入各调用路径（替代此前的模块级隐式全局单例）。
   const runtime: HostRuntime = {

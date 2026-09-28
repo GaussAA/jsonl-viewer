@@ -12,8 +12,22 @@
  */
 
 import type { FieldInfo } from '../infer/inferFields.ts';
+import { MAX_PERSIST_KEY_LEN, MAX_PERSIST_VALUE_BYTES, PERSIST_KEY_PREFIX } from '../constants.ts';
 
 /* ------------------------------ 常量 ------------------------------ */
+
+/**
+ * 协议版本号（host 与 webview 的契约版本）。
+ *
+ * 为何必须有它：webview 以 `retainContextWhenHidden: true` 常驻，扩展更新后 VS Code
+ * 可能仍复用**旧版 webview 脚本**与**新版宿主**配对。没有版本号时，两端对消息形状
+ * 的理解差异不会报错，只会表现为「点了没反应 / 字段全是 undefined」这类无法归因的
+ * 诡异行为。版本号让宿主能立刻识别并给出「请重新打开」的明确指引。
+ *
+ * 变更纪律：凡**破坏性**改动（删改端点、改载荷字段语义）必须 +1；纯增量（新增可选
+ * 字段、新增端点）不改版本。
+ */
+export const PROTOCOL_VERSION = 1;
 
 /** webview -> host 请求端点。 */
 export const HostEndpoint = {
@@ -123,6 +137,8 @@ export const HostReply = {
 
 export interface OverviewPayload {
   uri: string;
+  /** 宿主侧的协议版本；webview 据此判断自己是否与宿主匹配。 */
+  protocolVersion: number;
   totalLines: number;
   /** 逻辑记录总数（紧凑文件 == totalLines；pretty/多行文件按记录分组计数）。 */
   totalRecords: number;
@@ -534,7 +550,7 @@ export type HostResponse =
   | { type: typeof HostReply.SEARCH_RESULTS; requestId: string; payload: SearchResultsPayload }
   | { type: typeof HostReply.FILTER_RESULTS; requestId: string; payload: FilterResultsPayload }
   | { type: typeof HostReply.RESULT; requestId: string; payload: unknown }
-  | { type: typeof HostReply.ERROR; requestId?: string; message: string }
+  | { type: typeof HostReply.ERROR; requestId?: string; message: string; code?: RpcErrorCode }
   | { type: typeof HostReply.JUMP_TO_SOURCE; payload: JumpToSourcePayload }
   | { type: typeof HostReply.FILE_STALE; payload: StaleFilePayload }
   | { type: typeof HostReply.EDIT_RESULT; requestId: string; payload: EditResultPayload }
@@ -556,6 +572,31 @@ export type HostResponse =
   | { type: typeof HostReply.HISTORY_RESULT; requestId: string; payload: HistoryResultPayload }
   | { type: typeof HostReply.BAD_LINES; requestId: string; payload: BadLinesPayload };
 
+/**
+ * 错误回执的机器可读分类。
+ *
+ * 为何不能只有 `message` 字符串：前端对错误的处理需要**分支**（冲突要提示「重新加载」、
+ * 取消要静默收场、参数非法要提示改输入、超时要可重试），靠匹配中文文案分支既脆弱又
+ * 无法本地化。错误码是给程序的，文案是给人看的，两者缺一不可。
+ */
+export type RpcErrorCode =
+  /** 入参不合法（类型/范围/长度）；前端应提示用户改正输入。 */
+  | 'INVALID_ARG'
+  /** 请求体过大被拒绝；前端应缩小范围后重试。 */
+  | 'TOO_LARGE'
+  /** 目标不存在（文件被删 / 记录不存在）。 */
+  | 'NOT_FOUND'
+  /** 文件已被外部修改，基于过期视图的写入被拒绝；前端应提示重新加载。 */
+  | 'CONFLICT'
+  /** 用户主动取消（零风险，文件未被触碰）；前端应静默收场，不可报成失败。 */
+  | 'CANCELLED'
+  /** 请求超时（可重试）。 */
+  | 'TIMEOUT'
+  /** 端点未实现（两端版本不匹配的典型症状）。 */
+  | 'NOT_IMPLEMENTED'
+  /** 宿主内部异常（未分类兜底）。 */
+  | 'INTERNAL';
+
 export type RpcMessage = HostRequest | HostResponse;
 
 /* ---------------------------- 工具函数 ---------------------------- */
@@ -564,6 +605,50 @@ let reqSeq = 0;
 export function makeRequestId(prefix = 'req'): string {
   reqSeq = (reqSeq + 1) | 0;
   return `${prefix}-${Date.now().toString(36)}-${reqSeq.toString(36)}`;
+}
+
+/**
+ * 偏好键是否合法。
+ *
+ * 键由 **webview 给出**（不可信输入），直接拿去写 `workspaceState` 等于让前端决定
+ * 宿主存储的结构。故限定：本扩展命名空间前缀 + 长度上限 + 仅允许安全字符
+ * （不含路径分隔符与控制字符，杜绝任何形式的键注入）。
+ */
+export function isAllowedPersistKey(key: string): boolean {
+  if (typeof key !== 'string') return false;
+  if (key.length === 0 || key.length > MAX_PERSIST_KEY_LEN) return false;
+  if (!key.startsWith(PERSIST_KEY_PREFIX)) return false;
+  // 允许 `/ :` 是因为键里带文件 URI（`jsonlViewer.state.file:///a.jsonl`）；
+  // 拒绝其余一切——空白、控制字符、反斜杠、引号——杜绝任何形式的键注入与路径穿越。
+  return /^[A-Za-z0-9._:/-]+$/.test(key);
+}
+
+/**
+ * 偏好值的体积是否在预算内。
+ *
+ * `JSON.stringify` 对循环引用抛错、对 bigint 抛错——故整体包在 try 里：
+ * 序列化失败一律视为「不可持久化」并拒绝，而不是让异常逃逸到消息循环。
+ */
+export function isWithinPersistBudget(value: unknown): boolean {
+  try {
+    const json = JSON.stringify(value ?? null);
+    if (typeof json !== 'string') return false; // undefined / 函数等不可序列化值
+    // 用 TextEncoder 而非 Buffer：本模块被 **webview 端** 一同引用，
+    // 任何 node:* 专属 API 都会让浏览器侧 bundle 需要 polyfill 甚至直接崩。
+    return byteLength(json) <= MAX_PERSIST_VALUE_BYTES;
+  } catch {
+    return false;
+  }
+}
+
+/** 文本类入参是否在长度预算内（搜索词 / 替换词 / 编辑文本）。 */
+export function isWithinTextBudget(text: string, maxBytes: number): boolean {
+  return typeof text === 'string' && byteLength(text) <= maxBytes;
+}
+
+/** UTF-8 字节长度（两端通用的实现，避免依赖 node:Buffer）。 */
+function byteLength(s: string): number {
+  return new TextEncoder().encode(s).length;
 }
 
 /** 判断给定消息是否为请求分发所关心的 RPC 消息。 */
@@ -723,13 +808,19 @@ export async function dispatchMessage(
   >;
   const handler = registry[msg.type];
   if (!handler) {
-    return { response: errReply(requestId, `endpoint not implemented yet: ${msg.type}`) };
+    // NOT_IMPLEMENTED 是「两端版本不匹配」的典型症状，必须可区分于普通内部错误。
+    return {
+      response: errReply(requestId, `endpoint not implemented yet: ${msg.type}`, 'NOT_IMPLEMENTED'),
+    };
   }
   try {
     const response = await handler(msg);
     return { response: response ?? undefined };
   } catch (e) {
-    return { response: errReply(requestId, e instanceof Error ? e.message : String(e)) };
+    // 异常兜底统一归类为 INTERNAL：前端可据此只提示「宿主内部错误」而不去猜文案。
+    return {
+      response: errReply(requestId, e instanceof Error ? e.message : String(e), 'INTERNAL'),
+    };
   }
 }
 
@@ -738,9 +829,13 @@ export function okReply(type: string, requestId: string, payload: unknown): Host
   return { type, requestId, payload } as HostResponse;
 }
 
-/** 构造错误回执。 */
-export function errReply(requestId: string | undefined, message: string): HostResponse {
-  return { type: HostReply.ERROR, requestId, message };
+/** 构造错误回执（带机器可读的错误码，便于前端分支处理）。 */
+export function errReply(
+  requestId: string | undefined,
+  message: string,
+  code?: RpcErrorCode
+): HostResponse {
+  return { type: HostReply.ERROR, requestId, message, ...(code ? { code } : {}) };
 }
 
 /** 构造初始化引导消息。 */

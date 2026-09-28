@@ -2,15 +2,21 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   dispatchMessage,
+  errReply,
   HostEndpoint,
   HostReply,
   initReply,
+  isAllowedPersistKey,
+  isWithinPersistBudget,
+  isWithinTextBudget,
   okReply,
   isHostRequest,
   requestIdOf,
+  PROTOCOL_VERSION,
   type HostHandlerMap,
 } from '../rpc.ts';
 import type { OverviewPayload } from '../rpc.ts';
+import { MAX_PERSIST_VALUE_BYTES } from '../../constants.ts';
 
 /** 宿主真实类型请求消息的形态（webview 用 HostEndpoint 的值作为 type 发送）。 */
 const req = (type: string): unknown => ({ type });
@@ -18,10 +24,19 @@ const req = (type: string): unknown => ({ type });
 /** 各端点的默认 handler：返回完整 HostResponse（含 reply 类型与 requestId）。 */
 const baseHandlers: HostHandlerMap = {
   [HostEndpoint.READY]: () =>
-    initReply({ uri: 'u', totalLines: 0, totalRecords: 0, totalBytes: 0, buildMs: 0, eof: true }),
+    initReply({
+      uri: 'u',
+      protocolVersion: PROTOCOL_VERSION,
+      totalLines: 0,
+      totalRecords: 0,
+      totalBytes: 0,
+      buildMs: 0,
+      eof: true,
+    }),
   [HostEndpoint.GET_OVERVIEW]: (r) =>
     okReply(HostReply.OVERVIEW, r.requestId, {
       uri: 'u',
+      protocolVersion: PROTOCOL_VERSION,
       totalLines: 0,
       totalBytes: 0,
       buildMs: 0,
@@ -159,6 +174,7 @@ test('isHostRequest 识别所有 HostEndpoint 值（键大写、值是小写端�
 test('READY 握手能返回 init 回执（此前 isHostRequest 误杀导致宿主永不回包）', async () => {
   const overview: OverviewPayload = {
     uri: 'file:///x.jsonl',
+    protocolVersion: PROTOCOL_VERSION,
     totalLines: 3,
     totalRecords: 3,
     totalBytes: 9,
@@ -410,4 +426,62 @@ test('无 requestId 的端点（READY）抛异常：回执 requestId 为 undefin
   });
   assert.equal(response?.type, HostReply.ERROR);
   assert.equal((response as unknown as { requestId?: string }).requestId, undefined);
+});
+
+/* ---------------------- 错误码（机器可读分类） ---------------------- */
+
+test('errReply 携带错误码，缺省时不写该字段', () => {
+  const withCode = errReply('rid', '文件已被外部修改', 'CONFLICT');
+  assert.equal((withCode as { code?: string }).code, 'CONFLICT');
+
+  const noCode = errReply('rid', '普通失败');
+  assert.equal('code' in noCode, false, '无码时不写字段（保持载荷稀疏）');
+});
+
+test('未实现的端点回 NOT_IMPLEMENTED（版本不匹配的典型症状必须可区分）', async () => {
+  const { response } = await call(req(HostEndpoint.SEARCH), {} as HostHandlerMap);
+  assert.equal(response?.type, HostReply.ERROR);
+  assert.equal((response as unknown as { code?: string }).code, 'NOT_IMPLEMENTED');
+});
+
+test('handler 抛异常统一归类为 INTERNAL', async () => {
+  const { response } = await call(req(HostEndpoint.SEARCH), {
+    ...baseHandlers,
+    [HostEndpoint.SEARCH]: () => {
+      throw new Error('boom');
+    },
+  });
+  assert.equal((response as unknown as { code?: string }).code, 'INTERNAL');
+});
+
+/* ---------------------- 入参校验（不可信输入） ---------------------- */
+
+test('isAllowedPersistKey：只放行本扩展命名空间内的安全键', () => {
+  // 真实键形如 `jsonlViewer.state.file:///a.jsonl`（键里带 URI，故必须放行 `/` 与 `:`）
+  assert.equal(isAllowedPersistKey('jsonlViewer.state.file:///a.jsonl'), true);
+  assert.equal(isAllowedPersistKey('jsonlViewer.ui.layout'), true);
+  // 越出命名空间 / 含危险字符 → 一律拒绝
+  assert.equal(isAllowedPersistKey('otherExtension.evil'), false);
+  assert.equal(isAllowedPersistKey('jsonlViewer.a\\b'), false, '反斜杠（Windows 路径分隔）拒绝');
+  assert.equal(isAllowedPersistKey('jsonlViewer.a\u0000b'), false, '控制字符拒绝');
+  assert.equal(isAllowedPersistKey('jsonlViewer.a b'), false, '空格拒绝');
+  assert.equal(isAllowedPersistKey(''), false);
+  assert.equal(isAllowedPersistKey('x'.repeat(500)), false, '超长键拒绝');
+  assert.equal(isAllowedPersistKey(42 as unknown as string), false, '非字符串拒绝');
+});
+
+test('isWithinPersistBudget：超预算与不可序列化的值都拒绝', () => {
+  assert.equal(isWithinPersistBudget({ a: 1 }), true);
+  assert.equal(isWithinPersistBudget('x'.repeat(MAX_PERSIST_VALUE_BYTES + 1)), false, '超预算');
+  assert.equal(isWithinPersistBudget(undefined), true, 'undefined 归一为 null，可存');
+  const cyclic: Record<string, unknown> = {};
+  cyclic.self = cyclic;
+  assert.equal(isWithinPersistBudget(cyclic), false, '循环引用不可持久化');
+});
+
+test('isWithinTextBudget：按 UTF-8 字节计数（中文不漏算）', () => {
+  assert.equal(isWithinTextBudget('abc', 8), true);
+  // 4 个中文字符 = 12 字节 UTF-8：按字符数算会误判为「8 以内」，按字节算则正确拒绝。
+  assert.equal(isWithinTextBudget('中文中文', 8), false);
+  assert.equal(isWithinTextBudget('中文中文', 12), true);
 });

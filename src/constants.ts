@@ -129,6 +129,27 @@ export const MAX_REPLACE_UNDO_BYTES = 8 * 1024 * 1024;
 
 /* ---------------------- 协议 & 搜索 ---------------------- */
 
+/**
+ * 偏好持久化（PERSIST_STATE）单条 value 的字节预算：64KB。
+ *
+ * 偏好经 `workspaceState` 落盘，最终进入 VS Code 的全局存储并被**每次启动读取**。
+ * 没有上限时，一个失控的字段布局 / 过滤条件就能把它撑成 MB 级，代价由用户每次
+ * 启动承担。超限即拒绝并明确报错（静默丢弃会让用户以为偏好已保存）。
+ */
+export const MAX_PERSIST_VALUE_BYTES = 64 * 1024;
+
+/** 偏好键的最大长度与允许前缀——键由 webview 给出，必须限定在本扩展命名空间内。 */
+export const MAX_PERSIST_KEY_LEN = 200;
+export const PERSIST_KEY_PREFIX = 'jsonlViewer.';
+
+/**
+ * 搜索 / 替换关键词的最大长度：4096。
+ *
+ * 关键词过长既无实用意义，也会让「逐行扫描 + 逐字节匹配」的成本失控
+ * （长模式串在朴素匹配下是 O(N×M)）。超限直接拒绝，而不是让它慢慢跑完。
+ */
+export const MAX_QUERY_LEN = 4096;
+
 /** webview → host RPC 默认超时（轻量请求：偏好读写、跳转源码等）。 */
 export const RPC_TIMEOUT_MS = 15_000;
 
@@ -153,6 +174,14 @@ export const SEARCH_MAX_RESULTS = 50_000;
 
 /** 过滤结果硬上限——与搜索相同（统一 5 万阈值）。 */
 export const FILTER_MAX_RESULTS = 50_000;
+
+/**
+ * 搜索 / 过滤结果缓存的条目上限：8。
+ *
+ * 每条缓存最坏是 5 万个行号（≈400KB），8 条≈3MB 上界；再多就不是「最近用过的查询」
+ * 而是内存负担了。淘汰走插入顺序（FIFO）——本场景没有明显热点，不需要 LRU 的复杂度。
+ */
+export const QUERY_CACHE_MAX = 8;
 
 /** 单次 readRecords 的行数硬上限（协议层防护）。
  *  webview 正常只请求一页（PAGE_SIZE=20）；此上限用于防御**异常输入或未来改动**

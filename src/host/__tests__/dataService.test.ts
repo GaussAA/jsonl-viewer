@@ -2190,3 +2190,81 @@ test('多行文件：写后验证与下一条记录保护同样生效', async ()
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test('写操作串行化：并发写入互不交错，磁盘与索引保持自洽', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const file = await makeFile(dir, ['{"a":1}', '{"b":2}', '{"c":3}', '{"d":4}']);
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    // 同一时刻发起四种不同性质的写入。
+    // 无串行化时，「定位区间 → 写盘 → 平移索引」这几步之间会被彼此插入，
+    // 后写者的区间建立在已被改动的字节之上 —— 典型症状是索引错位或内容被盖写。
+    const results = await Promise.all([
+      ds.editRecord(0, '{"a":10}'),
+      ds.editRecord(1, '{"b":20}'),
+      ds.insertRecord(4, '{"e":5}'),
+      ds.deleteRecord(2),
+    ]);
+    for (const [i, r] of results.entries()) {
+      assert.equal(r.ok, true, `第 ${i} 个并发写入必须成功（串行排队，而非互相拒绝）`);
+    }
+
+    const disk = (await readFile(file, 'utf8')).split('\n').filter((l) => l.length > 0);
+    for (const l of disk) assert.doesNotThrow(() => JSON.parse(l), `落盘行必须仍是合法 JSON：${l}`);
+    const ov = await ds.getOverview();
+    assert.equal(ov.totalRecords, disk.length, '索引行数与磁盘行数一致（并发写入未错位）');
+    assert.deepEqual(JSON.parse(disk[0]), { a: 10 }, '并发编辑的效果都在');
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('写操作串行化：并发撤销与编辑不会各说各话', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const file = await makeFile(dir, ['{"a":1}', '{"b":2}']);
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    await ds.editRecord(0, '{"a":2}');
+    // 撤销（多步回退路径）与一次新编辑同时发起：二者都改磁盘，必须排队而非交错。
+    const [undo, edit] = await Promise.all([ds.undoStep(), ds.editRecord(1, '{"b":20}')]);
+    assert.equal(undo.ok, true, '撤销成功');
+    assert.equal(edit.ok, true, '并发的新编辑也成功');
+
+    const disk = (await readFile(file, 'utf8')).split('\n').filter((l) => l.length > 0);
+    for (const l of disk) assert.doesNotThrow(() => JSON.parse(l));
+    // 撤销把第 0 行还原为 {"a":1}；新编辑把第 1 行改成 {"b":20}
+    assert.deepEqual(JSON.parse(disk[0]), { a: 1 }, '撤销效果未被并发编辑覆盖');
+    assert.deepEqual(JSON.parse(disk[1]), { b: 20 }, '并发编辑效果未被撤销吞掉');
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('搜索缓存：同查询复用结果，写操作后随快照失效', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jsonl-ds-'));
+  try {
+    const file = await makeFile(dir, ['{"id":1}', '{"id":2}']);
+    const ds = makeService(file);
+    await ds.getOverview();
+
+    const first = await ds.search('id":2');
+    assert.deepEqual(first.matches, [1]);
+    const second = await ds.search('id":2');
+    assert.deepEqual(second.matches, [1], '同一查询复用缓存');
+    assert.notStrictEqual(second.matches, first.matches, '返回副本，避免调用方污染缓存');
+
+    // 改写内容 → 快照变化 → 缓存必须整体作废（否则会给出过期结论）
+    await ds.editRecord(1, '{"id":3}');
+    const third = await ds.search('id":2');
+    assert.deepEqual(third.matches, [], '文件被改写后不得再返回旧结果');
+    await ds.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

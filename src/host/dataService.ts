@@ -46,13 +46,15 @@ import {
   MAX_REPLACE_UNDO_BYTES,
   MAX_SELECTION_LINES,
   COPY_MAX_BYTES,
-  MAX_HISTORY_ENTRIES,
-  MAX_HISTORY_BYTES,
   MAX_BAD_LINES,
   PROGRESS_THROTTLE_MS,
+  QUERY_CACHE_MAX,
 } from '../constants.ts';
 import { buildIndexWithFallback, type IndexHost } from './indexHost.ts';
-import { buildRecordsPayload } from '../protocol/rpc.ts';
+import { EditHistory } from './editHistory.ts';
+import { BadLineTracker } from './badLineTracker.ts';
+import type { HistoryEntry, HistoryOp, HistoryStepResult } from './editHistory.ts';
+import { buildRecordsPayload, PROTOCOL_VERSION } from '../protocol/rpc.ts';
 import type {
   BadLinesPayload,
   CopyLinesResultPayload,
@@ -141,6 +143,22 @@ function throttleProgress(
 }
 
 /** 二分统计升序数组中小于 `x` 的元素个数（用于批量删除后的行号映射）。 */
+/**
+ * 复制一份搜索结果再交出去。
+ *
+ * 缓存里的对象是**共享**的，直接交出去等于把内部状态借给调用方：调用方一旦往
+ * `matches` 里 push（或排序），缓存就被污染，下一次同样的查询会拿到错答案。
+ * 复制 5 万个数字约 1ms，远比一次全文件扫描便宜。
+ */
+function cloneSearchResult(r: SearchLinesResult): SearchLinesResult {
+  return { ...r, matches: [...r.matches] };
+}
+
+/** 同上；过滤结果的 `matches` 可能为 null（=不过滤），须分别处理。 */
+function cloneFilterResult(r: FilterLinesResult): FilterLinesResult {
+  return { ...r, matches: r.matches === null ? null : [...r.matches] };
+}
+
 function countLessThan(sorted: readonly number[], x: number): number {
   let lo = 0;
   let hi = sorted.length;
@@ -196,80 +214,6 @@ export interface DataServiceOptions {
 }
 
 /* ---------------------- 会话编辑历史 ---------------------- */
-
-/**
- * 一次可撤销的写操作。
- *
- * 每条都能**双向**执行：`forward` 是用户当初做的操作，反向即回退 —— 这正是
- * 「Ctrl+Z 单步撤销」与「历史面板回退到某点」能共用同一份数据的原因。
- */
-type HistoryOp =
-  | { kind: 'edit'; line: number; before: string; after: string }
-  | { kind: 'insert'; line: number; text: string }
-  | { kind: 'delete'; line: number; before: string }
-  | { kind: 'deleteMany'; ranges: DeletedRange[] }
-  | { kind: 'replaceAll'; changes: ReplaceChange[] };
-
-/** 历史条目（含回退数据，仅供宿主内部使用）。 */
-interface HistoryEntry {
-  id: string;
-  op: HistoryOp;
-  label: string;
-  /** 影响的行数。 */
-  lines: number;
-  bytesDelta: number;
-  at: number;
-  /** 该条目占用的近似字节数（用于总体积上限）。 */
-  bytes: number;
-}
-
-/** 单步 / 多步历史操作的结果。 */
-export interface HistoryStepResult {
-  ok: boolean;
-  /** 本次实际执行的步数（回退跨多条时为多步）。 */
-  steps: number;
-  /** 执行后的光标位置。 */
-  cursor: number;
-  total: number;
-  /** 被操作条目的描述（单步时给出）。 */
-  label?: string;
-  /** 失败原因（中途失败时 steps 表示已成功的步数，便于如实告知）。 */
-  error?: string;
-}
-
-/** 历史条目占用的近似字节数（正向与反向数据都要留着才能双向执行）。 */
-function historyOpBytes(op: HistoryOp): number {
-  switch (op.kind) {
-    case 'edit':
-      return op.before.length + op.after.length;
-    case 'insert':
-      return op.text.length;
-    case 'delete':
-      return op.before.length;
-    case 'deleteMany':
-      return op.ranges.reduce((a, r) => a + r.content.length, 0);
-    case 'replaceAll':
-      return op.changes.reduce((a, c) => a + c.before.length + c.after.length, 0);
-  }
-}
-
-/** 由操作推出「描述 + 影响行数」。 */
-function historyLabel(op: HistoryOp): { label: string; lines: number } {
-  switch (op.kind) {
-    case 'edit':
-      return { label: `编辑第 ${op.line + 1} 行`, lines: 1 };
-    case 'insert':
-      return { label: `在第 ${op.line + 1} 行前插入`, lines: 1 };
-    case 'delete':
-      return { label: `删除第 ${op.line + 1} 行`, lines: 1 };
-    case 'deleteMany': {
-      const n = op.ranges.reduce((a, r) => a + r.lines.length, 0);
-      return { label: `删除 ${n} 行`, lines: n };
-    }
-    case 'replaceAll':
-      return { label: `替换 ${op.changes.length} 行`, lines: op.changes.length };
-  }
-}
 
 /** 批量改写（查找替换 / 撤销 / 重做）的可选行为。 */
 export interface ReplaceOpts {
@@ -335,17 +279,28 @@ export class DataService {
    * `scanBadLines()`。二者在前端必须可区分（`BadLinesPayload.partial`）——
    * 把「已发现 3 个坏行」当成「文件只有 3 个坏行」，在数据清洗场景下是危险的误判。
    */
-  private readonly knownBadLines = new Set<number>();
   /**
-   * `knownBadLines` 是否已是**全文件全量**（最近一次 `scanBadLines` 成功、且之后
-   * 没有任何改变文件内容的操作）。
+   * 坏行集合 + 「是否已全量扫过」的标记（细节见 badLineTracker.ts）。
    *
-   * 为何写操作后要降级：行号与行内容都变了，「全量」这一结论不再有依据。但已发现的
-   * 坏行列表仍有价值（行号已同步位移），故只降级完整性标记、不清空列表。
+   * **它不是全文件坏行集**：lines 只覆盖读过/抽样过的行；要拿全量必须显式
+   * scanBadLines()。二者在前端必须可区分（BadLinesPayload.partial）——
+   * 把「已发现 3 个坏行」当成「文件只有 3 个坏行」，在数据清洗场景下是危险的误判。
    */
-  private badLinesComplete = false;
+  private readonly badLines = new BadLineTracker();
   /** 构建索引时的文件快照（用来检测文件是否已变更）。 */
   private snapshot: FileSnapshot | undefined;
+
+  /**
+   * 搜索 / 过滤结果缓存（键 = 文件快照 + 查询）。
+   *
+   * 为何值得缓存：搜索与过滤都要**顺序扫全文件**（1GB 文件数秒），而用户在列表里
+   * 反复切换过滤条件、翻页后又回到同一搜索词，是极常见的高频路径 —— 每次都重扫
+   * 一遍，既慢又占满 worker。
+   *
+   * 为何以「快照」为键的一部分：结果只在该版本的文件内容上成立，文件一变（本进程
+   * 写入或外部改动）就必须整体失效 —— 缓存一份过期结论比不缓存更危险。
+   */
+  private readonly queryCache = new Map<string, SearchLinesResult | FilterLinesResult>();
   /**
    * 生命周期代际：dispose/reload 时递增，使在途索引构建失效
    * （构建完成检测到代际变化即丢弃结果，不写回成员，防止 fd 泄漏与索引复活）。
@@ -357,15 +312,37 @@ export class DataService {
    */
   private editing = false;
 
-  /* ---------- 会话编辑历史（单一光标模型，见 pushHistory 说明） ---------- */
-  private readonly history: HistoryEntry[] = [];
-  /** 已应用条数：之前的为「已应用」，之后的为「已撤销」。 */
-  private historyCursor = 0;
-  private historySeq = 0;
-  /** 是否因超出上限丢弃过更早的记录（UI 需如实告知，否则用户以为看到的是完整历史）。 */
-  private historyDropped = false;
-  /** 正在执行历史回退：期间的写操作**不再入栈**（否则撤销会生成新记录）。 */
-  private applyingHistory = false;
+  /**
+   * 写操作串行链（互斥锁）—— **一切改动磁盘的动作必须经 `runExclusive` 排队**。
+   *
+   * 为何必须有它：`DataService` 按 uri 被多个视图共享（默认编辑器 + 独立面板走同一
+   * 实例），两个视图可以在同一毫秒各自发起一次编辑。写路径是「读基线 → 冲突检测 →
+   * 定位区间 → 写盘 → 平移索引」的多步序列——两步之间若被另一个写操作插入，后写者
+   * 的定位区间与索引平移就建立在已被改动的字节之上（典型 TOCTOU）：轻则索引错位，
+   * 重则把两段内容写到同一偏移上。
+   *
+   * 为何不用「标志位 + 直接拒绝」：那会把「两个视图同时编辑」变成随机失败的体验。
+   * 排队让两次写入都成功且严格有序，才是用户预期的行为。
+   *
+   * 死锁纪律：**加锁只发生在对外入口**（editRecord / deleteRecord / insertRecord /
+   * replaceText / replaceField / deleteRecords / insertRanges / undo / redo / revert），
+   * 内部实现（*Internal 与 applyLineTexts 等）一律不加锁，供锁内调用。
+   */
+  private writeChain: Promise<unknown> = Promise.resolve();
+
+  /**
+   * 把一次写操作排到串行链尾部执行（前一个无论成败都继续，绝不因一次失败卡死全链）。
+   */
+  private runExclusive<T>(run: () => Promise<T>): Promise<T> {
+    const started = this.writeChain.then(run, run);
+    // 链上只挂「已吞掉异常」的 Promise：否则前一步 reject 会让链的后续 then 变成
+    // unhandledRejection，进而可能击穿扩展宿主。
+    this.writeChain = started.then(undefined, () => {});
+    return started;
+  }
+
+  /** 会话编辑历史（单一光标模型；状态机细节见 editHistory.ts）。 */
+  private readonly history = new EditHistory();
 
   private readonly uri: string;
   private readonly path: string;
@@ -462,6 +439,7 @@ export class DataService {
     const li = await this.ensureIndex();
     return {
       uri: this.uri,
+      protocolVersion: PROTOCOL_VERSION,
       totalLines: li.totalLines,
       totalRecords: li.totalRecords,
       totalBytes: li.totalBytes,
@@ -477,7 +455,7 @@ export class DataService {
   ): Promise<RecordsPayload> {
     const li = await this.ensureIndex();
     const reader = this.reader!;
-    // M3：入口整数化校验——脏行号（NaN/小数/负数）不进入读批，也不污染 knownBadLines。
+    // M3：入口整数化校验——脏行号（NaN/小数/负数）不进入读批，也不污染坏行集合。
     if (!Number.isInteger(startLine) || startLine < 0 || !Number.isInteger(count) || count <= 0) {
       return buildRecordsPayload(0, [], li.totalRecords);
     }
@@ -511,7 +489,7 @@ export class DataService {
       const parsed = parseJsonLine(rec.text);
       if (!parsed.ok) {
         items.push({ line: rec.recordNo, ok: false, error: parsed.error });
-        this.knownBadLines.add(rec.recordNo);
+        this.badLines.add(rec.recordNo);
         continue;
       }
       const value = parsed.value;
@@ -544,7 +522,7 @@ export class DataService {
       return { value: undefined, error: '无效行号', ok: false };
     }
     const r = await readRecordAt(line, li, reader, this.opts.readLine);
-    if (!r.ok) this.knownBadLines.add(line);
+    if (!r.ok) this.badLines.add(line);
     return {
       value: r.value,
       error: r.error,
@@ -589,7 +567,18 @@ export class DataService {
    * 历史回退/重放走 `editRecordInternal`（before/after 可能是多行 —— 曾合法写入文件的
    * 内容），因此单行约束只在本对外入口检查。
    */
+  /** 对外入口：串行化后进入带校验的编辑实现（校验同样在锁内，避免校验与写入之间被插队）。 */
   async editRecord(
+    line: number,
+    text: string,
+    expectedBytes?: number,
+    opts: EditRecordOpts = {}
+  ): Promise<EditResultPayload> {
+    return this.runExclusive(() => this.editRecordChecked(line, text, expectedBytes, opts));
+  }
+
+  /** 编辑的入参校验（JSONL 单行约束 + JSON 合法性）；校验通过才落盘。 */
+  private async editRecordChecked(
     line: number,
     text: string,
     expectedBytes?: number,
@@ -752,8 +741,8 @@ export class DataService {
         );
       }
 
-      this.knownBadLines.delete(line);
-      this.pushHistory({ kind: 'edit', line, before: beforeText, after: text }, bytesDelta);
+      this.badLines.delete(line);
+      this.history.push({ kind: 'edit', line, before: beforeText, after: text }, bytesDelta);
       return {
         ok: true,
         line,
@@ -798,27 +787,30 @@ export class DataService {
     // 放在这个统一收口点而非 7 个写方法里各写一遍 —— 漏掉任何一处都会让前端
     // 拿一份过期的「全量」结论去说服用户，那比不支持扫描更危险。
     // 注意只降级完整性标记，**不清空**已发现列表（其行号位移已被各处正确维护）。
-    this.badLinesComplete = false;
+    this.badLines.invalidate();
+    // 快照一变，所有「按旧快照键」缓存的搜索/过滤结果立即作废：
+    // 缓存一份过期结论比不缓存更危险（用户会据此以为文件里没有某条记录）。
+    if (this.queryCache.size > 0) this.queryCache.clear();
   }
 
-  /** 删除行之后：行号整体前移，坏行集合里的行号必须同步位移，否则红标会错位。 */
-  private shiftKnownBadLinesAfterDelete(removedLine: number): void {
-    const next = new Set<number>();
-    for (const l of this.knownBadLines) {
-      if (l < removedLine) next.add(l);
-      else if (l > removedLine) next.add(l - 1);
-      // l === removedLine：该行已不存在，丢弃
+  /**
+   * 查询缓存键：文件快照（size + mtime）+ 查询内容。
+   *
+   * 快照部分不可省：同一查询词在文件被改写前后，正确答案是不同的。
+   */
+  private queryCacheKey(kind: 's' | 'f', query: string): string {
+    const s = this.snapshot;
+    const base = s ? `${s.size}:${Math.round(s.mtimeMs)}` : 'nosnap';
+    return `${kind}|${base}|${query}`;
+  }
+
+  /** 记入查询缓存；超容量按插入顺序淘汰最旧的一条（FIFO，本场景足够）。 */
+  private rememberQuery(key: string, res: SearchLinesResult | FilterLinesResult): void {
+    if (this.queryCache.size >= QUERY_CACHE_MAX) {
+      const oldest = this.queryCache.keys().next().value;
+      if (oldest !== undefined) this.queryCache.delete(oldest);
     }
-    this.knownBadLines.clear();
-    for (const l of next) this.knownBadLines.add(l);
-  }
-
-  /** 插入行之后：行号整体后移（同上）。 */
-  private shiftKnownBadLinesAfterInsert(at: number): void {
-    const next = new Set<number>();
-    for (const l of this.knownBadLines) next.add(l >= at ? l + 1 : l);
-    this.knownBadLines.clear();
-    for (const l of next) this.knownBadLines.add(l);
+    this.queryCache.set(key, res);
   }
 
   /**
@@ -827,7 +819,15 @@ export class DataService {
    * 前置保护与 `editRecord` 一致（写前冲突检测）；落盘复用写入层同一原语
    * `replaceRange`（空 replacement 即区间删除），随后同步索引与基线快照。
    */
+  /** 对外入口：串行化删除。 */
   async deleteRecord(line: number, opts: EditRecordOpts = {}): Promise<EditResultPayload> {
+    return this.runExclusive(() => this.deleteRecordInternal(line, opts));
+  }
+
+  private async deleteRecordInternal(
+    line: number,
+    opts: EditRecordOpts = {}
+  ): Promise<EditResultPayload> {
     const li = await this.ensureIndex();
     const reader = this.reader!;
 
@@ -855,8 +855,8 @@ export class DataService {
       );
       this.index = li.applyLineDelete(line, removedBytes);
       await this.refreshSnapshot();
-      this.shiftKnownBadLinesAfterDelete(line);
-      this.pushHistory({ kind: 'delete', line, before: removedText }, res.bytesDelta);
+      this.badLines.shiftAfterDelete(line);
+      this.history.push({ kind: 'delete', line, before: removedText }, res.bytesDelta);
       return {
         ok: true,
         line,
@@ -882,7 +882,16 @@ export class DataService {
    * 新行的行尾风格取「参考行」——优先前一行，其次插入点所在行；二者皆无（空文件）用 LF。
    * 这样在 CRLF 文件里插入的行同样是 CRLF，不会把行尾风格搅乱。
    */
+  /** 对外入口：串行化插入。 */
   async insertRecord(
+    at: number,
+    text: string,
+    opts: EditRecordOpts = {}
+  ): Promise<EditResultPayload> {
+    return this.runExclusive(() => this.insertRecordInternal(at, text, opts));
+  }
+
+  private async insertRecordInternal(
     at: number,
     text: string,
     opts: EditRecordOpts = {}
@@ -935,8 +944,8 @@ export class DataService {
       );
       this.index = li.applyLineInsert(at, newLineBytes.length);
       await this.refreshSnapshot();
-      this.shiftKnownBadLinesAfterInsert(at);
-      this.pushHistory({ kind: 'insert', line: at, text }, res.bytesDelta);
+      this.badLines.shiftAfterInsert(at);
+      this.history.push({ kind: 'insert', line: at, text }, res.bytesDelta);
       return {
         ok: true,
         line: at,
@@ -971,7 +980,16 @@ export class DataService {
    * 命中数达到搜索上限（truncated）时同样拒绝 —— 我们无法确认待改行的全集，
    * 在此基础上的「批量替换」是不可控的。
    */
+  /** 对外入口：串行化批量文本替换。 */
   async replaceText(
+    query: string,
+    replacement: string,
+    opts: ReplaceOpts = {}
+  ): Promise<ReplaceResultPayload> {
+    return this.runExclusive(() => this.replaceTextInternal(query, replacement, opts));
+  }
+
+  private async replaceTextInternal(
     query: string,
     replacement: string,
     opts: ReplaceOpts = {}
@@ -1138,7 +1156,17 @@ export class DataService {
    * 主体，进度与取消由这里自管；写入阶段的重写进度由 `applyEdits` 继续接管，两种进度
    * 共用同一个 `onProgress` 通道，前端横幅表现为「扫描 → 重写」连续推进。
    */
+  /** 对外入口：串行化批量字段级替换。 */
   async replaceField(
+    path: readonly (string | number)[],
+    from: unknown,
+    to: unknown,
+    opts: ReplaceOpts = {}
+  ): Promise<ReplaceResultPayload> {
+    return this.runExclusive(() => this.replaceFieldInternal(path, from, to, opts));
+  }
+
+  private async replaceFieldInternal(
     path: readonly (string | number)[],
     from: unknown,
     to: unknown,
@@ -1284,8 +1312,7 @@ export class DataService {
     this.reader = await openFileReader(this.path);
     this.snapshot = await this.currentSnapshot();
     // 行号已全变：坏行集合与「已全量扫描」结论一并作废。
-    this.badLinesComplete = false;
-    this.knownBadLines.clear();
+    this.badLines.reset();
   }
 
   /**
@@ -1344,135 +1371,99 @@ export class DataService {
     }
   }
 
-  /**
-   * 记录一次成功的写操作。
-   *
-   * **单一光标模型**：`historyCursor` 之前的条目是「已应用」、之后是「已撤销」。
-   * 于是：
-   *   · Ctrl+Z（`undoStep`）就是光标 −1；
-   *   · 历史面板「回退到此处」（`setHistoryCursor`）就是把光标移到目标位置；
-   *   · 两者**共用同一份状态**，不可能各说各话。
-   *
-   * 之所以不做成「VS Code 撤销栈 + 独立历史面板」两套：那必然不一致 ——
-   * 用户按 Ctrl+Z 撤销了，面板却还标着「已应用」。
-   *
-   * 在光标处发生新操作时，光标之后的记录**作废**（标准撤销栈语义）。
-   */
-  private pushHistory(op: HistoryOp, bytesDelta: number): void {
-    if (this.applyingHistory) return;
-    if (this.historyCursor < this.history.length) {
-      this.history.length = this.historyCursor;
-    }
-    const { label, lines } = historyLabel(op);
-    this.history.push({
-      id: `h${++this.historySeq}`,
-      op,
-      label,
-      lines,
-      bytesDelta,
-      at: Date.now(),
-      bytes: historyOpBytes(op),
-    });
-    this.historyCursor = this.history.length;
-    this.trimHistory();
-  }
-
-  /**
-   * 从**最旧**的一端丢弃，直到条数与总体积都在上限内（丢弃即同步回退光标）。
-   *
-   * 保留「至少一条」：否则一条就超限的巨型操作会被自己的上限立刻丢掉 ——
-   * 那等于刚做的事无法撤销。
-   */
-  private trimHistory(): void {
-    let bytes = this.history.reduce((a, e) => a + e.bytes, 0);
-    while (
-      this.history.length > MAX_HISTORY_ENTRIES ||
-      (bytes > MAX_HISTORY_BYTES && this.history.length > 1)
-    ) {
-      const dropped = this.history.shift();
-      if (!dropped) break;
-      bytes -= dropped.bytes;
-      if (this.historyCursor > 0) this.historyCursor--;
-      this.historyDropped = true;
-    }
-  }
-
   /** 历史快照（对外视图，**不含**回退数据 —— 那是宿主内部事务）。 */
   getHistory(): HistoryPayload {
-    return {
-      entries: this.history.map((e) => ({
-        id: e.id,
-        kind: e.op.kind,
-        label: e.label,
-        lines: e.lines,
-        bytesDelta: e.bytesDelta,
-        at: e.at,
-      })),
-      cursor: this.historyCursor,
-      dropped: this.historyDropped,
-    };
+    return this.history.snapshot();
   }
 
-  /** 撤销一步（光标前移）。 */
+  /** 撤销一步（光标前移）。整体串行：回退本身也是写磁盘。 */
   async undoStep(): Promise<HistoryStepResult> {
-    if (this.historyCursor === 0) {
+    return this.runExclusive(() => this.undoStepInternal());
+  }
+
+  private async undoStepInternal(): Promise<HistoryStepResult> {
+    if (this.history.cursorPos === 0) {
       return {
         ok: false,
         steps: 0,
         cursor: 0,
-        total: this.history.length,
+        total: this.history.total,
         error: '没有可撤销的操作',
       };
     }
-    const entry = this.history[this.historyCursor - 1];
+    const entry = this.history.prevEntry();
+    // 光标已确认 > 0，理论上必然有条目；仍显式守卫——历史状态一旦被别处改动，
+    // 宁可如实报错也不能带着 undefined 去执行回退。
+    if (!entry) {
+      return {
+        ok: false,
+        steps: 0,
+        cursor: this.history.cursorPos,
+        total: this.history.total,
+        error: '历史状态已失效，请重新打开后再试',
+      };
+    }
     const applied = await this.runHistoryOp(entry, false);
     if (!applied.ok) {
       return {
         ok: false,
         steps: 0,
-        cursor: this.historyCursor,
-        total: this.history.length,
+        cursor: this.history.cursorPos,
+        total: this.history.total,
         error: applied.error,
       };
     }
-    this.historyCursor--;
+    this.history.stepBack();
     return {
       ok: true,
       steps: 1,
-      cursor: this.historyCursor,
-      total: this.history.length,
+      cursor: this.history.cursorPos,
+      total: this.history.total,
       label: entry.label,
     };
   }
 
-  /** 重做一步（光标后移）。 */
+  /** 重做一步（光标后移）。整体串行。 */
   async redoStep(): Promise<HistoryStepResult> {
-    if (this.historyCursor >= this.history.length) {
+    return this.runExclusive(() => this.redoStepInternal());
+  }
+
+  private async redoStepInternal(): Promise<HistoryStepResult> {
+    if (this.history.cursorPos >= this.history.total) {
       return {
         ok: false,
         steps: 0,
-        cursor: this.historyCursor,
-        total: this.history.length,
+        cursor: this.history.cursorPos,
+        total: this.history.total,
         error: '没有可重做的操作',
       };
     }
-    const entry = this.history[this.historyCursor];
+    const entry = this.history.entryAt(this.history.cursorPos);
+    if (!entry) {
+      return {
+        ok: false,
+        steps: 0,
+        cursor: this.history.cursorPos,
+        total: this.history.total,
+        error: '历史状态已失效，请重新打开后再试',
+      };
+    }
     const applied = await this.runHistoryOp(entry, true);
     if (!applied.ok) {
       return {
         ok: false,
         steps: 0,
-        cursor: this.historyCursor,
-        total: this.history.length,
+        cursor: this.history.cursorPos,
+        total: this.history.total,
         error: applied.error,
       };
     }
-    this.historyCursor++;
+    this.history.stepForward();
     return {
       ok: true,
       steps: 1,
-      cursor: this.historyCursor,
-      total: this.history.length,
+      cursor: this.history.cursorPos,
+      total: this.history.total,
       label: entry.label,
     };
   }
@@ -1485,21 +1476,28 @@ export class DataService {
    * 中途失败即停，并如实报告已走了几步（不假装全部成功）。
    */
   async setHistoryCursor(target: number): Promise<HistoryStepResult> {
-    const clamped = Math.max(0, Math.min(target, this.history.length));
-    const shrinking = clamped < this.historyCursor;
+    // 多步回退整体持锁：中途被别的写插入会让「已走到第 k 步」的结论失效。
+    return this.runExclusive(() => this.setHistoryCursorInternal(target));
+  }
+
+  private async setHistoryCursorInternal(target: number): Promise<HistoryStepResult> {
+    const clamped = Math.max(0, Math.min(target, this.history.total));
+    const shrinking = clamped < this.history.cursorPos;
     let steps = 0;
     let error: string | undefined;
 
-    while (this.historyCursor > clamped) {
-      const r = await this.undoStep();
+    // 必须走 Internal：本方法可能已在调用方（revertTo）持有的写锁内，
+    // 再取一次锁就是自死锁（表现为请求永不 settle）。
+    while (this.history.cursorPos > clamped) {
+      const r = await this.undoStepInternal();
       if (!r.ok) {
         error = r.error;
         break;
       }
       steps++;
     }
-    while (this.historyCursor < clamped) {
-      const r = await this.redoStep();
+    while (this.history.cursorPos < clamped) {
+      const r = await this.redoStepInternal();
       if (!r.ok) {
         error = r.error;
         break;
@@ -1508,10 +1506,10 @@ export class DataService {
     }
 
     return {
-      ok: this.historyCursor === clamped,
+      ok: this.history.cursorPos === clamped,
       steps,
-      cursor: this.historyCursor,
-      total: this.history.length,
+      cursor: this.history.cursorPos,
+      total: this.history.total,
       ...(error ? { error: `${error}（已${shrinking ? '撤销' : '重做'} ${steps} 步后中止）` } : {}),
     };
   }
@@ -1524,29 +1522,34 @@ export class DataService {
    * 宿主与前端必须一致（差一步就会「想保留的那步被撤掉」）。
    */
   async revertTo(id: string): Promise<HistoryStepResult> {
-    const idx = this.history.findIndex((e) => e.id === id);
+    // 跨多步的回退必须整体串行：中途被别的写插入会让「已回退 k 步」的结论失效。
+    return this.runExclusive(() => this.revertToInternal(id));
+  }
+
+  private async revertToInternal(id: string): Promise<HistoryStepResult> {
+    const idx = this.history.indexOfId(id);
     if (idx < 0) {
       return {
         ok: false,
         steps: 0,
-        cursor: this.historyCursor,
-        total: this.history.length,
+        cursor: this.history.cursorPos,
+        total: this.history.total,
         error: '该历史记录已不存在（可能因超出上限被丢弃）',
       };
     }
-    return this.setHistoryCursor(idx + 1);
+    return this.setHistoryCursorInternal(idx + 1);
   }
 
-  /** 执行一条历史操作的正向或反向；期间 `pushHistory` 自动失效。 */
+  /** 执行一条历史操作的正向或反向；期间 `history.push` 自动失效。 */
   private async runHistoryOp(
     entry: HistoryEntry,
     forward: boolean
   ): Promise<{ ok: boolean; error?: string }> {
-    this.applyingHistory = true;
+    this.history.applying = true;
     try {
       return await this.applyHistoryOp(entry.op, forward);
     } finally {
-      this.applyingHistory = false;
+      this.history.applying = false;
     }
   }
 
@@ -1559,19 +1562,31 @@ export class DataService {
       r.ok ? { ok: true } : { ok: false, ...(r.error ? { error: r.error } : {}) };
 
     switch (op.kind) {
+      // 一律调用 **Internal（不加锁）** 版本：本方法已在 undo/redo/revert 持有的写锁内，
+      // 再走对外入口会第二次索取同一把锁 —— 那是必然的自死锁。
       case 'edit':
-        return wrap(await this.editRecord(op.line, forward ? op.after : op.before));
+        // 走无单行约束的 internal：op.before/after 是当初磁盘上真实存在过的原文，
+        // 多行记录的原样写回必须允许（写后验证与回滚仍在，安全性不受影响）。
+        return wrap(await this.editRecordInternal(op.line, forward ? op.after : op.before));
       case 'insert':
         return wrap(
-          forward ? await this.insertRecord(op.line, op.text) : await this.deleteRecord(op.line)
+          forward
+            ? await this.insertRecordInternal(op.line, op.text)
+            : await this.deleteRecordInternal(op.line)
         );
       case 'delete':
         return wrap(
-          forward ? await this.deleteRecord(op.line) : await this.insertRecord(op.line, op.before)
+          forward
+            ? await this.deleteRecordInternal(op.line)
+            : await this.insertRecordInternal(op.line, op.before)
         );
       case 'deleteMany': {
         const lines = op.ranges.flatMap((r) => r.lines);
-        return wrap(forward ? await this.deleteRecords(lines) : await this.insertRanges(op.ranges));
+        return wrap(
+          forward
+            ? await this.deleteRecordsInternal(lines)
+            : await this.insertRangesInternal(op.ranges)
+        );
       }
       case 'replaceAll':
         return wrap(
@@ -1598,7 +1613,15 @@ export class DataService {
    * 索引必须**倒序**应用 `applyLineDelete`：其语义是「在现有索引上删第 line 行」，
    * 倒序才能保证每次的行号都还未被后面的删除影响。
    */
+  /** 对外入口：串行化批量删除。 */
   async deleteRecords(
+    lines: readonly number[],
+    opts: ReplaceOpts = {}
+  ): Promise<DeleteManyResultPayload> {
+    return this.runExclusive(() => this.deleteRecordsInternal(lines, opts));
+  }
+
+  private async deleteRecordsInternal(
     lines: readonly number[],
     opts: ReplaceOpts = {}
   ): Promise<DeleteManyResultPayload> {
@@ -1691,10 +1714,10 @@ export class DataService {
           idx = idx.applyLineDelete(rows[i].line, rows[i].end - rows[i].start);
         }
         this.index = idx;
-        this.remapBadLinesAfterDeletes(wanted);
+        this.badLines.remapAfterDeletes(wanted);
         await this.refreshSnapshot();
       }
-      this.pushHistory({ kind: 'deleteMany', ranges }, res.bytesDelta);
+      this.history.push({ kind: 'deleteMany', ranges }, res.bytesDelta);
 
       return {
         ok: true,
@@ -1725,7 +1748,15 @@ export class DataService {
    * 插入行号用 `原首行号 − 在此之前被删的行数` 推出，并**倒序**应用
    * `applyLineInsert`：倒序时后面的插入不会影响前面待处理区间的行号。
    */
+  /** 对外入口：串行化区间插回（批量删除的撤销 / 重做）。 */
   async insertRanges(
+    ranges: readonly DeletedRange[],
+    opts: ReplaceOpts = {}
+  ): Promise<DeleteManyResultPayload> {
+    return this.runExclusive(() => this.insertRangesInternal(ranges, opts));
+  }
+
+  private async insertRangesInternal(
     ranges: readonly DeletedRange[],
     opts: ReplaceOpts = {}
   ): Promise<DeleteManyResultPayload> {
@@ -1777,7 +1808,7 @@ export class DataService {
       }
       this.index = idx;
       // 恢复的行内容已知合法（原本就在文件里），故从坏行集合中摘除。
-      for (const l of allLines) this.knownBadLines.delete(l);
+      this.badLines.deleteMany(allLines);
       await this.refreshSnapshot();
 
       return {
@@ -1814,24 +1845,6 @@ export class DataService {
       // 无论成败都必须把句柄拿回来，否则后续所有读取都会失败。
       await this.acquireFileHandles();
     }
-  }
-
-  /**
-   * 批量删除后重映射坏行行号。
-   *
-   * 逐次调用 `shiftKnownBadLinesAfterDelete` 是 O(删除数 × 坏行数)；此处二分统计
-   * 「该行之前被删了几行」，降到 O((坏行数 + 删除数) log 删除数)。
-   */
-  private remapBadLinesAfterDeletes(deleted: ReadonlySet<number>): void {
-    if (this.knownBadLines.size === 0) return;
-    const sorted = [...deleted].toSorted((a, b) => a - b);
-    const next = new Set<number>();
-    for (const l of this.knownBadLines) {
-      if (deleted.has(l)) continue; // 该行已删除，丢弃
-      next.add(l - countLessThan(sorted, l));
-    }
-    this.knownBadLines.clear();
-    for (const l of next) this.knownBadLines.add(l);
   }
 
   /** 归一化行号：去重、滤越界、升序（宿主对前端的最后一道防线）。 */
@@ -1948,16 +1961,16 @@ export class DataService {
       let idx = li;
       for (const { line, delta } of deltas) idx = idx.applyLineReplace(line, delta);
       this.index = idx;
-      for (const { line } of deltas) this.knownBadLines.delete(line);
+      this.badLines.deleteMany(deltas.map((d) => d.line));
       await this.refreshSnapshot();
 
       const undoBytes = changes.reduce((a, c) => a + c.before.length + c.after.length, 0);
       const undoable =
         changes.length <= MAX_REPLACE_UNDO_LINES && undoBytes <= MAX_REPLACE_UNDO_BYTES;
 
-      // 注：本方法也被 applyLineTexts 调用（历史回退的原语），那时的 `applyingHistory`
-      // 为真，pushHistory 会自动跳过 —— 否则每撤销一次就会生成一条新记录。
-      this.pushHistory({ kind: 'replaceAll', changes }, res.bytesDelta);
+      // 注：本方法也被 applyLineTexts 调用（历史回退的原语），那时的 `history.applying`
+      // 为真，history.push 会自动跳过 —— 否则每撤销一次就会生成一条新记录。
+      this.history.push({ kind: 'replaceAll', changes }, res.bytesDelta);
 
       return {
         ok: true,
@@ -2052,7 +2065,7 @@ export class DataService {
     const reader = this.reader!;
     const n = count ?? this.opts.sampleLines ?? SAMPLE_SCAN_LINES;
     const res = await inferFields(reader, li, { sampleLines: n });
-    for (const line of res.errorLines) this.knownBadLines.add(line);
+    this.badLines.addMany(res.errorLines);
     return { fields: res.fields, total: res.total, scanned: res.scanned };
   }
 
@@ -2066,13 +2079,13 @@ export class DataService {
    * 「文件共有 N 个坏行」。把它当全量用在数据清洗里会得出相反结论（「文件挺干净」）。
    */
   getBadLines(): BadLinesPayload {
-    const all = [...this.knownBadLines].toSorted((a, b) => a - b);
+    const all = this.badLines.toSortedArray();
     const truncated = all.length > MAX_BAD_LINES;
     return {
       lines: truncated ? all.slice(0, MAX_BAD_LINES) : all,
-      partial: !this.badLinesComplete,
+      partial: !this.badLines.isComplete,
       // 未做过范围扫描时无「已扫描行数」可言，填 0（与 partial=true 一致）。
-      scanned: this.badLinesComplete ? (this.index?.totalRecords ?? 0) : 0,
+      scanned: this.badLines.isComplete ? (this.index?.totalRecords ?? 0) : 0,
       totalLines: this.index?.totalLines ?? 0,
       truncated,
       costMs: 0,
@@ -2082,7 +2095,7 @@ export class DataService {
   /**
    * 全文件扫描坏行（流式、可取消、带进度）。
    *
-   * 为何需要：`knownBadLines` 只覆盖已检查范围，据它判断「文件干净与否」是危险误判；
+   * 为何需要：已发现的坏行集合只覆盖已检查范围，据它判断「文件干净与否」是危险误判；
    * 而数据清洗的第一步恰恰是「这文件到底有多少坏行、都在哪」。
    *
    * 判定口径**必须与列表红标完全一致**，否则会出现「列表说好、扫描说坏」这种
@@ -2143,9 +2156,7 @@ export class DataService {
     }
 
     // 扫描成功即权威全量，**整体替换**而非合并：合并会让「已被改好的行」永远留在列表里。
-    this.knownBadLines.clear();
-    for (const l of lines) this.knownBadLines.add(l);
-    this.badLinesComplete = true;
+    this.badLines.replaceAll(lines);
 
     return {
       lines,
@@ -2174,7 +2185,14 @@ export class DataService {
       scope && /^\d+:\d+$/.test(scope)
         ? { startLine: Number(scope.split(':')[0]), endLine: Number(scope.split(':')[1]) }
         : undefined;
-    return this.host!.search(query, field, range, SEARCH_MAX_RESULTS, shouldCancel);
+    const key = this.queryCacheKey('s', `${query}\u0000${field ?? ''}\u0000${scope ?? ''}`);
+    const hit = this.queryCache.get(key);
+    if (hit) return cloneSearchResult(hit as SearchLinesResult);
+    const res = await this.host!.search(query, field, range, SEARCH_MAX_RESULTS, shouldCancel);
+    // 残缺结果不缓存：被取消 / 超限截断的都是半份答案，缓存下来会让用户
+    // 「再搜一次」依旧拿到不完整的结论，还以为这就是全部。
+    if (!res.truncated) this.rememberQuery(key, res);
+    return res;
   }
 
   /** Task 6 字段值过滤：委托 IndexHost 对流解析并评估，返回匹配行号（结果行号数组有上限）。 */
@@ -2183,7 +2201,12 @@ export class DataService {
     shouldCancel?: () => boolean
   ): Promise<FilterLinesResult> {
     await this.ensureIndex();
-    return this.host!.filter(cond, FILTER_MAX_RESULTS, shouldCancel);
+    const key = this.queryCacheKey('f', JSON.stringify(cond ?? null));
+    const hit = this.queryCache.get(key);
+    if (hit) return cloneFilterResult(hit as FilterLinesResult);
+    const res = await this.host!.filter(cond, FILTER_MAX_RESULTS, shouldCancel);
+    if (!res.truncated) this.rememberQuery(key, res);
+    return res;
   }
 
   /**
@@ -2195,6 +2218,7 @@ export class DataService {
     const li = await this.ensureIndex();
     return {
       uri: this.uri,
+      protocolVersion: PROTOCOL_VERSION,
       totalLines: li.totalLines,
       totalRecords: li.totalRecords,
       totalBytes: li.totalBytes,
@@ -2236,12 +2260,9 @@ export class DataService {
     this.host = undefined;
     this.buildStats = undefined;
     this.snapshot = undefined;
-    this.knownBadLines.clear();
-    this.badLinesComplete = false;
+    this.badLines.reset();
     // 会话编辑历史必须一并作废：行号与偏移在重载后已整体失效，用旧历史回退
     // 会**改到错误的行**上 —— 这比「不能撤销」危险得多。
-    this.history.length = 0;
-    this.historyCursor = 0;
-    this.historyDropped = false;
+    this.history.clear();
   }
 }
