@@ -8,7 +8,7 @@
 
 import { parentPort } from 'node:worker_threads';
 import { createReadStream } from 'node:fs';
-import { LineIndex } from '../indexer/lineIndex.ts';
+import { LineIndex, applyIndexOps } from '../indexer/lineIndex.ts';
 import { openFileReader, type ByteReader } from '../parser/jsonParser.ts';
 import { searchLines, filterLines, type SearchScope } from './searchEngine.ts';
 import type { FieldCondition } from '../core/query.ts';
@@ -134,6 +134,21 @@ async function handle(msg: WorkerRequest): Promise<void> {
         post({ type: 'ack', requestId: msg.requestId });
         return;
       }
+      case 'applyIndexOps': {
+        // 主线程每完成一次写操作就回传一次；两侧必须停在**同一组检查点**上，
+        // 否则本侧的 search / filter 会按旧偏移顺读，静默给出错误行号。
+        if (!li) {
+          post({
+            type: 'error',
+            requestId: msg.requestId,
+            message: '索引尚未就绪（构建未完成或失败）',
+          });
+          return;
+        }
+        li = applyIndexOps(li, msg.ops);
+        post({ type: 'ack', requestId: msg.requestId });
+        return;
+      }
       case 'cancel': {
         cancelled.add(msg.requestId);
         // 兜底剪枝：取消请求可能在结果已发出之后才到达，仅靠各请求的 finally 无法清理这些残留。
@@ -156,12 +171,13 @@ async function handle(msg: WorkerRequest): Promise<void> {
       }
     }
   } catch (e) {
+    // requestId 的取法必须**对所有带 requestId 的消息成立**：releaseFile / reacquireFile /
+    // applyIndexOps 返回的 error 若丢了 requestId，主线程对应的 pending 就永不结算 ——
+    // 表现为「批量替换卡在释放句柄」，且没有任何报错。
+    const requestId = 'requestId' in msg ? msg.requestId : undefined;
     post({
       type: 'error',
-      requestId:
-        msg.type === 'build' || msg.type === 'search' || msg.type === 'filter'
-          ? msg.requestId
-          : undefined,
+      requestId,
       message: e instanceof Error ? e.message : String(e),
     });
   }

@@ -530,3 +530,49 @@ export class LineIndex implements LineIndexStats {
     };
   }
 }
+
+/**
+ * 一次行编辑对应的**索引增量描述**（行数不变者为 replace；增删行者为 insert / delete）。
+ *
+ * 存在的意义：行索引现在有两份实例 —— 主线程 `DataService.index`（随机读 / 编辑定位用）
+ * 与索引宿主内部的实例（worker 线程内那份，或主线程兜底宿主那份）。一次写必须让两份实例
+ * 停在**同一组检查点**上，否则宿主侧的 `search` / `filter` 会拿着搬迁前的旧偏移去读
+ * 搬迁后的文件：不是报错，而是**静默给出错行号**。
+ *
+ * 传 op 而非传整份索引：检查点可达数万条（GB 级文件），每次编辑跨线程序列化整份索引
+ * 是纯浪费；而一次编辑的实际信息量只有「哪一行 + 多少字节」。
+ */
+export type IndexDeltaOp =
+  /** 行数不变的第 line 行长度变化 delta 字节（可负）。 */
+  | { kind: 'replace'; line: number; delta: number }
+  /** 在第 line 行之前插入一行，该行连同行尾共 bytes 字节。 */
+  | { kind: 'insert'; line: number; bytes: number }
+  /** 删除第 line 行，该行连同行尾共 bytes 字节。 */
+  | { kind: 'delete'; line: number; bytes: number };
+
+/**
+ * 按序应用一批增量 op，返回新实例（不可变语义）。
+ *
+ * **为何必须收敛成一个共用函数**：两侧（主线程宿主、worker 宿主）各自写循环的话，
+ * 同一份 op 列表早晚会长出两种解释；收敛后两侧只能同步演化，不存在悄悄漂移的可能。
+ *
+ * **顺序敏感**：调用方（批量删除的倒序、区间插回的倒序）已算好合法顺序，
+ * 本函数严格按数组顺序应用 —— **重排序会改变结果**（增删会让后续行号漂移）。
+ */
+export function applyIndexOps(li: LineIndex, ops: readonly IndexDeltaOp[]): LineIndex {
+  let cur = li;
+  for (const op of ops) {
+    switch (op.kind) {
+      case 'replace':
+        cur = cur.applyLineReplace(op.line, op.delta);
+        break;
+      case 'insert':
+        cur = cur.applyLineInsert(op.line, op.bytes);
+        break;
+      case 'delete':
+        cur = cur.applyLineDelete(op.line, op.bytes);
+        break;
+    }
+  }
+  return cur;
+}

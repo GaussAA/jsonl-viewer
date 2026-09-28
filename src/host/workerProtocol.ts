@@ -17,6 +17,7 @@
 
 import type { SearchScope, SearchLinesResult, FilterLinesResult } from './searchEngine.ts';
 import type { FieldCondition } from '../core/query.ts';
+import type { IndexDeltaOp } from '../indexer/lineIndex.ts';
 
 /** 主线程 → worker 的请求。 */
 export type WorkerRequest =
@@ -34,7 +35,16 @@ export type WorkerRequest =
   | { type: 'releaseFile'; requestId: number }
   /** 重新打开文件句柄（与 releaseFile 配对；索引继续有效）。 */
   | { type: 'reacquireFile'; requestId: number; path: string }
+  /** 取消某一在途请求（由主线程 30ms 轮询转发）。 */
   | { type: 'cancel'; requestId: number }
+  /**
+   * 把主线程侧已应用的增量索引 op 回传 worker，**保持两份索引一致**。
+   *
+   * 为何必须有它：编辑只走主线程 `DataService.index`（随机读 / 定位用），而 worker 内的
+   * `LineIndex` 自构建后静止。不回传的话，一旦发生长度变化的编辑，worker 之后的所有
+   * `search` / `filter` 都按旧偏移顺读 —— 表现为**静默给出错误的行号**（不报错）。
+   */
+  | { type: 'applyIndexOps'; requestId: number; ops: IndexDeltaOp[] }
   | { type: 'dispose' };
 
 /** worker → 主线程的响应。 */

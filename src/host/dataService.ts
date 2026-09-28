@@ -14,7 +14,7 @@
  */
 
 import { stat } from 'node:fs/promises';
-import { LineIndex } from '../indexer/lineIndex.ts';
+import { LineIndex, applyIndexOps, type IndexDeltaOp } from '../indexer/lineIndex.ts';
 import type { ByteReader, ReadRecordOpts } from '../parser/jsonParser.ts';
 import {
   openFileReader,
@@ -51,6 +51,7 @@ import {
   QUERY_CACHE_MAX,
 } from '../constants.ts';
 import { buildIndexWithFallback, type IndexHost } from './indexHost.ts';
+import type { BuildResult } from './workerProtocol.ts';
 import { EditHistory } from './editHistory.ts';
 import { BadLineTracker } from './badLineTracker.ts';
 import type { HistoryEntry, HistoryOp, HistoryStepResult } from './editHistory.ts';
@@ -211,7 +212,25 @@ export interface DataServiceOptions {
    * 传入则「索引构建 + 搜索 + 过滤」下沉 worker；省略或 spawn 失败则回退主线程。
    */
   workerScriptPath?: string;
+  /**
+   * 索引宿主工厂（**测试接缝**；生产环境勿传）。
+   *
+   * 存在理由与 `WorkerIndexHost` 的 `workerFactory` 一致：`DataService` 在内部自行
+   * 决定宿主类型，而「重建时是否释放旧宿主」「写后是否回填索引」这类**生命周期正确性**
+   * 只有在能注入观测点时才测得出来（否则只能靠泄漏一个真 worker 线程来间接观察）。
+   * 省略时走 `buildIndexWithFallback` 的默认选择，行为与既有实现完全一致。
+   */
+  hostFactory?: IndexHostBuilder;
 }
+
+/**
+ * 索引宿主构建签名（与 `buildIndexWithFallback` 同形，便于直接替换）。
+ */
+export type IndexHostBuilder = (
+  workerScriptPath: string | undefined,
+  path: string,
+  onProgress?: (info: { bytesRead: number; lines: number; done: boolean }) => void
+) => Promise<{ host: IndexHost; result: BuildResult; fellBack: boolean }>;
 
 /* ---------------------- 会话编辑历史 ---------------------- */
 
@@ -313,6 +332,22 @@ export class DataService {
   private editing = false;
 
   /**
+   * 待回填给索引宿主的增量 op —— 与 `this.index` 的每一步增量是**同一事实**。
+   *
+   * 为何排队而非每次同步：一次「全部替换」可产出成千上万个 op，逐个跨线程回填是纯浪费；
+   * 写路径本来就有唯一的成功收口点（`refreshSnapshot`），在那里一次性回传即可。
+   */
+  private indexOps: IndexDeltaOp[] = [];
+  /**
+   * 宿主索引是否与 `this.index` 失同步。
+   *
+   * 正常情况下每次写都会成功回填（为 false）。回填失败（worker 崩 / 句柄异常 / op 被拒）
+   * 时置 true，下一次 `search` / `filter` 前**先重建宿主索引** ——
+   * 宁可多花一次全文件重扫，也绝不拿一份旧索引给用户出结果。
+   */
+  private hostDirty = false;
+
+  /**
    * 写操作串行链（互斥锁）—— **一切改动磁盘的动作必须经 `runExclusive` 排队**。
    *
    * 为何必须有它：`DataService` 按 uri 被多个视图共享（默认编辑器 + 独立面板走同一
@@ -365,7 +400,8 @@ export class DataService {
         // 保证「打得开」这条底线不被 worker 加载异常击穿。
         let host: IndexHost | undefined;
         try {
-          const built = await buildIndexWithFallback(
+          const buildHost = this.opts.hostFactory ?? buildIndexWithFallback;
+          const built = await buildHost(
             this.opts.workerScriptPath,
             this.path,
             this.opts.onProgress
@@ -711,7 +747,7 @@ export class DataService {
           ending,
           toReplaceOpts(opts)
         );
-        this.index = li.applyLineReplace(line, res.bytesDelta);
+        this.stageIndexOps([{ kind: 'replace', line, delta: res.bytesDelta }]);
         await this.refreshSnapshot();
         bytesDelta = res.bytesDelta;
         inPlace = res.inPlace;
@@ -779,6 +815,51 @@ export class DataService {
     return undefined;
   }
 
+  /**
+   * 索引 update 的**唯一入口**（写路径专用）：同时更新主索引与待回填队列。
+   *
+   * 为何必须收口：索引现在有两份实例（本类的 `this.index` 与索引宿主内部那份），
+   * 任何绕过本方法直接 `this.index = li.applyLineXxx(...)` 的写法，都会让两份索引
+   * 悄悄分家 —— 而 `search` / `filter` 只读宿主那一份，于是错误只在「写完再搜」时才
+   * 出现，既不报错也难复现。
+   *
+   * @param ops 严格按发生顺序（op 之间会互相影响行号）；调用方负责算好合法顺序。
+   */
+  private stageIndexOps(ops: readonly IndexDeltaOp[]): void {
+    if (!this.index || ops.length === 0) return;
+    this.index = applyIndexOps(this.index, ops);
+    this.indexOps.push(...ops);
+  }
+
+  /**
+   * 把累积的增量 op 一次性回填给索引宿主（worker 则跨线程，主线程则就地应用）。
+   *
+   * **失败为何不向上抛**：此刻磁盘已经是新内容，让一次「写成功 + 索引回填失败」变成
+   * 用户可见的编辑失败，是把内部不一致谎报成数据失败。但它必须**留下痕迹**
+   * （`hostDirty`），好让下一条查询前用重建兜底 —— 沉默地丢一次回填，就是沉默地丢一次正确性。
+   */
+  private async flushIndexOps(): Promise<void> {
+    if (this.indexOps.length === 0) return;
+    const ops = this.indexOps;
+    this.indexOps = []; // 先摘出：即便失败也不重复积压（下一次写会走重建路径）
+    try {
+      await this.host?.applyIndexOps(ops);
+    } catch {
+      this.hostDirty = true;
+    }
+  }
+
+  /**
+   * 查询前的前置保障：宿主索引若已失同步，先重建再说。
+   *
+   * 只在确有必要时触发 —— 正常编辑走的是廉价的增量回填，走到这里的都是异常路径。
+   */
+  private async ensureFreshHost(): Promise<void> {
+    if (!this.hostDirty) return;
+    await this.rebuildIndex();
+    this.hostDirty = false;
+  }
+
   /** 写后刷新基线快照 —— 不做这一步，5s 轮询会把「自写」误判成外部变更。 */
   private async refreshSnapshot(): Promise<void> {
     const after = await this.currentSnapshot();
@@ -791,6 +872,9 @@ export class DataService {
     // 快照一变，所有「按旧快照键」缓存的搜索/过滤结果立即作废：
     // 缓存一份过期结论比不缓存更危险（用户会据此以为文件里没有某条记录）。
     if (this.queryCache.size > 0) this.queryCache.clear();
+    // 本方法是**所有写路径共同的唯一收口点**（7 个写方法都调它），故索引回填也放这里：
+    // 放在此处而非在每个写方法末尾各写一遍 —— 漏一处就是一次静默的行号错位。
+    await this.flushIndexOps();
   }
 
   /**
@@ -853,7 +937,7 @@ export class DataService {
         Buffer.alloc(0),
         toReplaceOpts(opts)
       );
-      this.index = li.applyLineDelete(line, removedBytes);
+      this.stageIndexOps([{ kind: 'delete', line, bytes: removedBytes }]);
       await this.refreshSnapshot();
       this.badLines.shiftAfterDelete(line);
       this.history.push({ kind: 'delete', line, before: removedText }, res.bytesDelta);
@@ -942,7 +1026,7 @@ export class DataService {
         newLineBytes,
         toReplaceOpts(opts)
       );
-      this.index = li.applyLineInsert(at, newLineBytes.length);
+      this.stageIndexOps([{ kind: 'insert', line: at, bytes: newLineBytes.length }]);
       await this.refreshSnapshot();
       this.badLines.shiftAfterInsert(at);
       this.history.push({ kind: 'insert', line: at, text }, res.bytesDelta);
@@ -1066,7 +1150,7 @@ export class DataService {
     if (edits.length === 0) {
       return DataService.replaceOk(0, skippedInvalid, unchanged, total, 0, false);
     }
-    return this.applyEdits(li, edits, deltas, changes, total, skippedInvalid, unchanged, opts);
+    return this.applyEdits(edits, deltas, changes, total, skippedInvalid, unchanged, opts);
   }
 
   /**
@@ -1132,16 +1216,7 @@ export class DataService {
     if (edits.length === 0) {
       return DataService.replaceOk(0, skippedInvalid, unchanged, wanted.size, 0, false);
     }
-    return this.applyEdits(
-      li,
-      edits,
-      deltas,
-      changes,
-      wanted.size,
-      skippedInvalid,
-      unchanged,
-      opts
-    );
+    return this.applyEdits(edits, deltas, changes, wanted.size, skippedInvalid, unchanged, opts);
   }
 
   /**
@@ -1302,10 +1377,23 @@ export class DataService {
     return '';
   }
 
-  /** 结构变更（多行记录编辑等破坏「行数不变」假设的操作）后的索引全量重建。低频重操作。 */
+  /**
+   * 结构变更（多行记录编辑等破坏「行数不变」假设的操作）后的索引全量重建。低频重操作。
+   *
+   * **必须 dispose 旧宿主**：`buildIndexWithFallback` 每次都会新建一个宿主（worker 路径下
+   * 就是一根新线程 + 新文件句柄）。此前直接覆写 `this.host`，旧 worker 再也没人 `terminate`
+   * —— 多行文件每编辑一条就泄漏一根线程，`activeWorkers` 计数也永不归还，
+   * 超过 `MAX_ACTIVE_WORKERS` 后连新文件的宿主都会永久退化到主线程。
+   */
   private async rebuildIndex(): Promise<void> {
     await this.releaseFileHandles();
-    const built = await buildIndexWithFallback(this.opts.workerScriptPath, this.path);
+    const prev = this.host;
+    this.host = undefined;
+    if (prev) await prev.dispose().catch(() => {});
+    // 待回填队列随旧宿主一并作废：新宿主的索引本就是按磁盘最新状态构建的，重放只会把它搞坏。
+    this.indexOps = [];
+    const buildHost = this.opts.hostFactory ?? buildIndexWithFallback;
+    const built = await buildHost(this.opts.workerScriptPath, this.path);
     this.host = built.host;
     this.index = built.result.index;
     this.buildStats = built.result.stats;
@@ -1313,6 +1401,8 @@ export class DataService {
     this.snapshot = await this.currentSnapshot();
     // 行号已全变：坏行集合与「已全量扫描」结论一并作废。
     this.badLines.reset();
+    // 新宿主由本次重建直接产出，索引已是最新；失同步标记随之清零。
+    this.hostDirty = false;
   }
 
   /**
@@ -1363,7 +1453,7 @@ export class DataService {
       }
       if (!range) return '定位不到该行';
       await replaceLine(this.path, range, Buffer.from(beforeText, 'utf8'), ending, {});
-      this.index = index.applyLineReplace(line, -previousDelta);
+      this.stageIndexOps([{ kind: 'replace', line, delta: -previousDelta }]);
       await this.refreshSnapshot();
       return '';
     } catch (e) {
@@ -1709,11 +1799,11 @@ export class DataService {
         await this.rebuildIndex();
       } else {
         // 倒序应用索引删除（见方法文档）
-        let idx = li;
+        const ops: IndexDeltaOp[] = [];
         for (let i = rows.length - 1; i >= 0; i--) {
-          idx = idx.applyLineDelete(rows[i].line, rows[i].end - rows[i].start);
+          ops.push({ kind: 'delete', line: rows[i].line, bytes: rows[i].end - rows[i].start });
         }
-        this.index = idx;
+        this.stageIndexOps(ops);
         this.badLines.remapAfterDeletes(wanted);
         await this.refreshSnapshot();
       }
@@ -1793,8 +1883,9 @@ export class DataService {
     this.editing = true;
     try {
       const res = await this.rewriteAtomic(edits, opts);
-      let idx = li;
       let restored = 0;
+      // 恢复的行内容已知合法（原本就在文件里），故从坏行集合中摘除。
+      const ops: IndexDeltaOp[] = [];
       // 倒序：先插后面的区间，前面区间的行号推导才不受影响。
       for (let i = sorted.length - 1; i >= 0; i--) {
         const r = sorted[i];
@@ -1802,12 +1893,11 @@ export class DataService {
         const at = r.lines[0] - countLessThan(allLines, r.lines[0]);
         // 逐行插入并**逐行给出精确字节数** —— 用平均字节平移检查点会错位（见 DeletedRange.lineBytes）。
         for (let k = 0; k < r.lines.length; k++) {
-          idx = idx.applyLineInsert(at + k, r.lineBytes[k] ?? 0);
+          ops.push({ kind: 'insert', line: at + k, bytes: r.lineBytes[k] ?? 0 });
         }
         restored += r.lines.length;
       }
-      this.index = idx;
-      // 恢复的行内容已知合法（原本就在文件里），故从坏行集合中摘除。
+      this.stageIndexOps(ops);
       this.badLines.deleteMany(allLines);
       await this.refreshSnapshot();
 
@@ -1945,7 +2035,6 @@ export class DataService {
    * 「释放句柄 → 原子重写 → 拿回句柄 → 更新索引 → 刷新基线」的时序（那是最易漏步的地方）。
    */
   private async applyEdits(
-    li: LineIndex,
     edits: ByteEdit[],
     deltas: { line: number; delta: number }[],
     changes: ReplaceChange[],
@@ -1957,10 +2046,11 @@ export class DataService {
     this.editing = true;
     try {
       const res = await this.rewriteAtomic(edits, opts);
-      // 索引增量更新：行数不变，逐行平移其后检查点（各 delta 相互独立，顺序无关）
-      let idx = li;
-      for (const { line, delta } of deltas) idx = idx.applyLineReplace(line, delta);
-      this.index = idx;
+      // 索引增量更新：行数不变，逐行平移其后检查点（op 顺序自身无关，但与多种 op 混合时相关）
+      // 一次批量 op 走同一条路 —— 宿主侧会用同一函数、同一顺序应用，两侧不会漂移。
+      this.stageIndexOps(
+        deltas.map<IndexDeltaOp>((d) => ({ kind: 'replace', line: d.line, delta: d.delta }))
+      );
       this.badLines.deleteMany(deltas.map((d) => d.line));
       await this.refreshSnapshot();
 
@@ -2181,6 +2271,8 @@ export class DataService {
     shouldCancel?: () => boolean
   ): Promise<SearchLinesResult> {
     await this.ensureIndex();
+    // 宿主索引必须与磁盘同源：正常情况下编辑会增量回填，只有回填失败才会走到重建。
+    await this.ensureFreshHost();
     const range =
       scope && /^\d+:\d+$/.test(scope)
         ? { startLine: Number(scope.split(':')[0]), endLine: Number(scope.split(':')[1]) }
@@ -2201,6 +2293,7 @@ export class DataService {
     shouldCancel?: () => boolean
   ): Promise<FilterLinesResult> {
     await this.ensureIndex();
+    await this.ensureFreshHost();
     const key = this.queryCacheKey('f', JSON.stringify(cond ?? null));
     const hit = this.queryCache.get(key);
     if (hit) return cloneFilterResult(hit as FilterLinesResult);
@@ -2261,6 +2354,9 @@ export class DataService {
     this.buildStats = undefined;
     this.snapshot = undefined;
     this.badLines.reset();
+    // 未回填的增量与失同步标记一并清零：宿主已不存在，下次 ensureIndex 会拿到全新索引。
+    this.indexOps = [];
+    this.hostDirty = false;
     // 会话编辑历史必须一并作废：行号与偏移在重载后已整体失效，用旧历史回退
     // 会**改到错误的行**上 —— 这比「不能撤销」危险得多。
     this.history.clear();

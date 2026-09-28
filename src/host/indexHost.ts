@@ -12,7 +12,7 @@
 
 import { createReadStream } from 'node:fs';
 import { Worker } from 'node:worker_threads';
-import { LineIndex } from '../indexer/lineIndex.ts';
+import { LineIndex, applyIndexOps, type IndexDeltaOp } from '../indexer/lineIndex.ts';
 import { openFileReader, type ByteReader } from '../parser/jsonParser.ts';
 import { searchLines, filterLines, type SearchScope } from './searchEngine.ts';
 import type { SearchLinesResult, FilterLinesResult } from './searchEngine.ts';
@@ -57,6 +57,19 @@ export interface WorkerLike {
     maxResults: number,
     shouldCancel?: () => boolean
   ): Promise<FilterLinesResult>;
+  /**
+   * 把写路径已应用的**增量索引 op** 回填到宿主自己的索引实例。
+   *
+   * 为何必须存在：宿主内部的那份 `LineIndex`（worker 线程内的 `li`，或主线程宿主的
+   * `this.index`）自 `build()` 之后就没有别的更新通道。而 `search` / `filter` 恰恰只用
+   * **宿主内部这份**索引去顺读文件 —— 于是「先编辑、再搜索」会拿着搬迁前的旧偏移去读
+   * 搬迁后的文件：不是报错，而是**静默给出错行号**（行号整体偏移，命中行也随之偏移），
+   * 更要命的是 `replaceText` 的第一步就是 `search`，错行号会直接被写进磁盘。
+   *
+   * 约定：`ops` 必须严格按发生顺序给出（op 之间会互相影响行号），且每一侧的起点必须与
+   * 另一侧一致；任何一侧缺失一次（或失序），两份索引即告失同步 —— 调用方须自行降级为重建。
+   */
+  applyIndexOps(ops: readonly IndexDeltaOp[]): Promise<void>;
   /**
    * 临时关闭底层文件句柄，**保留索引**。
    *
@@ -140,6 +153,11 @@ export class MainThreadIndexHost implements IndexHost {
     shouldCancel?: () => boolean
   ): Promise<FilterLinesResult> {
     return filterLines(this.reader!, this.index!, cond, { maxResults, shouldCancel });
+  }
+
+  async applyIndexOps(ops: readonly IndexDeltaOp[]): Promise<void> {
+    if (!this.index) throw new Error('索引尚未构建，无法应用增量');
+    this.index = applyIndexOps(this.index, ops);
   }
 
   async releaseFile(): Promise<void> {
@@ -352,6 +370,12 @@ export class WorkerIndexHost implements IndexHost {
       });
       this.post({ type: 'filter', requestId, cond, maxResults });
     });
+  }
+
+  async applyIndexOps(ops: readonly IndexDeltaOp[]): Promise<void> {
+    // 走 voidRequest（等 ack）而非 fire-and-forget：回填失败必须让调用方知道，
+    // 它据此是可以降级为「重建索引」的 —— 沉默地丢一次回填，就是沉默地丢一次正确性。
+    await this.voidRequest((requestId) => ({ type: 'applyIndexOps', requestId, ops: [...ops] }));
   }
 
   async releaseFile(): Promise<void> {
