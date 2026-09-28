@@ -256,4 +256,9 @@ indexer/ parser/ infer/ perf/ constants.ts  ← 共享叶子（被 host/webview 
 
 `SnapshotWatcher` 与「拆 DataService」（B2）、完整 store（T5，条件③未出现）、
 事件委托（`MAINTENANCE_AUDIT` P3「暂不必动」）。
-唯一未完成的**验证**项：`pnpm test:integration`（Extension Host 真实路径）需联网下载 VS Code，本机尚未跑通。
+**曾记录的唯一未验证项已关闭（2026-09-28）**：`pnpm test:integration`（Extension Host 真实路径）
+已跑通 —— `✓ extension registered` / `✓ extension activated` / `✓ isActive === true`，exit 0。
+过程中发现一个与代码无关的环境陷阱：VS Code 宿主注入的 `ELECTRON_RUN_AS_NODE=1`
+会让 `Code.exe` 退化为 Node，导致所有 CLI 参数报 `bad option`（`Code.exe --version` 还会
+打印 Node 版本号，极易误判为下载损坏）。已在 `scripts/test-integration.mjs` 中主动清除该变量，
+脚本自身免疫，使用者无需手动 `env -u`。详见 `error_ledger.md`。

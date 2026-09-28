@@ -25,6 +25,26 @@
 
 ---
 
+## [集成测试启动即失败：Code.exe 对所有参数报 bad option] → [ELECTRON_RUN_AS_NODE=1 污染子进程] → [脚本主动清除该变量]
+
+- **现象**：`pnpm test:integration` 下载 VS Code 成功后，Extension Host 启动失败 ——
+  `Code.exe: bad option: --disable-extensions`（`--extensionTestsPath` / `--user-data-dir`
+  等**每一个**参数都同样报错），exit code 9。最迷惑的一点：`Code.exe --version` 输出的是
+  **Node 的版本号**（`v24.20.0`）而不是 VS Code 版本，极易误判为"下载损坏/版本不兼容"。
+- **根因**：VS Code / Electron 宿主会向它派生的**所有**进程注入 `ELECTRON_RUN_AS_NODE=1`
+  （本意是把 Electron 二进制当 Node 解释器用）。带着这个变量去启动真正的 VS Code 主进程时，
+  `Code.exe` 退化为 Node，所有 CLI 参数落到 Chromium 的参数解析器上 → 逐个 `bad option`。
+  **在 VS Code 集成终端（以及任何 VS Code 派生的 shell）里跑集成测试必然踩到**。
+- **正解**：`scripts/test-integration.mjs` 在调用 `runTests` 之前
+  `delete process.env.ELECTRON_RUN_AS_NODE` —— 由脚本自身免疫，不依赖使用者手动 `env -u`。
+  验证：直接 `pnpm test:integration` 通过（`✓ extension registered` / `✓ activated` /
+  `✓ isActive === true`，exit 0）。
+- **附带结论**：此项正是 `ARCHITECTURE_REVIEW.md` §七 记录的**唯一未验证项**
+  （"集成测试需本机网络…本地未能执行"）——现已验证通过，Extension Host 真实路径没问题。
+  （2026-09-28）
+
+---
+
 ## [行数校正收敛了选中行，详情却停在旧行] → [selectedLine 与 detailRaw 的同步靠"调用方自觉"] → [选中行收敛为唯一写入口，配套动作内置]
 
 - **现象**（未爆发，静态追查发现）：末行被删、或批量删除因"行过大"跳过部分行后，

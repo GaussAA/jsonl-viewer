@@ -30,6 +30,16 @@ const extensionTestsPath = path.resolve(__dirname, 'integration-runner.mjs');
 // 用 --disable-extensions 排除其他扩展干扰，确保我们的扩展是唯一被测试的。
 const launchArgs = ['--disable-extensions'];
 
+// 清除 ELECTRON_RUN_AS_NODE（**在 VS Code 集成终端里跑必踩的坑**）。
+//
+// VS Code / Electron 宿主会把这个变量（=1）注入它派生的所有进程，用途是"把 Electron
+// 二进制当 Node 解释器用"。而本脚本恰恰要启动**真正的 VS Code 主进程**：带着它，
+// `Code.exe` 会退化成 Node —— 所有 CLI 参数（`--extensionTestsPath` / `--user-data-dir` …）
+// 都交给 Chromium 的参数解析器，逐个报 `bad option`，测试以 exit code 9 收场；
+// 连 `Code.exe --version` 都会输出 Node 的版本号（而非 VS Code 版本），极易误判为"下载坏了"。
+// 故此处主动清除，让脚本在 VS Code 终端里也能直接 `pnpm test:integration`。
+delete process.env.ELECTRON_RUN_AS_NODE;
+
 // VS Code 版本：默认 stable。CI 矩阵会注入不同值覆盖。
 // 支持：具体版本号（如 '1.100.0'）| 'stable' | 'insiders'
 const version = process.env.VSCODE_TEST_VERSION || 'stable';
