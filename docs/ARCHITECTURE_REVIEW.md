@@ -14,6 +14,7 @@
 1. **host 层反向依赖 webview 层**（DIP 违反）—— `searchEngine.ts` 直接 import `webview/queryLogic.ts` 的**运行时函数** `matchesFilter`/`recordFieldValue`。这是最该修的一项：核心层依赖了 UI 层，且为"保持前后端过滤一致"的 DRY 动机所驱动，应抽到共享 `core/` 层。
 2. **`extension.ts:mountViewer` 上帝函数 + `dispatchMessage` 12 参数巨型 switch**——端点概念在"常量 / switch / 内联 handler"三处表达，新增功能成本高、易漏改。
 3. **`webviewEntry.ts` 1100 行协调层膨胀 + 30+ 字段手写状态机**——可靠性靠纪律，功能继续增长会抬升认知负担。
+   *（2026-09-28 更新：已拆出 10 个域模块、装配层降至 1089 行，且「当前选中行」的写入收敛为唯一入口 `focusTarget`——详见 §九。原文保留以存评审时的判断依据。）*
 4. **模块级隐式全局状态**（`serviceRegistry` / `openPanels`）+ 个别防御性 `.catch` 缺失。
 
 **原则立场**：本扩展是「单功能、单作者主导、性能/稳定性优先」的小型工具，**SOLID 宜作方向性指引而非达标强制**。最该采纳的是 A1（抽 core 层消反向依赖）与 A2/A3（端点映射集中、拆上帝函数）；**不应**引入 DI 容器、拆DataService、引前端框架、抽象存储后端——那属过度工程。
@@ -53,7 +54,7 @@ indexer/ parser/ infer/ perf/ constants.ts  ← 共享叶子（被 host/webview 
 | **T2** | `protocol/rpc.ts:241-334` `dispatchMessage` | 12 参数位置化签名 + 巨型 switch；注释自承"实际处理器另行实现" → 路由与处理分离却散两处 | 加一个端点须改 3 处（常量 / union 类型 / switch / 调用点内联 handler），易漏改 | 中（OCP/ISP + 抽象泄漏） | ~~A2：handler 注册表 Map<endpoint,fn>，dispatch 查表分发~~ **✅ 已修复（A2）** |
 | **T3** | `host/* → webview/queryLogic.ts` | host 反向依赖 webview（见 §二） | 核心层依赖 UI 层；若 webview 引入浏览器专属依赖会污染宿主；层边界失真 | 中（DIP） | ~~A1：抽 core/ 共享 FieldCondition+matchesFilter+recordFieldValue~~ **✅ 已修复（A1）** |
 | **T4** | `extension.ts` 模块级全局与释放路径 | 模块级全局单例 `serviceRegistry` / `openPanels` 未注入；`releaseService` 中 `void hit.svc.dispose()` 无 `.catch` | 隐式全局状态难测；释放异常可能击穿扩展宿主（所有扩展共享进程） | 低~中 | ~~A4：dispose 补 .catch~~ **✅ 已修复（A4）**：① dispose 补 `.catch` 收口；② 引用计数抽为纯模块 `host/serviceRegistry.ts`（可单测，同步抛与异步 reject 均经 `onReleaseError` 上报、**绝不外抛**）；③ `openPanels`/`services` 收敛为 `HostRuntime`，由 `activate()` 显式创建并注入各路径。新增 7 项单测 |
-| **T5** | `webviewEntry.ts` + `AppState` | 前端协调层膨胀（样式/横幅/分栏动画/响应式/搜索/过滤/导航/持久化/生命周期）+ 30+ 字段手写状态机 | 认知负担高；一处 state 字段改动波及众多闭包 | 中（前端 God Object） | **增量+测试网（2026-09-20 钦定），进行中**：① 测试网基建 ✅ #29（domHarness + webviewEntry.test 冒烟测试）；② `webviewEntry` 导出化 ✅ #28（`main` 导出 + 条件挂载）；③ 抽 `columnLayout` ✅ #30（收起/展开动画 + 拖拽调宽 + 窄容器响应式抽屉 → 独立工厂 `createColumnLayout(deps)`，行为抽取**不搬 DOM 创建顺序**，`webviewEntry.ts` 1112→951 行，新增模块级回归测试 6 项）；④ 抽 `queryActions` ✅ #31（supersede/jumpToMatch/runSearch/stepSearch/runFilter/clearFilterForCond/applyLayout → 独立工厂 `createQueryActions(deps)`，list/toolbar 经访问器晚绑定，`webviewEntry.ts` 951→834 行，新增模块级回归测试 10 项）；⑤ 抽 `persistence` ✅ #32（偏好防抖写回 → `createPersistence(deps)`，`webviewEntry.ts` 834→822 行，新增模块级回归测试 3 项）。**T5 收尾：`webviewEntry.ts` 由 1112 → 822 行（−290，−26%），新增 3 模块（columnLayout/queryActions/persistence）+ 19 项模块级测试**。每步 tsc/test/build 全绿且独立提交 |
+| **T5** | `webviewEntry.ts` + `AppState` | 前端协调层膨胀（样式/横幅/分栏动画/响应式/搜索/过滤/导航/持久化/生命周期）+ 30+ 字段手写状态机 | 认知负担高；一处 state 字段改动波及众多闭包 | 中（前端 God Object） | **增量+测试网（2026-09-20 钦定），进行中**：① 测试网基建 ✅ #29（domHarness + webviewEntry.test 冒烟测试）；② `webviewEntry` 导出化 ✅ #28（`main` 导出 + 条件挂载）；③ 抽 `columnLayout` ✅ #30（收起/展开动画 + 拖拽调宽 + 窄容器响应式抽屉 → 独立工厂 `createColumnLayout(deps)`，行为抽取**不搬 DOM 创建顺序**，`webviewEntry.ts` 1112→951 行，新增模块级回归测试 6 项）；④ 抽 `queryActions` ✅ #31（supersede/jumpToMatch/runSearch/stepSearch/runFilter/clearFilterForCond/applyLayout → 独立工厂 `createQueryActions(deps)`，list/toolbar 经访问器晚绑定，`webviewEntry.ts` 951→834 行，新增模块级回归测试 10 项）；⑤ 抽 `persistence` ✅ #32（偏好防抖写回 → `createPersistence(deps)`，`webviewEntry.ts` 834→822 行，新增模块级回归测试 3 项）。**T5 收尾：`webviewEntry.ts` 由 1112 → 822 行（−290，−26%），新增 3 模块（columnLayout/queryActions/persistence）+ 19 项模块级测试**。每步 tsc/test/build 全绿且独立提交。**（2026-09-28 续）：后续功能增长使装配层回到 1865 行，遂再拆 10 个域模块（appState/navigation/selection/editOps/fieldEdit/badLinesOps/persistRestore/focusTarget + 早先 3 个）→ 1089 行；并按触发条件②评估后实施「选中行唯一写入口」。详见 §九 |
 | **T6** | `extension.ts` 两处 webview HTML 模板（viewer 外壳 + notLocal 占位） | 模板结构内联两处，CSP/nonce 重复表达 | 轻微重复；模板改动要改两处 | 低 | ~~抽 renderWebviewHtml 工厂~~ **✅ 已修复（T6）：收敛为单一 `renderWebviewShell` 外壳工厂，`renderViewerHtml` 与 `notLocalHtml` 共用** |
 | **T7** | `extension.ts` 消息处理外层 catch | 异常回执 `errReply(undefined, …)`，requestId 丢失 | webview 走全局 error handler 弹横幅，且该在途请求永不 settle（只能等超时） | 低 | ~~异常路径带 requestId~~ **✅ 已修复（T7）**：新增 `protocol/rpc.ts#requestIdOf(msg)` 安全取值；`extension.ts` 外层 catch 与 `dispatchMessage` 均改用它，异常回执保留 requestId → webview 命中 pending 即精确 reject 并早返回（不弹全局横幅）。新增 4 项回归测试 |
 | **T8** | `package.json:98` `test` 脚本 | `node --test "src/**/*.test.ts"` 依赖 Node ≥22 的 glob 递归行为 | 实测 OK（收集 154/154）；但 CI 若用老 Node 会静默跑 0 测试 | 低（已核实有效） | CI 锁定 `node>=22.18`；脚本已加 `--experimental-transform-types`（webview 测试网引入 jsdom + 含不可剥离 TS 语法，需 transform 模式）；`engines` 已声明 `node>=22.18` |
@@ -141,6 +142,8 @@ indexer/ parser/ infer/ perf/ constants.ts  ← 共享叶子（被 host/webview 
 - **八笔重构后全量复验（实测取证）**：稳定性探针覆盖 worker 回退 / 空文件 / 纯换行 / BOM / 深嵌套 5000 层 / 越界与 NaN 参数 / 批量上限 / dispose 后调用自愈 / 文件删除陈旧检测 / GBK / 坏路径，**未发现缺陷**；300MB（315.4MB）回归：307200 行索引 **352ms**、检查点 300 个（索引≈5KB）、随机读 300/300 与暴力解一致、分批读 4/4 窗口一致、三组关键词搜索集与全量暴力扫描**完全一致**。
 - **集成测试需本机网络**：`pnpm test:integration` 依赖 `@vscode/test-electron` 下载 VS Code；沙箱无直连外网且 `~/.vscode-test` 无缓存，本地未能执行——请在联网环境跑一次以覆盖 Extension Host 路径。
 - **T5 决策记录（暂不抽 store，附明确触发条件）**：`AppState` 维持「单一可变对象 + 闭包捕获」现状。理由：原评审的触发条件是「**继续膨胀**」，而本轮为收缩（`webviewEntry` 1112→822 行，−26%）；且 store / DI 类抽象已由 B1 判为过度设计（YAGNI）。**满足其一再抽**：① 新增 ≥2 个需跨模块共享的状态字段；② 同一状态字段出现 ≥3 处写入点且定位困难；③ 需要撤销·重放或状态快照。届时先补状态迁移测试网，再动结构。
+- **T5 触发条件评估与落地（2026-09-28，按上述流程执行）**：实测 `state.selectedLine` **11 处写入、跨 5 个模块**（`cache` 9 处、`overview` 6 处）——条件②成立。**但未上 store**：症结是「散落 → 配套动作会漏」而非「缺框架」，故新增 `webview/focusTarget.ts` 作为**选中行唯一写入口**，把作废旧原文 / 取消在途详情 / 重拉详情内置进写路径，11 处写入全部改经它。此推断被事实印证：评估中发现 `refreshOverview` 的越界收敛路径**只改行号、不作废原文**，用户在该状态下做字段编辑会「基于旧行原文把改动写到新行上」——正是散落写入的必然代价，已随收敛一并修复（见 `error_ledger.md`）。
+  完整 store（不可变更新 + subscribe）仍未采用：其收益（可撤销·重放、状态快照）当前无需求，属 B1 的 YAGNI；若将来需要条件③，再按本决策先补状态迁移测试网。
 - **A 组已全部落地**（独立提交、每步全量测试不回归）：A1（抽 `core/query.ts` 消除 host→webview 反向依赖）、A3（拆 `mountViewer` 上帝函数）、A4（`releaseService.dispose` 补 `.catch` + 注册表抽纯模块 `host/serviceRegistry.ts` + `HostRuntime` 显式注入）、A2（`dispatchMessage` 改为 `HostHandlerMap` 注册表查表分发）。T1–T4/T7 债务状态见 §三表格。
 - **T7 亦已修复**（`fc0049b`）：异常回执经 `requestIdOf` 保留 requestId，webview 精确 reject 对应请求（不再弹全局横幅、不再挂死到超时）。
 - 报告与既有 `docs/STABILITY_AUDIT.md` 互补：稳定性审计关注"不崩溃"，本评审关注"结构可维护"。
@@ -194,3 +197,63 @@ indexer/ parser/ infer/ perf/ constants.ts  ← 共享叶子（被 host/webview 
 - **视图层测试三坑（实测，务必记牢）**：① 浮层面板挂在 `document.body` 而非工具栏子树，须按文档查询；② 相邻用例共享同一 jsdom 文档时，前序残留节点会让内部文档级查询命中错误元素（表现为「点击无反应」）——每例先 `document.body.innerHTML = ''` 隔离；③ 工具栏导航按钮初始 `disabled`，jsdom 下 `.click()` 对 disabled 按钮是**空操作**（`dispatchEvent` 才会强发），须先走真实流程（`setSearchResult(total>0)`）启用。
 - **jsdom 选择器怪癖（实测踩坑，务必记牢）**：同一文档内存在多个 `VirtualRecordList` 时，`el.querySelector('.jlv-inner > *')` 会**返回 null**，而 `querySelectorAll` 用同一选择器却正常。视图层测试请直接用 DOM 属性（`.children` / `.firstElementChild`）访问，勿依赖 `> *` 选择器。
 - **harness 需桥接 rAF**：生产代码使用**裸** `requestAnimationFrame`（非 `window.rAF`），jsdom 只挂在 `window` 上 —— `domHarness` 已显式桥接 `requestAnimationFrame`/`cancelAnimationFrame` 到 `globalThis`，否则视图层动画回调抛 `requestAnimationFrame is not defined`（表现为「部分容器未展开」等隐晦症状）。
+
+---
+
+## 九、后续进展（2026-09-28）
+
+本节记录上述评审结论的落地情况。**原有各节保留原样**（它们是评审当时的判断依据，改动会破坏史料价值），此处只补落地事实。
+
+### 9.1 结构与规模
+
+| 项 | 评审时 | 现在 |
+|---|---|---|
+| `webviewEntry.ts` | 1100 行 → 拆分后 822 行 | **1089 行**（功能大幅增长后再次拆分的结果） |
+| `dataService.ts` | — | 2437 → **2268 行** |
+| 前端域模块 | 3 个（columnLayout/queryActions/persistence） | **10 个** |
+| 宿主状态模块 | 0 | **2 个**（editHistory / badLineTracker） |
+
+新增模块与职责（全部沿用既有 `createXxx(deps)` 工厂风格）：
+
+| 模块 | 职责 | 要点 |
+|---|---|---|
+| `webview/appState.ts` | 状态定义与工厂 | 把多域共享的状态从装配层解放出来（store 化的地基，本轮未上 store） |
+| `webview/focusTarget.ts` | **选中行唯一写入口** | 内置「作废旧原文 + 取消在途详情 + 重拉详情」；11 处散落写入全部改经它 |
+| `webview/navigation.ts` | 上/下条导航与导航态 | 过滤态下只在筛选结果内移动 |
+| `webview/selection.ts` | 选区状态机 + 操作条 + 批量复制/删除 | 三态点击；Shift 超上限拒绝而非截断 |
+| `webview/editOps.ts` | 编辑/删除/批量替换/写后复位 | 写后必取宿主权威行数 |
+| `webview/fieldEdit.ts` | 字段级编辑 | 复用整行编辑链路；必须基于磁盘原文定位 |
+| `webview/badLinesOps.ts` | 坏行诊断链 | 徽章失败静默、扫描取消只发 CANCEL |
+| `webview/persistRestore.ts` | 偏好恢复两源合并 | 两源都就绪才合并；失败也标记「已加载」 |
+| `host/editHistory.ts` | 会话编辑历史状态机 | 单一光标模型；上限裁剪从最旧端丢弃 |
+| `host/badLineTracker.ts` | 坏行集合 + 是否权威全量 | 行号位移规则集中可测（批量重映射与逐次位移对拍一致） |
+
+**边界说明**：只抽「纯状态机与内聚域」——`host/SnapshotWatcher` 一类涉及 IO 与竞态者按 **B2** 不拆；`DataService` 未拆成多个 Service（同上）。
+
+### 9.2 正确性与健壮性（评审未覆盖、由本轮追加）
+
+- **写操作串行化**：`DataService.runExclusive()` promise 链，消除「读基线→冲突检测→定位→写盘→平移索引」被并发插入的 TOCTOU。加锁纪律：只在对外入口加锁，内部一律 `*Internal`（否则 `setHistoryCursor` 调已加锁的 undo/redo 会自死锁）。
+- **协议加固**：`PROTOCOL_VERSION` 握手 + `RpcErrorCode` 九类（前端按码分支）+ 入参校验（偏好键白名单/体积预算/文本长度/规模上限）。
+- **可观测性**：`host/logging.ts` 单行 JSON 日志（traceId/endpoint/durationMs/outcome），requestId 即 traceId。
+- **查询缓存**：搜索/过滤结果按「快照 + 查询」缓存，写后随快照失效；残缺结果不缓存。
+
+### 9.3 修复（均记入 `error_ledger.md`）
+
+1. 自死锁（加锁后 37 例 cancelled，Promise 永不 settle）；
+2. 批量字段替换取消后文案被覆盖成更含糊的一条；
+3. **行数收敛不改作废原文** —— 会导致「基于旧行原文把改动写到新行上」的不可逆错改（第 9.1 节 focusTarget 的由来）。
+
+### 9.4 发布链路
+
+`@types/vscode` 漂移到 1.138 曾使 `vsce` 拒绝打包（tsc/test 全绿也不暴露）→ 已锁回 `~1.100.0`，并在 CI 增加 `vsce ls` 清单校验让漂移在提交时失败；`.vscodeignore` 补齐排除项（清单 9 条、vsix 122KB）。
+
+### 9.5 门禁现状
+
+`tsc` 0 错 ｜ `oxlint` 0/0 ｜ `prettier --check` ✔ ｜ `pnpm build` ✔ ｜ `vsce ls` ✔ ｜
+**699 用例 / 698 通过 / 0 失败** ｜ 覆盖率门槛（行 96/分支 86/函数 88，实测 **97.34 / 87.71 / 91.33**）通过。
+
+### 9.6 仍未采用（有决策依据，非遗漏）
+
+`SnapshotWatcher` 与「拆 DataService」（B2）、完整 store（T5，条件③未出现）、
+事件委托（`MAINTENANCE_AUDIT` P3「暂不必动」）。
+唯一未完成的**验证**项：`pnpm test:integration`（Extension Host 真实路径）需联网下载 VS Code，本机尚未跑通。
