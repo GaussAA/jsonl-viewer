@@ -191,7 +191,7 @@ test('applyRowCountChange：插入后锚点落到新行；删除后其后锚点�
   assert.equal(b.state.selectedLine, 3, '末行被删 → 选中收敛到新的末行');
 });
 
-test('refreshOverview：用宿主权威值校正行数；失败时静默（不打扰用户）', async () => {
+test('refreshOverview：用宿主权威值校正行数；失败时轻提示（不再全然静默）', async () => {
   const { bus, sent, calls, editOps, state } = boot(5);
   state.selectedLine = 4;
   const p = editOps.refreshOverview();
@@ -207,13 +207,15 @@ test('refreshOverview：用宿主权威值校正行数；失败时静默（不�
   assert.deepEqual(calls.setTotalRows, [3]);
   assert.equal(state.selectedLine, 2, '选中行越界 → 收敛到末行');
 
-  // 失败路径：静默，不弹横幅
+  // 失败路径：不再全然静默（O11 余留）—— 轻提示「行数可能过期」，但不打断、不阻塞。
   const b = boot(5);
   const p2 = b.editOps.refreshOverview();
   const req2 = lastReq(b.sent, HostEndpoint.GET_OVERVIEW)!;
   deliver(b.bus, { type: HostReply.ERROR, requestId: req2.requestId, message: 'boom' });
   await p2;
-  assert.deepEqual(b.calls.banner, [], '校正失败不应弹横幅');
+  assert.equal(b.calls.banner.length, 1, '校正失败应有轻提示');
+  assert.match(b.calls.banner[0]?.text ?? '', /可能已过期/);
+  assert.equal(b.calls.banner[0]?.label, undefined, '提示不打断（无动作按钮）');
 });
 
 test('deleteRecordAt：二次确认 → 删除成功 → 复位并取权威行数', async () => {

@@ -173,7 +173,9 @@ export function createEditOps(deps: EditOpsDeps): EditOps {
       }
       updateToolbar();
     } catch {
-      // 校正失败不打扰用户：本地乐观值仍在，下一次操作会再校正一次。
+      // 校正失败不再全然静默（O11 余留）：本地乐观值仍在、下一次操作会再校正一次，
+      // 但用户应当知道眼下的总行数可能过期 —— 越界的选中行不会有人替他纠正。
+      banner.show('行数校正失败，当前显示的总行数可能已过期。');
     }
   }
 
