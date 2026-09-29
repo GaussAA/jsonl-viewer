@@ -22,6 +22,8 @@ function boot() {
     layout: [] as FieldLayout[],
     refreshed: 0,
     filters: [] as unknown[],
+    /** 回填进筛选面板的条件（F3）。 */
+    panelConds: [] as unknown[],
   };
   let input: { value: string } | null = { value: '' };
 
@@ -29,6 +31,7 @@ function boot() {
     state,
     toolbar: {
       setLayout: (l) => calls.layout.push(l),
+      setFilterCondition: (c) => calls.panelConds.push(c),
       searchInput: () => input as unknown as HTMLInputElement | null,
     },
     list: { refresh: () => calls.refreshed++ },

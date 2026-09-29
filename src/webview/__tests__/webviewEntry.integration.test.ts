@@ -612,9 +612,14 @@ describe('webviewEntry 装配层（集成）', () => {
 
       const f = lastReq(host, HostEndpoint.FILTER);
       assert.ok(f, '已发起过滤请求');
-      assert.strictEqual(f!.field, 'a');
-      assert.strictEqual(f!.op, 'eq');
-      assert.strictEqual(f!.value, 'x');
+      // F3：条件以**整棵树**送出（恢复回来的旧偏好是单个叶子，故这里就是那个叶子）。
+      assert.deepStrictEqual(f!.condition, {
+        field: 'a',
+        op: 'eq',
+        value: 'x',
+        negate: false,
+        caseInsensitive: true,
+      });
 
       reply(host, f!, { matches: [0, 2, 4], total: 3, truncated: false });
       await sleep(20);

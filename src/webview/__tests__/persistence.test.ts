@@ -63,7 +63,8 @@ describe('createPersistence（T5 #32 抽取回归）', () => {
     assert.strictEqual(h.calls.requests[0].endpoint, 'persistState', 'endpoint 正确');
     assert.deepStrictEqual(h.calls.requests[0].payload, {
       key: 'jsonlViewer.state.file',
-      value: { fieldLayout: LAYOUT, filter: null, searchQuery: 'hi' },
+      // 版本信封（F3）随偏好一起写回：读到缺 version 的旧数据即知是 v1 写的。
+      value: { version: 2, fieldLayout: LAYOUT, filter: null, searchQuery: 'hi' },
     });
   });
 

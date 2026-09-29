@@ -2,7 +2,7 @@ import { describe, it, before } from 'node:test';
 import assert from 'node:assert';
 import { setupWebviewDom } from './domHarness.ts';
 import { createToolbar } from '../toolbar.ts';
-import type { FieldCondition, FieldLayout } from '../queryLogic.ts';
+import type { Condition, FieldLayout } from '../queryLogic.ts';
 
 /**
  * toolbar 组件测试（覆盖率补强：视图层）。
@@ -24,7 +24,7 @@ interface Harness {
     search: string[];
     prev: number;
     next: number;
-    filter: (FieldCondition | null)[];
+    filter: (Condition | null)[];
     layout: FieldLayout[];
     /** 「全部替换」收到的 (查询, 替换文本)。 */
     replace: [string, string][];
@@ -43,7 +43,7 @@ function makeToolbar(): Harness {
     search: [] as string[],
     prev: 0,
     next: 0,
-    filter: [] as (FieldCondition | null)[],
+    filter: [] as (Condition | null)[],
     layout: [] as FieldLayout[],
     replace: [] as [string, string][],
     badLines: 0,
@@ -179,6 +179,124 @@ describe('createToolbar（视图层覆盖率补强）', () => {
 
     h.tb.setSearchResult(0, 0);
     assert.ok(!/3\/7/.test(count.textContent ?? ''), '无匹配时不再显示旧计数');
+  });
+
+  it('F3：多条件面板 —— 两行 + 「且」产出 and 组，切到「或」产出 or 组', () => {
+    const h = makeToolbar();
+    const doc = globalThis.document;
+    h.tb.setFields([
+      { key: 'a', type: 'string' },
+      { key: 'b', type: 'string' },
+    ]);
+    h.tb.root.querySelector<HTMLButtonElement>('button[title="字段值过滤"]')!.click();
+
+    const panel = doc.querySelector<HTMLElement>('.jlv-panel-filter')!;
+    const rows = (): HTMLElement[] =>
+      Array.from(panel.querySelectorAll<HTMLElement>('.jlv-cond-row'));
+    const fill = (row: HTMLElement, field: string, op: string, value: string): void => {
+      const sels = row.querySelectorAll<HTMLSelectElement>('select');
+      sels[0].value = field;
+      sels[1].value = op;
+      const input = row.querySelector<HTMLInputElement>('input[type="text"]');
+      if (input) input.value = value;
+    };
+    const apply = (): void =>
+      panel.querySelector<HTMLButtonElement>('.jlv-btn-panel.primary')!.click();
+
+    assert.strictEqual(rows().length, 1, '默认一行');
+
+    // 单条件：仍产出**叶子**（与旧版逐字段一致，不无谓地包一层组）
+    fill(rows()[0], 'a', 'eq', '1');
+    apply();
+    assert.deepStrictEqual(h.calls.filter.at(-1), { field: 'a', op: 'eq', value: '1' });
+
+    // 重新打开面板（应用后面板会关），此刻应看到刚才那一行被回填
+    h.tb.root.querySelector<HTMLButtonElement>('button[title="字段值过滤"]')!.click();
+    assert.strictEqual(rows().length, 1, '回填后仍是一行');
+    assert.strictEqual(
+      rows()[0].querySelectorAll<HTMLSelectElement>('select')[0].value,
+      'a',
+      '回填了字段'
+    );
+
+    // 加第二行 → 变「且」组
+    panel.querySelector<HTMLButtonElement>('.jlv-cond-add')!.click();
+    assert.strictEqual(rows().length, 2, '已添加第二行');
+    fill(rows()[1], 'b', 'contains', 'timeout');
+    apply();
+    assert.deepStrictEqual(h.calls.filter.at(-1), {
+      kind: 'and',
+      items: [
+        { field: 'a', op: 'eq', value: '1' },
+        { field: 'b', op: 'contains', value: 'timeout' },
+      ],
+    });
+
+    // 切到「或」
+    h.tb.root.querySelector<HTMLButtonElement>('button[title="字段值过滤"]')!.click();
+    const groupSel = panel.querySelector<HTMLSelectElement>('.jlv-cond-group select')!;
+    groupSel.value = 'or';
+    apply();
+    assert.strictEqual(
+      (h.calls.filter.at(-1) as { kind?: string }).kind,
+      'or',
+      '切到「任一条件」后产出 or 组'
+    );
+  });
+
+  it('F3：条件行可勾「非」；「清除」回传 null', () => {
+    const h = makeToolbar();
+    const doc = globalThis.document;
+    h.tb.setFields([{ key: 'a', type: 'string' }]);
+    h.tb.root.querySelector<HTMLButtonElement>('button[title="字段值过滤"]')!.click();
+    const panel = doc.querySelector<HTMLElement>('.jlv-panel-filter')!;
+    const row = panel.querySelector<HTMLElement>('.jlv-cond-row')!;
+
+    const sels = row.querySelectorAll<HTMLSelectElement>('select');
+    sels[0].value = 'a';
+    sels[1].value = 'contains';
+    row.querySelector<HTMLInputElement>('input[type="text"]')!.value = 'x';
+    row.querySelector<HTMLInputElement>('.jlv-cond-neg input')!.checked = true;
+    panel.querySelector<HTMLButtonElement>('.jlv-btn-panel.primary')!.click();
+    assert.deepStrictEqual(h.calls.filter.at(-1), {
+      field: 'a',
+      op: 'contains',
+      value: 'x',
+      negate: true,
+    });
+
+    // 清除
+    h.tb.root.querySelector<HTMLButtonElement>('button[title="字段值过滤"]')!.click();
+    panel.querySelector<HTMLButtonElement>('.jlv-btn-panel:not(.primary)')!.click();
+    assert.strictEqual(h.calls.filter.at(-1), null, '清除后回传 null');
+  });
+
+  it('F3：setFilterCondition 把条件回填进面板（恢复偏好后所见即当前条件）', () => {
+    const h = makeToolbar();
+    const doc = globalThis.document;
+    h.tb.setFields([
+      { key: 'a', type: 'string' },
+      { key: 'b', type: 'string' },
+    ]);
+
+    // 尚未建过面板：此时回填不应抛错（applyCondToFilterPanel 为 null）
+    h.tb.setFilterCondition({ kind: 'or', items: [{ field: 'b', op: 'eq', value: '9' }] });
+
+    h.tb.root.querySelector<HTMLButtonElement>('button[title="字段值过滤"]')!.click();
+    const panel = doc.querySelector<HTMLElement>('.jlv-panel-filter')!;
+    const rows = Array.from(panel.querySelectorAll<HTMLElement>('.jlv-cond-row'));
+    assert.strictEqual(rows.length, 1, '回填出一行');
+    assert.strictEqual(rows[0].querySelectorAll<HTMLSelectElement>('select')[0].value, 'b');
+    assert.strictEqual(
+      rows[0].querySelectorAll<HTMLSelectElement>('select')[1].value,
+      'eq',
+      '运算符也回填'
+    );
+    assert.strictEqual(
+      rows[0].querySelector<HTMLInputElement>('input[type="text"]')!.value,
+      '9',
+      '值也回填'
+    );
   });
 
   it('可访问性：浮层打开时焦点落在表单控件（而非「关闭」），关闭后归还原按钮（O10）', () => {

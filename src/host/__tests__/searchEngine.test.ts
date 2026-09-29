@@ -171,3 +171,86 @@ test('filterLines: 被取消时同样标记 cancelled', async () => {
   assert.equal(r.cancelled, true);
   assert.equal(r.truncated, false);
 });
+
+/* --------------------- 组合过滤（F3：AND / OR / NOT） --------------------- */
+
+test('F3：and 组 —— 全部条件都要满足（此前单条件做不到）', async () => {
+  const { reader, li } = await makeCtx();
+  // 「a=3 且 b 含 hello」→ 只有 L3（单条件只能得到 {a=3} 或 {含 hello} 两个超集）
+  const r = await filterLines(reader, li, {
+    kind: 'and',
+    items: [
+      { field: 'a', op: 'eq', value: '3' },
+      { field: 'b', op: 'contains', value: 'hello' },
+    ],
+  });
+  assert.deepEqual(r.matches, [3]);
+});
+
+test('F3：or 组 —— 任一满足即可', async () => {
+  const { reader, li } = await makeCtx();
+  const r = await filterLines(reader, li, {
+    kind: 'or',
+    items: [
+      { field: 'a', op: 'eq', value: '1' },
+      { field: 'b', op: 'contains', value: 'foo' },
+    ],
+  });
+  assert.deepEqual(r.matches, [0, 1]);
+});
+
+test('F3：not 组 —— 全都不满足才命中（坏行照旧跳过）', async () => {
+  const { reader, li } = await makeCtx();
+  const r = await filterLines(reader, li, {
+    kind: 'not',
+    items: [{ field: 'b', op: 'contains', value: 'hello' }],
+  });
+  assert.deepEqual(r.matches, [1], 'L1 的 b=foo 不含 hello；L2 是坏行');
+});
+
+test('F3：叶子条件的行为与旧通道完全一致（不含组时零变化）', async () => {
+  const { reader, li } = await makeCtx();
+  const leaf = await filterLines(reader, li, { field: 'b', op: 'contains', value: 'hello' });
+  assert.deepEqual(leaf.matches, [0, 3]);
+});
+
+test('F3：只有空叶子的组 = 未启用过滤（matches 为 null，而不是空数组）', async () => {
+  const { reader, li } = await makeCtx();
+  const r = await filterLines(reader, li, {
+    kind: 'and',
+    items: [{ field: '', op: 'eq', value: '' }],
+  });
+  // null 表示「全量视图」；若判成空数组，界面会显示「没有匹配」—— 那是在说文件里没数据。
+  assert.equal(r.matches, null);
+});
+
+test('F3：组里的空叶子不把整组判假（刚加的一行不该清空结果）', async () => {
+  const { reader, li } = await makeCtx();
+  const r = await filterLines(reader, li, {
+    kind: 'and',
+    items: [
+      { field: 'a', op: 'eq', value: '1' },
+      { field: '', op: 'eq', value: '' },
+    ],
+  });
+  assert.deepEqual(r.matches, [0]);
+});
+
+test('F3：嵌套组求值（界面只暴露一层，但引擎按定义工作）', async () => {
+  const { reader, li } = await makeCtx();
+  // (a=1 或 a=3) 且 非(b 含 foo) → L0, L3
+  const r = await filterLines(reader, li, {
+    kind: 'and',
+    items: [
+      {
+        kind: 'or',
+        items: [
+          { field: 'a', op: 'eq', value: '1' },
+          { field: 'a', op: 'eq', value: '3' },
+        ],
+      },
+      { kind: 'not', items: [{ field: 'b', op: 'contains', value: 'foo' }] },
+    ],
+  });
+  assert.deepEqual(r.matches, [0, 3]);
+});

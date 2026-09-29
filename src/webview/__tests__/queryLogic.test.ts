@@ -12,9 +12,12 @@ import {
   recordFieldValue,
   stringifyValue,
   summarizeWithLayout,
+  PERSIST_STATE_VERSION,
+  normalizeCondition,
   toPersistedState,
   visibleFieldKeys,
 } from '../queryLogic.ts';
+import type { Condition } from '../../core/query.ts';
 
 /* ------------------------- 搜索匹配规则 ------------------------- */
 
@@ -142,7 +145,7 @@ test('nextMatchIndex / prevMatchIndex 循环', () => {
 
 /* -------------------- 偏好持久化：合并 + 校验 -------------------- */
 
-test('toPersistedState: 序列化当前偏好', () => {
+test('toPersistedState: 序列化当前偏好（含版本信封）', () => {
   const p = toPersistedState({
     fieldLayout: { pinned: [], order: ['a'], hidden: [], maxKeys: 4 },
     filter: null,
@@ -150,6 +153,66 @@ test('toPersistedState: 序列化当前偏好', () => {
   assert.deepEqual(p, {
     fieldLayout: { pinned: [], order: ['a'], hidden: [], maxKeys: 4 },
     filter: null,
+    version: PERSIST_STATE_VERSION,
+  });
+});
+
+test('F3：组合条件可写回并原样读回（版本信封不丢内容）', () => {
+  const cond: Condition = {
+    kind: 'and',
+    items: [
+      { field: 'level', op: 'eq', value: 'error' },
+      { field: 'msg', op: 'contains', value: 'timeout', negate: true },
+    ],
+  };
+  const p = toPersistedState({
+    fieldLayout: { pinned: [], order: [], hidden: [], maxKeys: 4 },
+    filter: cond,
+  });
+  assert.deepEqual(p.filter, cond, '写出的就是条件树本身');
+
+  const merged = mergePersistedState(p, {
+    fieldLayout: { pinned: [], order: [], hidden: [], maxKeys: 4 },
+    filter: null,
+  });
+  // 读回时会走净化，叶子的可选字段被补成显式默认值（negate/caseInsensitive）——
+  // 语义等价，故与 normalizeCondition 的结果比对而非与原始字面量。
+  assert.deepEqual(merged.filter, normalizeCondition(cond), '读回后与写入语义一致');
+});
+
+test('F3：v1 的历史偏好（扁平叶子）无需迁移即可读回', () => {
+  // v1 写入的形状：没有 version，filter 是单个扁平条件。
+  const merged = mergePersistedState(
+    { filter: { field: 'a', op: 'contains', value: 'x' }, fieldLayout: undefined },
+    { fieldLayout: { pinned: [], order: [], hidden: [], maxKeys: 4 }, filter: null }
+  );
+  assert.deepEqual(merged.filter, {
+    field: 'a',
+    op: 'contains',
+    value: 'x',
+    negate: false,
+    caseInsensitive: true,
+  });
+});
+
+test('F3：损坏的条件树被净化（非法组类型与深层垃圾被丢弃）', () => {
+  const merged = mergePersistedState(
+    {
+      filter: {
+        kind: 'and',
+        items: [
+          { field: 'ok', op: 'eq', value: '1' },
+          { kind: 'xor', items: [{ field: 'a', op: 'eq', value: '1' }] }, // 非法组类型
+          { field: '', op: 'eq', value: '1' }, // 空字段
+          '不是对象',
+        ],
+      },
+    },
+    { fieldLayout: { pinned: [], order: [], hidden: [], maxKeys: 4 }, filter: null }
+  );
+  assert.deepEqual(merged.filter, {
+    kind: 'and',
+    items: [{ field: 'ok', op: 'eq', value: '1', negate: false, caseInsensitive: true }],
   });
 });
 

@@ -27,6 +27,8 @@ interface Harness {
   calls: {
     superseded: string[];
     requests: string[];
+    /** 各次请求的载荷（用于断言组合条件原样送出，而不是被拆成扁平字段）。 */
+    payloads: unknown[];
     select: number[];
     scrollToLine: number[];
     /** 命中高亮词（null = 清除）。 */
@@ -51,6 +53,7 @@ function makeHarness(): Harness {
   const calls: Harness['calls'] = {
     superseded: [],
     requests: [],
+    payloads: [],
     select: [],
     scrollToLine: [],
     needles: [],
@@ -72,8 +75,9 @@ function makeHarness(): Harness {
     supersede(rid: string) {
       calls.superseded.push(rid);
     },
-    request(endpoint: string) {
+    request(endpoint: string, payload?: unknown) {
       calls.requests.push(endpoint);
+      calls.payloads.push(payload);
       const requestId = `req-${++seq}`;
       const promise = new Promise<unknown>((res, rej) => {
         resolveNext = res;
@@ -295,12 +299,46 @@ describe('createQueryActions（T5 #31 抽取回归）', () => {
     assert.deepStrictEqual(h.calls.requests, [], '未发过滤请求');
   });
 
+  it('F3：组条件原样送入 FILTER 请求（不再被拆成 field/op/value）', async () => {
+    const h = makeHarness();
+    const actions = createQueryActions(h.deps);
+
+    const cond = {
+      kind: 'and' as const,
+      items: [
+        { field: 'level', op: 'eq' as const, value: 'error' },
+        { field: 'msg', op: 'contains' as const, value: 'timeout' },
+      ],
+    };
+    actions.runFilter(cond);
+    assert.deepStrictEqual(h.calls.payloads.at(-1), { condition: cond }, '条件树原样送出');
+    assert.strictEqual(h.state.filterCond, cond, '状态里存的是同一棵树');
+
+    h.resolveLast({ matches: [1], truncated: false });
+    await flush();
+    assert.deepStrictEqual(h.state.filterMap, [1]);
+  });
+
+  it('F3：只有空叶子的条件被视为「未启用过滤」（不把视图清空）', async () => {
+    const h = makeHarness();
+    const actions = createQueryActions(h.deps);
+
+    actions.runFilter({ kind: 'and', items: [{ field: '', op: 'eq', value: '' }] });
+    assert.deepStrictEqual(h.calls.requests, [], '未发过滤请求（等同清除）');
+    assert.strictEqual(h.state.filterCond, null, '条件被清空');
+    assert.strictEqual(h.state.filterMap, null, '回到全量视图');
+  });
+
   it('runFilter(cond)：应用过滤—写回映射、重建翻译、刷新列表', async () => {
     const h = makeHarness();
     const actions = createQueryActions(h.deps);
 
     actions.runFilter({ field: 'f', op: 'eq', value: '3' });
-    assert.strictEqual(h.state.filterCond?.field, 'f', '过滤条件记录');
+    assert.deepStrictEqual(
+      h.state.filterCond,
+      { field: 'f', op: 'eq', value: '3' },
+      '过滤条件记录'
+    );
     assert.deepStrictEqual(h.calls.requests, ['filter'], '发起 FILTER 请求');
 
     h.resolveLast({ matches: [7, 8], truncated: true });
