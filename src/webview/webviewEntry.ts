@@ -37,7 +37,7 @@ import { createBadLinesOps } from './badLinesOps.ts';
 import { createPersistRestore } from './persistRestore.ts';
 import { createFocusTarget } from './focusTarget.ts';
 import { CancelledError, createVSCodeApi, RpcBus } from './rpc.ts';
-import { createAppState } from './appState.ts';
+import { createAppState, viewBaseline } from './appState.ts';
 import type { VSCodeApi } from './rpc.ts';
 import { summarizeWithLayout } from './queryLogic.ts';
 import { HostEndpoint } from '../protocol/rpc.ts';
@@ -401,6 +401,7 @@ export function main(): void {
     // 右键菜单的批量项（选区 > 1 行时出现）
     onDeleteSelected: () => selection.confirmDelete(),
     onCopySelected: () => void selection.copy(),
+    onExportSelected: () => void selection.exportSelected(),
     onClearFilter: () => actions.clearFilterForCond(),
     // 截断态「复制该行 JSON」：按需拉完整值（列表缓存不持有超大对象）。
     onRequestRecord: (line) =>
@@ -455,12 +456,17 @@ export function main(): void {
         info.mode === 'insert'
           ? bus.request<EditResultPayload>(
               HostEndpoint.INSERT_RECORD,
-              { at: info.line, text: info.text },
+              { at: info.line, text: info.text, ...viewBaseline(state) },
               { timeoutMs: RPC_HEAVY_TIMEOUT_MS }
             )
           : bus.request<EditResultPayload>(
               HostEndpoint.EDIT_RECORD,
-              { line: info.line, text: info.text, expectedBytes: editOps.getExpectedBytes() },
+              {
+                line: info.line,
+                text: info.text,
+                expectedBytes: editOps.getExpectedBytes(),
+                ...viewBaseline(state),
+              },
               { timeoutMs: RPC_HEAVY_TIMEOUT_MS }
             );
 

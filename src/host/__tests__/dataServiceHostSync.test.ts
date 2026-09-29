@@ -481,3 +481,73 @@ test('O1 兜底：宿主回填失败也不会出错 —— 查询前重建，结
     }
   });
 });
+
+/* ---------------- O7：调用方视图基线（乐观锁的调用方一侧） ---------------- */
+
+test('O7：视图基线不符时拒绝写入（多视图/长会话的陈旧视图）', async () => {
+  await withDir(async (dir) => {
+    const file = await writeFile_(dir, makeLines(6));
+    const ds = makeService(file);
+    try {
+      await ds.getOverview();
+
+      // 场景：B 视图看到的是 6 行，但文件已被（别的视图/更长会话）改成 5 行。
+      const del = await ds.deleteRecord(5);
+      assert.equal(del.ok, true, del.error ?? '');
+
+      // B 视图仍按 6 行发起删除 → 必须被拒（否则第 5 行在磁盘上已不存在，
+      // 它实际会删掉第 6 行 —— 也就是改错行）。
+      const stale = await ds.deleteRecord(4, { expectedTotalLines: 6 });
+      assert.equal(stale.ok, false, '陈旧视图的写入必须被拒');
+      assert.equal(stale.conflict, true);
+      assert.match(stale.error ?? '', /视图已过期/);
+
+      // 带上正确的行数则放行
+      const fresh = await ds.deleteRecord(4, { expectedTotalLines: 5 });
+      assert.equal(fresh.ok, true, fresh.error ?? '');
+    } finally {
+      await ds.dispose();
+    }
+  });
+});
+
+test('O7：批量删除 / 批量替换同样受视图基线保护', async () => {
+  await withDir(async (dir) => {
+    const file = await writeFile_(dir, makeLines(6));
+    const ds = makeService(file);
+    try {
+      await ds.getOverview();
+      const del = await ds.deleteRecords([5]);
+      assert.equal(del.ok, true, del.error ?? '');
+
+      const staleBulk = await ds.deleteRecords([1, 2], { expectedTotalLines: 6 });
+      assert.equal(staleBulk.ok, false, '陈旧视图的批量删除必须被拒');
+      assert.equal(staleBulk.conflict, true);
+
+      const staleReplace = await ds.replaceText('t1', 'x', { expectedTotalLines: 6 });
+      assert.equal(staleReplace.ok, false, '陈旧视图的批量替换必须被拒');
+      assert.equal(staleReplace.conflict, true);
+
+      const fresh = await ds.deleteRecords([1, 2], { expectedTotalLines: 5 });
+      assert.equal(fresh.ok, true, fresh.error ?? '');
+    } finally {
+      await ds.dispose();
+    }
+  });
+});
+
+test('O7：不带视图基线时行为与从前一致（不阻塞正常编辑）', async () => {
+  await withDir(async (dir) => {
+    const file = await writeFile_(dir, makeLines(4));
+    const ds = makeService(file);
+    try {
+      await ds.getOverview();
+      const r1 = await ds.deleteRecord(3);
+      assert.equal(r1.ok, true, r1.error ?? '');
+      const r2 = await ds.insertRecord(3, '{"i":9}');
+      assert.equal(r2.ok, true, r2.error ?? '');
+    } finally {
+      await ds.dispose();
+    }
+  });
+});

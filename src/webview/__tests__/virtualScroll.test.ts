@@ -49,6 +49,8 @@ interface Harness {
     requested: number[];
     deleteSelected: number;
     copySelected: number;
+    /** F5：导出选中行的触发次数（入口存在却没接线，比没有入口更糟）。 */
+    exportSelected: number;
   };
   /** 已加载的记录（其余行返回 undefined → 渲染「加载中」占位）。 */
   loaded: Set<number>;
@@ -63,6 +65,7 @@ function makeList(pageSize?: number): Harness {
     requested: [] as number[],
     deleteSelected: 0,
     copySelected: 0,
+    exportSelected: 0,
   };
   const loaded = new Set<number>();
   const cb: ListCallbacks = {
@@ -86,6 +89,9 @@ function makeList(pageSize?: number): Harness {
     },
     onCopySelected: () => {
       calls.copySelected += 1;
+    },
+    onExportSelected: () => {
+      calls.exportSelected += 1;
     },
     onRangeChange: (first, lastExclusive) => calls.range.push([first, lastExclusive]),
     onClearFilter: () => {
@@ -375,6 +381,33 @@ describe('VirtualRecordList（视图层覆盖率补强）', () => {
     list.setSearchNeedle('<b>');
     const preview = globalThis.document.querySelector('.jlv-card-preview')!;
     assert.strictEqual(preview.querySelector('b'), null, '不得解析出标签');
+  });
+
+  it('F5：多选后菜单提供「导出选中的 N 行为新文件」入口', () => {
+    const { list, calls } = makeList();
+    list.setTotalRows(100);
+    list.setSelectedLines(new Set([1, 2]));
+    list.refresh();
+
+    list.select(1);
+    const card = globalThis.document.querySelector<HTMLElement>('[data-line="1"]')!;
+    card.dispatchEvent(
+      new (
+        globalThis as unknown as { window: { MouseEvent: new (t: string, o?: unknown) => Event } }
+      ).window.MouseEvent('contextmenu', { bubbles: true, cancelable: true })
+    );
+    const menu = globalThis.document.querySelector<HTMLElement>('.jlv-ctx')!;
+    const labels = Array.from(menu.querySelectorAll('.jlv-ctx-item')).map(
+      (el) => el.textContent ?? ''
+    );
+    const exportItem = Array.from(menu.querySelectorAll<HTMLElement>('.jlv-ctx-item')).find((el) =>
+      (el.textContent ?? '').includes('导出选中的 2 行为新文件')
+    );
+    assert.ok(exportItem, `菜单应含导出入口，实得=${labels.join(' | ')}`);
+
+    // 点下去要真的触发导出动作（入口存在却没接线，比没有入口更糟）
+    exportItem!.click();
+    assert.strictEqual(calls.exportSelected, 1, '导出动作已被触发');
   });
 
   it('可访问性：菜单键 / Shift+F10 打开与鼠标一致的右键菜单（O13）', () => {

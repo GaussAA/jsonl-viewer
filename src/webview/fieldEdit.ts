@@ -16,6 +16,7 @@
  *      且重拉失败会被误当成保存失败 —— 两件事必须分开。
  */
 
+import { viewBaseline } from './appState.ts';
 import type { AppState } from './appState.ts';
 import type { RpcBus } from './rpc.ts';
 import type { DetailTreeNavHandlers } from './detailTree.ts';
@@ -138,7 +139,7 @@ export function createFieldEdit(deps: FieldEditDeps): FieldEdit {
           try {
             const { requestId, promise } = bus.request<ReplaceResultPayload>(
               HostEndpoint.REPLACE_FIELD,
-              { path: toPathParts(segs), from, to },
+              { path: toPathParts(segs), from, to, ...viewBaseline(state) },
               { timeoutMs: RPC_HEAVY_TIMEOUT_MS }
             );
             // 记下 requestId：进度推送据此渲染横幅文字，取消据此发 CANCEL。

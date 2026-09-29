@@ -14,6 +14,7 @@
  *      都会让它与磁盘不符。
  */
 
+import { viewBaseline } from './appState.ts';
 import type { AppState } from './appState.ts';
 import type { RpcBus } from './rpc.ts';
 import { HostEndpoint } from '../protocol/rpc.ts';
@@ -188,7 +189,7 @@ export function createEditOps(deps: EditOpsDeps): EditOps {
         try {
           const res = await bus.request<EditResultPayload>(
             HostEndpoint.DELETE_RECORD,
-            { line },
+            { line, ...viewBaseline(state) },
             { timeoutMs: RPC_HEAVY_TIMEOUT_MS }
           ).promise;
           if (!res?.ok) {
@@ -235,7 +236,7 @@ export function createEditOps(deps: EditOpsDeps): EditOps {
         try {
           const { requestId, promise } = bus.request<ReplaceResultPayload>(
             HostEndpoint.REPLACE_TEXT,
-            { query, replacement },
+            { query, replacement, ...viewBaseline(state) },
             { timeoutMs: RPC_HEAVY_TIMEOUT_MS }
           );
           // 记下本次请求：进度推送据此渲染横幅，取消按钮据此发 CANCEL。

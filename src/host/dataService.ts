@@ -49,7 +49,9 @@ import {
   MAX_BAD_LINES,
   PROGRESS_THROTTLE_MS,
   QUERY_CACHE_MAX,
+  MAX_EXPORT_LINES,
 } from '../constants.ts';
+import { exportLinesToFile, type ExportOpts } from './exporter.ts';
 import { buildIndexWithFallback, type IndexHost } from './indexHost.ts';
 import type { BuildResult } from './workerProtocol.ts';
 import { EditHistory } from './editHistory.ts';
@@ -69,6 +71,7 @@ import type {
   ReplaceChange,
   ReplaceResultPayload,
   SampleFieldsPayload,
+  ExportResultPayload,
 } from '../protocol/rpc.ts';
 import {
   isOversized,
@@ -238,6 +241,8 @@ export type IndexHostBuilder = (
 export interface ReplaceOpts {
   /** 是否大小写不敏感（与搜索保持一致；默认 true）。 */
   caseInsensitive?: boolean;
+  /** 调用方视图的期望总行数（乐观锁的调用方一侧；详见 detectWriteConflict）。 */
+  expectedTotalLines?: number;
   /**
    * 全文件重写阶段的进度回调（已按 `PROGRESS_THROTTLE_MS` 节流，终态必发）。
    * 1GB 文件底层会按 4MB 分块回调 250 次，全量上报只是无意义的 IPC 压力。
@@ -272,6 +277,8 @@ export interface ScanBadLinesOpts {
  * 两者都在毫秒级完成，轮询取消与上报进度都只是噪音。
  */
 export interface EditRecordOpts {
+  /** 调用方视图的期望总行数（乐观锁的调用方一侧；详见 detectWriteConflict）。 */
+  expectedTotalLines?: number;
   /** 搬移进度回调（仅在真有搬移时触发）。 */
   onProgress?: (info: { processedBytes: number; totalBytes: number }) => void;
   /**
@@ -661,7 +668,7 @@ export class DataService {
     }
 
     // ① 写前冲突检测
-    const conflict = await this.detectWriteConflict(line);
+    const conflict = await this.detectWriteConflict(line, opts.expectedTotalLines);
     if (conflict) return conflict;
 
     // ② 定位该记录的字节区间与聚合原文（多行记录=多行区间；顺带探明下一条记录
@@ -800,7 +807,30 @@ export class DataService {
   }
 
   /** 写前冲突检测：文件被外部改动过则返回失败回执，否则返回 undefined。 */
-  private async detectWriteConflict(line: number): Promise<EditResultPayload | undefined> {
+  private async detectWriteConflict(
+    line: number,
+    expectedTotalLines?: number
+  ): Promise<EditResultPayload | undefined> {
+    // ① 调用方视图基线（乐观锁的「调用方一侧」）
+    //
+    // 拦的是宿主**自己看不见**的那类过期：DataService 按 uri 被多个视图共享，
+    // A 视图编辑后宿主基线会刷新，但 B 视图的界面仍是旧行号 ——
+    // 此时宿主侧的 size/mtime 检查全都会通过（在宿主看来文件一切正常），
+    // B 视图却会拿旧行号去删/插，**改到别的行上**。
+    // 期望值由调用方（前端视图）给出，对不上即拒绝：宁可让用户重新加载，也不要错改。
+    if (expectedTotalLines != null) {
+      const actual = this.index?.totalLines;
+      if (actual != null && actual !== expectedTotalLines) {
+        return DataService.editFailure(
+          line,
+          `当前视图已过期（你看到的 ${expectedTotalLines} 行，磁盘上已是 ${actual} 行），` +
+            `为避免改错行，已拒绝本次操作；请重新加载后再试。`,
+          { conflict: true }
+        );
+      }
+    }
+
+    // ② 宿主基线（拦外部程序改动）
     const before = await this.currentSnapshot();
     if (!before) return DataService.editFailure(line, '文件不存在或无法访问', { conflict: true });
     if (
@@ -937,7 +967,7 @@ export class DataService {
     if (!Number.isInteger(line) || line < 0 || line >= li.totalLines) {
       return DataService.editFailure(line, `无效行号：${line}`);
     }
-    const conflict = await this.detectWriteConflict(line);
+    const conflict = await this.detectWriteConflict(line, opts.expectedTotalLines);
     if (conflict) return conflict;
 
     const probed = await probeLine(li, reader, line);
@@ -1004,7 +1034,7 @@ export class DataService {
     if (!Number.isInteger(at) || at < 0 || at > li.totalRecords) {
       return DataService.editFailure(at, `无效插入位置：${at}`);
     }
-    const conflict = await this.detectWriteConflict(at);
+    const conflict = await this.detectWriteConflict(at, opts.expectedTotalLines);
     if (conflict) return conflict;
 
     // 与 editRecord 同一口径的 JSONL 单行约束：插入多行文本会把一条记录拆成多行，
@@ -1100,7 +1130,7 @@ export class DataService {
     const li = await this.ensureIndex();
     const reader = this.reader!;
 
-    const conflict = await this.detectWriteConflict(-1);
+    const conflict = await this.detectWriteConflict(-1, opts.expectedTotalLines);
     if (conflict) {
       return DataService.replaceFailure(conflict.error ?? '文件已被外部修改', { conflict: true });
     }
@@ -1200,7 +1230,7 @@ export class DataService {
     }
     if (wanted.size === 0) return DataService.replaceFailure('没有可写回的行');
 
-    const conflict = await this.detectWriteConflict(-1);
+    const conflict = await this.detectWriteConflict(-1, opts.expectedTotalLines);
     if (conflict) {
       return DataService.replaceFailure(conflict.error ?? '文件已被外部修改', { conflict: true });
     }
@@ -1307,7 +1337,7 @@ export class DataService {
       );
     }
 
-    const conflict = await this.detectWriteConflict(-1);
+    const conflict = await this.detectWriteConflict(-1, opts.expectedTotalLines);
     if (conflict) {
       return DataService.replaceFailure(conflict.error ?? '文件已被外部修改', { conflict: true });
     }
@@ -1750,7 +1780,7 @@ export class DataService {
     const li = await this.ensureIndex();
     const reader = this.reader!;
 
-    const conflict = await this.detectWriteConflict(-1);
+    const conflict = await this.detectWriteConflict(-1, opts.expectedTotalLines);
     if (conflict) {
       return DataService.deleteManyFailure(conflict.error ?? '文件已被外部修改', {
         conflict: true,
@@ -1885,7 +1915,7 @@ export class DataService {
 
     if (ranges.length === 0) return DataService.deleteManyFailure('没有需要恢复的内容');
 
-    const conflict = await this.detectWriteConflict(-1);
+    const conflict = await this.detectWriteConflict(-1, opts.expectedTotalLines);
     if (conflict) {
       return DataService.deleteManyFailure(conflict.error ?? '文件已被外部修改', {
         conflict: true,
@@ -1990,6 +2020,78 @@ export class DataService {
       error,
       ...extra,
     };
+  }
+
+  /**
+   * 把选定记录**另存为新文件**。
+   *
+   * 与所有编辑端点的三条硬区别（写进代码而不是只写进文档）：
+   *   1. **不进写链**（`runExclusive`）——它不碰源文件，排队毫无意义；
+   *   2. **不进撤销历史** —— 用户不该以为 Ctrl+Z 能「撤回导出」；
+   *   3. **拒绝目标 = 源路径** —— 那是覆写原数据，属于编辑能力，不该从导出入口进来。
+   *
+   * @param targetPath 由宿主侧保存对话框选定的绝对路径。
+   */
+  async exportLines(
+    lines: readonly number[],
+    targetPath: string,
+    opts: ExportOpts = {}
+  ): Promise<ExportResultPayload> {
+    const fail = (error: string): ExportResultPayload => ({
+      ok: false,
+      count: 0,
+      bytes: 0,
+      skipped: 0,
+      error,
+    });
+    if (typeof targetPath !== 'string' || targetPath.trim() === '') {
+      return fail('未指定导出目标路径');
+    }
+    if (DataService.isSamePath(this.path, targetPath)) {
+      return fail('导出目标不能是当前文件本身（那会覆盖原数据）；请另选一个文件名。');
+    }
+
+    const li = await this.ensureIndex();
+    const targets = DataService.normalizeLines(lines, li.totalRecords);
+    if (targets.length === 0) return fail('没有可导出的记录');
+    if (targets.length > MAX_EXPORT_LINES) {
+      return fail(`一次最多导出 ${MAX_EXPORT_LINES} 条记录，当前 ${targets.length} 条。`);
+    }
+
+    const onProgress = throttleProgress(opts.onProgress);
+    try {
+      const res = await exportLinesToFile(li, this.reader!, targets, targetPath, {
+        ...(onProgress ? { onProgress } : {}),
+        ...(opts.shouldCancel ? { shouldCancel: opts.shouldCancel } : {}),
+      });
+      if (res.cancelled) {
+        // 取消：目标文件**从未被创建**（临时文件已清理）——与失败严格分开报。
+        return { ok: false, count: 0, bytes: 0, skipped: 0, cancelled: true };
+      }
+      if (res.count === 0) {
+        return fail(
+          res.skipped > 0
+            ? `${res.skipped} 条记录过大、无法取出原文，未写出任何内容（目标文件未创建）。`
+            : '没有可导出的内容'
+        );
+      }
+      return {
+        ok: true,
+        count: res.count,
+        bytes: res.bytes,
+        skipped: res.skipped,
+        targetPath,
+      };
+    } catch (e) {
+      return fail(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  /** 两个路径是否指向同一文件（Windows 大小写不敏感；比较前统一分隔符）。 */
+  private static isSamePath(a: string, b: string): boolean {
+    const norm = (p: string): string => p.replace(/\\/g, '/').replace(/\/+$/, '');
+    const [x, y] = [norm(a), norm(b)];
+    return process.platform === 'win32' ? x.toLowerCase() === y.toLowerCase() : x === y;
   }
 
   /**

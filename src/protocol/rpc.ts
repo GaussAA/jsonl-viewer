@@ -84,6 +84,13 @@ export const HostEndpoint = {
   REDO_EDIT: 'redoEdit',
   /** 把光标移到指定历史条目（历史浮层的「回退到此处」）。 */
   REVERT_TO: 'revertTo',
+  /**
+   * 把选定记录**另存为新文件**（导出子集）。
+   *
+   * 与所有编辑端点的根本区别：它**只读源文件**、只创建目标文件 —— 不进写链、
+   * 不进撤销历史。用户不会（也不应）以为 Ctrl+Z 能「撤回导出」。
+   */
+  EXPORT_LINES: 'exportLines',
 } as const;
 
 /** O(1) 查找表：把 HostEndpoint 所有值预编译成 Set，isHostEndpoint 每次调用不再 O(n) 遍历。 */
@@ -124,6 +131,8 @@ export const HostReply = {
   HISTORY_RESULT: 'historyResult',
   /** 坏行查询 / 扫描的结果。 */
   BAD_LINES: 'badLines',
+  /** 导出子集的结果（成功与业务失败均走此回执）。 */
+  EXPORT_RESULT: 'exportResult',
   /**
    * host 主动推送：耗时写操作的进度（批量重写的全文件重写阶段）。
    *
@@ -405,7 +414,7 @@ export interface EditProgressPayload {
    * 之所以复用同一个推送通道：它表达的本就是「长任务的字节级进度」，
    * 与任务语义无关；新增一种长任务时不该再造一条推送链路。
    */
-  kind: 'replace' | 'scanBadLines' | 'edit' | 'replaceField';
+  kind: 'replace' | 'scanBadLines' | 'edit' | 'replaceField' | 'export';
   /** 已处理的原始文件字节数（批量替换时不含被替换区间，它们无需逐字节复制）。 */
   processedBytes: number;
   /** 原始文件总字节数（进度分母）。 */
@@ -455,6 +464,23 @@ export interface DocumentResetPayload {
   message: string;
 }
 
+/** 导出子集的结果。 */
+export interface ExportResultPayload {
+  ok: boolean;
+  /** 实际写入的记录数。 */
+  count: number;
+  /** 写入的字节数。 */
+  bytes: number;
+  /** 因过大取不出原文而跳过的记录数（必须如实展示）。 */
+  skipped: number;
+  /** 目标文件路径（供界面回显「导到哪了」）。 */
+  targetPath?: string;
+  /** 是否被主动取消（此时目标文件从未被创建，与失败严格区分）。 */
+  cancelled?: boolean;
+  /** 失败原因（ok=false 时给出，可直接展示）。 */
+  error?: string;
+}
+
 /* webview -> host 的具体请求消息。 */
 export type HostRequest =
   | { type: typeof HostEndpoint.READY }
@@ -485,6 +511,8 @@ export type HostRequest =
       type: typeof HostEndpoint.EDIT_RECORD;
       requestId: string;
       line: number;
+      /** 调用方视图的期望总行数（乐观锁；与磁盘不符即判冲突，宁可拒绝也不错改）。 */
+      expectedTotalLines?: number;
       /** 替换后的整行文本（不含行尾；行尾由宿主按原样保留）。 */
       text: string;
       /**
@@ -498,6 +526,8 @@ export type HostRequest =
       requestId: string;
       /** 插入位置：新行将成为第 at 行（at === 总行数即追加到末尾）。 */
       at: number;
+      /** 调用方视图的期望总行数（乐观锁；详见 EDIT_RECORD 同名参数）。 */
+      expectedTotalLines?: number;
       /** 新行的整行文本（不含行尾；行尾风格由宿主参考相邻行决定）。 */
       text: string;
     }
@@ -506,6 +536,8 @@ export type HostRequest =
       requestId: string;
       /** 要删除的行号（0 基）。 */
       line: number;
+      /** 调用方视图的期望总行数（乐观锁；详见 EDIT_RECORD 同名参数）。 */
+      expectedTotalLines?: number;
     }
   | {
       type: typeof HostEndpoint.REPLACE_TEXT;
@@ -516,6 +548,8 @@ export type HostRequest =
       replacement: string;
       /** 是否大小写不敏感；默认与搜索一致（true）。 */
       caseInsensitive?: boolean;
+      /** 调用方视图的期望总行数（乐观锁；详见 EDIT_RECORD 同名参数）。 */
+      expectedTotalLines?: number;
     }
   | {
       type: typeof HostEndpoint.REPLACE_FIELD;
@@ -526,12 +560,16 @@ export type HostRequest =
       from: unknown;
       /** 替换为的新值（任意 JSON 值，可换类型）。 */
       to: unknown;
+      /** 调用方视图的期望总行数（乐观锁；详见 EDIT_RECORD 同名参数）。 */
+      expectedTotalLines?: number;
     }
   | {
       type: typeof HostEndpoint.DELETE_RECORDS;
       requestId: string;
       /** 要删除的行号（0 基；可乱序、可含重复，宿主负责归一化与合并）。 */
       lines: number[];
+      /** 调用方视图的期望总行数（乐观锁；详见 EDIT_RECORD 同名参数）。 */
+      expectedTotalLines?: number;
     }
   | {
       type: typeof HostEndpoint.COPY_LINES;
@@ -542,6 +580,17 @@ export type HostRequest =
   | { type: typeof HostEndpoint.GET_HISTORY; requestId: string }
   | { type: typeof HostEndpoint.GET_BAD_LINES; requestId: string }
   | { type: typeof HostEndpoint.SCAN_BAD_LINES; requestId: string }
+  | {
+      type: typeof HostEndpoint.EXPORT_LINES;
+      requestId: string;
+      /**
+       * 要导出的记录号（0 基；可乱序、可含重复，宿主负责归一化）。
+       *
+       * 注意**没有** targetPath：目标路径由宿主侧的保存对话框决定 ——
+       * webview 既拿不到文件系统，也不该有权决定往哪里写文件。
+       */
+      lines: number[];
+    }
   | { type: typeof HostEndpoint.UNDO_EDIT; requestId: string }
   | { type: typeof HostEndpoint.REDO_EDIT; requestId: string }
   | {
@@ -580,7 +629,8 @@ export type HostResponse =
   | { type: typeof HostReply.COPY_RESULT; requestId: string; payload: CopyLinesResultPayload }
   | { type: typeof HostReply.HISTORY; requestId: string; payload: HistoryPayload }
   | { type: typeof HostReply.HISTORY_RESULT; requestId: string; payload: HistoryResultPayload }
-  | { type: typeof HostReply.BAD_LINES; requestId: string; payload: BadLinesPayload };
+  | { type: typeof HostReply.BAD_LINES; requestId: string; payload: BadLinesPayload }
+  | { type: typeof HostReply.EXPORT_RESULT; requestId: string; payload: ExportResultPayload };
 
 /**
  * 错误回执的机器可读分类。
@@ -780,6 +830,9 @@ export type HostHandlerMap = {
   ) => Promise<HostResponse> | HostResponse;
   [HostEndpoint.SCAN_BAD_LINES]: (
     req: Extract<HostRequest, { type: typeof HostEndpoint.SCAN_BAD_LINES }>
+  ) => Promise<HostResponse> | HostResponse;
+  [HostEndpoint.EXPORT_LINES]: (
+    req: Extract<HostRequest, { type: typeof HostEndpoint.EXPORT_LINES }>
   ) => Promise<HostResponse> | HostResponse;
   [HostEndpoint.UNDO_EDIT]: (
     req: Extract<HostRequest, { type: typeof HostEndpoint.UNDO_EDIT }>

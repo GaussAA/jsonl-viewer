@@ -11,16 +11,21 @@
  *   而这类 bug 的表现是「删掉了没选中的行」—— 后果不可逆。
  */
 
+import { viewBaseline } from './appState.ts';
 import type { AppState } from './appState.ts';
 import type { RpcBus } from './rpc.ts';
 import { HostEndpoint } from '../protocol/rpc.ts';
-import type { CopyLinesResultPayload, DeleteManyResultPayload } from '../protocol/rpc.ts';
+import type {
+  CopyLinesResultPayload,
+  DeleteManyResultPayload,
+  ExportResultPayload,
+} from '../protocol/rpc.ts';
 import type { FocusTarget } from './focusTarget.ts';
 import { MAX_SELECTION_LINES, RPC_HEAVY_TIMEOUT_MS } from '../constants.ts';
 
 export interface SelectionDeps {
   /** 只依赖过滤映射与选中行：模块不该拿到整份状态的写权限以外的东西。 */
-  state: Pick<AppState, 'filterMap' | 'selectedLine'>;
+  state: Pick<AppState, 'filterMap' | 'selectedLine' | 'overview'>;
   bus: RpcBus;
   /** 列表：渲染选区 / 选中单行 / 清空选中。 */
   list: {
@@ -57,6 +62,8 @@ export interface Selection {
   handleSelect: (line: number, mods: { ctrl: boolean; shift: boolean }) => void;
   /** 复制选中行原文到剪贴板（宿主侧写入，比 webview clipboard 可靠）。 */
   copy: () => Promise<void>;
+  /** 导出选中行到新文件（目标路径由宿主侧保存对话框决定）。 */
+  exportSelected: () => Promise<void>;
   /** 批量删除：先二次确认（不可逆的磁盘写入），再落盘。 */
   confirmDelete: () => void;
 }
@@ -207,6 +214,38 @@ export function createSelection(deps: SelectionDeps): Selection {
   }
 
   /**
+   * 导出选中的行到新文件。
+   *
+   * 与复制到剪贴板的区别（两者都是「取出原文」的动作，但落点不同）：
+   * 剪贴板有 8MB 上限、且只能粘出来；导出没有这个上限，且产出一个可复用的文件
+   * ——数据清洗的闭环（筛出脏数据 → 导出 → 交给下游）靠的就是后者。
+   *
+   * 目标路径由**宿主侧**保存对话框决定（webview 拿不到文件系统）；用户取消对话框
+   * 与取消写入都报 cancelled，与失败严格分开 —— 两种情况目标文件都从未被创建。
+   */
+  async function exportSelected(): Promise<void> {
+    const lines = [...selectedLines].toSorted((a, b) => a - b);
+    if (lines.length === 0) return;
+    try {
+      const res = await bus.request<ExportResultPayload>(
+        HostEndpoint.EXPORT_LINES,
+        { lines },
+        { timeoutMs: RPC_HEAVY_TIMEOUT_MS }
+      ).promise;
+      if (res?.cancelled) return; // 用户取消：静默收场（零风险）
+      if (!res?.ok) {
+        banner.show(res?.error ?? '导出失败', undefined);
+        return;
+      }
+      const parts = [`已导出 ${res.count} 条记录`, res.targetPath ?? ''];
+      if (res.skipped > 0) parts.push(`${res.skipped} 条因过大跳过`);
+      banner.show(parts.filter(Boolean).join(' → '), undefined);
+    } catch (e) {
+      banner.show(e instanceof Error ? e.message : String(e), undefined);
+    }
+  }
+
+  /**
    * 批量删除选中的行。不可逆的磁盘写入，先横幅二次确认（webview 里 `window.confirm`
    * 不可用）。确认文案带上「几段连续」—— 用户能借此确认自己框对了吗。
    */
@@ -225,7 +264,9 @@ export function createSelection(deps: SelectionDeps): Selection {
         try {
           const res = await bus.request<DeleteManyResultPayload>(
             HostEndpoint.DELETE_RECORDS,
-            { lines },
+            // 带上本视图看到的行数：宿主据此判断「这个视图是不是已经过期」——
+            // 过期视图发来的行号在磁盘上指向的是**别的行**，宁可拒绝也不要错删。
+            { lines, ...viewBaseline(state) },
             { timeoutMs: RPC_HEAVY_TIMEOUT_MS }
           ).promise;
           if (res?.cancelled) {
@@ -260,6 +301,7 @@ export function createSelection(deps: SelectionDeps): Selection {
     selectSingle,
     handleSelect,
     copy,
+    exportSelected,
     confirmDelete,
   };
 }

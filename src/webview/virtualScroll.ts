@@ -64,6 +64,8 @@ export interface ListCallbacks {
   onDeleteSelected?(): void;
   /** 可选：复制选中的多行（右键菜单；选区 > 1 行时出现）。 */
   onCopySelected?(): void;
+  /** 批量导出选中的行到新文件（只读源文件；目标由宿主侧保存对话框决定）。 */
+  onExportSelected?(): void;
   /** 可选：清空过滤条件（空态「清除过滤」按钮）。 */
   onClearFilter?(): void;
   /** 可选：按需拉取某行完整值（截断态「复制该行 JSON」用）。 */
@@ -615,6 +617,12 @@ export class VirtualRecordList {
         items.push({
           label: `复制选中的 ${selCount} 行`,
           run: () => this.cb.onCopySelected?.(),
+        });
+      }
+      if (this.cb.onExportSelected) {
+        items.push({
+          label: `导出选中的 ${selCount} 行为新文件`,
+          run: () => this.cb.onExportSelected?.(),
         });
       }
       if (this.cb.onDeleteSelected) {

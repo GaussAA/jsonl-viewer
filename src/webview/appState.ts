@@ -91,3 +91,17 @@ export function createAppState(): AppState {
     persistTimer: undefined,
   };
 }
+
+/**
+ * 乐观锁的「调用方一侧」载荷：本视图当前看到的行数。
+ *
+ * 为什么必须由调用方给出：宿主侧的 size/mtime 冲突检测只能发现**外部程序**改了文件；
+ * 而「同一个文件被两个视图打开」时，A 视图写完后宿主基线会刷新，B 视图的界面却仍是
+ * 旧行号 —— 在宿主看来文件一切正常，B 视图发来的行号却已经不是它以为的那一行。
+ * 把「我看到多少行」随写请求一起送过去，宿主就能拒掉这类陈旧视图的写入（宁可让用户
+ * 重新加载，也不要改错行）。没有概览（尚未加载完）时不带该字段：不阻塞正常编辑。
+ */
+export function viewBaseline(state: Pick<AppState, 'overview'>): { expectedTotalLines?: number } {
+  const n = state.overview?.totalLines;
+  return n == null ? {} : { expectedTotalLines: n };
+}

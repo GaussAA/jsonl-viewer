@@ -389,6 +389,9 @@ function registerHostHandlers(deps: HostHandlerDeps): vscode.Disposable {
               }
               const result = await runCancellableEdit(req.requestId, () =>
                 data.insertRecord(req.at, req.text, {
+                  ...(req.expectedTotalLines != null
+                    ? { expectedTotalLines: req.expectedTotalLines }
+                    : {}),
                   shouldCancel: () => cancel.has(req.requestId),
                 })
               );
@@ -398,7 +401,12 @@ function registerHostHandlers(deps: HostHandlerDeps): vscode.Disposable {
             // 删除第 line 行（编辑能力 M2）。
             [HostEndpoint.DELETE_RECORD]: async (req) => {
               const result = await runCancellableEdit(req.requestId, () =>
-                data.deleteRecord(req.line, { shouldCancel: () => cancel.has(req.requestId) })
+                data.deleteRecord(req.line, {
+                  ...(req.expectedTotalLines != null
+                    ? { expectedTotalLines: req.expectedTotalLines }
+                    : {}),
+                  shouldCancel: () => cancel.has(req.requestId),
+                })
               );
               if (result.ok && reportEdit) reportEdit(data);
               return okReply(HostReply.EDIT_RESULT, req.requestId, result);
@@ -505,6 +513,9 @@ function registerHostHandlers(deps: HostHandlerDeps): vscode.Disposable {
               const result = await (async () => {
                 try {
                   return await data.editRecord(req.line, req.text, req.expectedBytes, {
+                    ...(req.expectedTotalLines != null
+                      ? { expectedTotalLines: req.expectedTotalLines }
+                      : {}),
                     onProgress: (info) =>
                       post({
                         type: HostReply.EDIT_PROGRESS,
@@ -529,6 +540,50 @@ function registerHostHandlers(deps: HostHandlerDeps): vscode.Disposable {
             // 把它当全量会得出「文件挺干净」这种与事实相反的结论。
             [HostEndpoint.GET_BAD_LINES]: async (req) =>
               okReply(HostReply.BAD_LINES, req.requestId, data.getBadLines()),
+            // 导出子集：先由**宿主**弹保存对话框（webview 拿不到文件系统），
+            // 再把选定路径交给数据服务做「只读源 + 原子写新文件」。
+            // 取消对话框与取消写入都报 cancelled —— 与失败严格分开（目标文件从未被创建）。
+            [HostEndpoint.EXPORT_LINES]: async (req) => {
+              const suggested = path.join(
+                path.dirname(uri.fsPath),
+                `${path.basename(uri.fsPath, path.extname(uri.fsPath))}-subset.jsonl`
+              );
+              const picked = await vscode.window.showSaveDialog({
+                saveLabel: '导出',
+                filters: { JSONL: ['jsonl'], 所有文件: ['*'] },
+                defaultUri: vscode.Uri.file(suggested),
+              });
+              if (!picked) {
+                return okReply(HostReply.EXPORT_RESULT, req.requestId, {
+                  ok: false,
+                  count: 0,
+                  bytes: 0,
+                  skipped: 0,
+                  cancelled: true,
+                });
+              }
+              const result = await (async () => {
+                try {
+                  return await data.exportLines(req.lines, picked.fsPath, {
+                    onProgress: (info) =>
+                      post({
+                        type: HostReply.EDIT_PROGRESS,
+                        payload: { kind: 'export', ...info },
+                      }),
+                    shouldCancel: () => cancel.has(req.requestId),
+                  });
+                } finally {
+                  // 与其它可取消端点同一纪律：收尾必定摘除标记，避免 cancel 集合无界增长。
+                  cancel.delete(req.requestId);
+                }
+              })();
+              if (result.ok) {
+                void vscode.window.showInformationMessage(
+                  `已导出 ${result.count} 条记录到 ${picked.fsPath}`
+                );
+              }
+              return okReply(HostReply.EXPORT_RESULT, req.requestId, result);
+            },
             // 全文件扫描坏行：耗时只读操作，推进度并支持取消。
             // 取消时宿主**不**替换已发现集合（半份结果比没有结果更容易误导）。
             [HostEndpoint.SCAN_BAD_LINES]: async (req) => {
@@ -569,6 +624,9 @@ function registerHostHandlers(deps: HostHandlerDeps): vscode.Disposable {
                 try {
                   return await data.replaceText(req.query, req.replacement, {
                     caseInsensitive: req.caseInsensitive,
+                    ...(req.expectedTotalLines != null
+                      ? { expectedTotalLines: req.expectedTotalLines }
+                      : {}),
                     // 全文件重写可能持续数秒，把节流后的进度推给 webview 显示可取消的进度条。
                     onProgress: (info) =>
                       post({
@@ -594,6 +652,9 @@ function registerHostHandlers(deps: HostHandlerDeps): vscode.Disposable {
               const result = await (async () => {
                 try {
                   return await data.replaceField(req.path, req.from, req.to, {
+                    ...(req.expectedTotalLines != null
+                      ? { expectedTotalLines: req.expectedTotalLines }
+                      : {}),
                     // 扫描与重写两阶段共用此进度通道，前端按 kind 区分文案。
                     onProgress: (info) =>
                       post({
@@ -625,6 +686,9 @@ function registerHostHandlers(deps: HostHandlerDeps): vscode.Disposable {
               const result = await (async () => {
                 try {
                   return await data.deleteRecords(req.lines, {
+                    ...(req.expectedTotalLines != null
+                      ? { expectedTotalLines: req.expectedTotalLines }
+                      : {}),
                     onProgress: (info) =>
                       post({
                         type: HostReply.EDIT_PROGRESS,
