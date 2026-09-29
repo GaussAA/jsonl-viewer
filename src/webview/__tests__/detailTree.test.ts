@@ -348,4 +348,107 @@ describe('createDetailTree（视图层覆盖率补强）', () => {
     const groups = globalThis.document.querySelectorAll('.jlv-tree-node[role="group"]');
     assert.ok(groups.length > 0, '节点容器应带 role=group');
   });
+  it('F1：Ctrl+F 打开查找条，输入即高亮并给出计数，Esc 关闭后撤掉', () => {
+    const doc = globalThis.document;
+    const h = makeTree();
+    // 默认只展开第 1 层：故用两个**顶层**键命中同一查找词，才好验证「上下条」。
+    h.tree.showRecord({ name: 'alpha', nickname: 'beta' }, 0);
+
+    const bar = (): HTMLElement => h.tree.root.querySelector<HTMLElement>('.jlv-find')!;
+    const input = (): HTMLInputElement =>
+      h.tree.root.querySelector<HTMLInputElement>('.jlv-find-input')!;
+    const count = (): HTMLElement => h.tree.root.querySelector<HTMLElement>('.jlv-find-count')!;
+    assert.strictEqual(bar().hidden, true, '前置：查找条隐藏');
+    assert.strictEqual(h.tree.isFindOpen(), false);
+
+    // Ctrl+F：焦点在详情内时打开
+    h.tree.root.dispatchEvent(
+      new (
+        globalThis as unknown as {
+          window: { KeyboardEvent: new (t: string, o?: unknown) => Event };
+        }
+      ).window.KeyboardEvent('keydown', { key: 'f', ctrlKey: true, bubbles: true })
+    );
+    assert.strictEqual(h.tree.isFindOpen(), true, 'Ctrl+F 应打开查找条');
+    assert.strictEqual(doc.activeElement, input(), '焦点移入输入框');
+
+    input().value = 'name';
+    input().dispatchEvent(
+      new (globalThis as unknown as { window: { Event: new (t: string) => Event } }).window.Event(
+        'input'
+      )
+    );
+    const marks = h.tree.root.querySelectorAll('mark.jlv-hit');
+    assert.strictEqual(marks.length, 2, `name / nickname 两个键名都命中，实得 ${marks.length}`);
+    assert.ok(
+      /^1\/\d+$/.test(count().textContent ?? ''),
+      `计数形如 1/N，实得 ${count().textContent}`
+    );
+
+    // Enter 切到下一个命中：当前标记随之移动（「3/17」得能看出在看哪一处）
+    input().dispatchEvent(
+      new (
+        globalThis as unknown as {
+          window: { KeyboardEvent: new (t: string, o?: unknown) => Event };
+        }
+      ).window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true })
+    );
+    assert.ok(
+      /^2\/\d+$/.test(count().textContent ?? ''),
+      `Enter 后应为 2/N，实得 ${count().textContent}`
+    );
+
+    // Esc 关闭：高亮与计数一并撤掉
+    input().dispatchEvent(
+      new (
+        globalThis as unknown as {
+          window: { KeyboardEvent: new (t: string, o?: unknown) => Event };
+        }
+      ).window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true })
+    );
+    assert.strictEqual(h.tree.isFindOpen(), false);
+    assert.strictEqual(h.tree.root.querySelectorAll('mark.jlv-hit').length, 0, '高亮已撤');
+    assert.strictEqual(count().textContent, '');
+  });
+
+  it('F1：查找高亮在展开/折叠后仍在（重渲染会重建行，必须重新套用）', () => {
+    const h = makeTree();
+    h.tree.showRecord({ alpha: 1, beta: { alpha: 2 } }, 0);
+    h.tree.showFind();
+
+    const input = h.tree.root.querySelector<HTMLInputElement>('.jlv-find-input')!;
+    input.value = 'alpha';
+    input.dispatchEvent(
+      new (globalThis as unknown as { window: { Event: new (t: string) => Event } }).window.Event(
+        'input'
+      )
+    );
+    const hitsBefore = h.tree.root.querySelectorAll('mark.jlv-hit').length;
+    assert.ok(hitsBefore > 0, '已高亮');
+
+    // 触发一次重渲染（切换展开模式 → render()）
+    const expand = h.tree.root.querySelector<HTMLButtonElement>('[data-act="expandToggle"]')!;
+    expand.click();
+    assert.ok(
+      h.tree.root.querySelectorAll('mark.jlv-hit').length > 0,
+      '重渲染后高亮必须还在（否则用户一展开就「查找结果全没了」）'
+    );
+  });
+
+  it('F1：查找词为空或无命中时，计数如实显示（不谎报有命中）', () => {
+    const h = makeTree();
+    h.tree.showRecord({ a: 1 }, 0);
+    h.tree.showFind();
+    const input = h.tree.root.querySelector<HTMLInputElement>('.jlv-find-input')!;
+    const count = h.tree.root.querySelector<HTMLElement>('.jlv-find-count')!;
+
+    input.value = 'zzzz-not-present';
+    input.dispatchEvent(
+      new (globalThis as unknown as { window: { Event: new (t: string) => Event } }).window.Event(
+        'input'
+      )
+    );
+    assert.strictEqual(count.textContent, '无命中');
+    assert.strictEqual(h.tree.root.querySelectorAll('mark.jlv-hit').length, 0);
+  });
 });

@@ -71,6 +71,19 @@ export function setupWebviewDom(): FakeHost {
   (window as unknown as { matchMedia: unknown }).matchMedia = matchMedia;
   g.matchMedia = matchMedia;
 
+  // scrollIntoView（jsdom 未实现）→ no-op 桩。
+  //
+  // 视图层的「跳到命中的那一条」「把选中项滚进视野」都会调它；jsdom 没有布局引擎，
+  // 真滚也滚不动，但**不能没有这个方法** —— 否则调用处会抛 TypeError，
+  // 表现为「某个交互一用就静默失效」（事件回调里的异常不会让断言失败，只会让状态停在半路）。
+  const scrollIntoViewStub = function scrollIntoView(): void {};
+  const proto = window.Element?.prototype as unknown as Record<string, unknown> | undefined;
+  if (proto) {
+    proto.scrollIntoView = scrollIntoViewStub;
+    // scrollTo / scrollBy 同理（列表滚动复位会用到）。
+    if (typeof proto.scrollTo !== 'function') proto.scrollTo = function scrollTo(): void {};
+  }
+
   // ResizeObserver（jsdom 未实现）→ no-op 桩
   class ResizeObserverStub {
     observe(): void {}

@@ -332,6 +332,13 @@ body {
   font-size: 9px; font-family: var(--jlv-mono);
   color: var(--jlv-info); background: color-mix(in srgb, var(--jlv-info) 15%, transparent);
 }
+
+/* 查询失败态：与「有结果」「0 匹配」在视觉上必须可分 ——
+   失败是「这次没跑成功」，不是「文件里没有」，用户据此做的后续判断完全不同。 */
+.jlv-search-count.error {
+  color: var(--jlv-error, #f87171);
+  font-weight: 600;
+}
 .jlv-nav-btn {
   flex: none; width: 22px; height: 22px;
   display: inline-flex; align-items: center; justify-content: center;
@@ -473,7 +480,66 @@ body {
     0 0 18px color-mix(in srgb, var(--jlv-info) 42%, transparent);
 }
 /* 保留各 token 的语义色，但整体提亮，让选中项在亮蓝底上更醒目 */
-.jlv-record-card.selected .jlv-card-preview { color: #ffffff; filter: brightness(1.35); }
+.jlv-record-card.selected /* 详情内查找条（Ctrl+F）：只在需要时占据一条窄栏 */
+.jlv-find {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--jlv-border, rgba(128, 128, 128, 0.18));
+  background: var(--jlv-surface-2, rgba(128, 128, 128, 0.06));
+}
+.jlv-find-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 4px 8px;
+  border: 1px solid var(--jlv-border, rgba(128, 128, 128, 0.28));
+  border-radius: 5px;
+  background: var(--jlv-input-bg, transparent);
+  color: inherit;
+  font: inherit;
+}
+.jlv-find-count {
+  flex: 0 0 auto;
+  min-width: 42px;
+  text-align: right;
+  opacity: 0.72;
+  font-variant-numeric: tabular-nums;
+}
+.jlv-find-btn {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  border: 1px solid var(--jlv-border, rgba(128, 128, 128, 0.28));
+  border-radius: 5px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  line-height: 1;
+}
+.jlv-find-btn:hover {
+  background: rgba(128, 128, 128, 0.16);
+}
+/* 当前跳到的命中：比其余命中更醒目（否则「3/17」看不出是在看哪一处） */
+mark.jlv-hit.active {
+  background: rgba(249, 115, 22, 0.55);
+  outline: 1px solid rgba(249, 115, 22, 0.8);
+}
+
+/* 命中高亮：卡片预览与详情树共用同一个标记元素（.jlv-hit）。
+   用半透明黄底 + 继承文字色 —— 纯色字（如亮黄）在浅底与深底上总有一边看不清。 */
+.jlv-hit,
+mark.jlv-hit {
+  background: rgba(250, 204, 21, 0.32);
+  color: inherit;
+  border-radius: 2px;
+  padding: 0 1px;
+}
+.jlv-record-card.selected .jlv-hit {
+  background: rgba(250, 204, 21, 0.5);
+}
+
+.jlv-card-preview { color: #ffffff; filter: brightness(1.35); }
 .jlv-record-card.selected .jlv-card-preview .str { color: var(--jlv-string); }
 .jlv-record-card.selected .jlv-card-preview .num { color: var(--jlv-number); }
 .jlv-record-card.selected .jlv-card-preview .bool { color: var(--jlv-bool); }

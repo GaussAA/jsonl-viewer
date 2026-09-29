@@ -216,6 +216,26 @@ describe('createToolbar（视图层覆盖率补强）', () => {
     assert.strictEqual(doc.activeElement, filterBtn, '关闭后焦点归还原按钮');
   });
 
+  it('O11：setQueryError 显示失败文案与 error 类，且不冒充「0 匹配」', () => {
+    const h = makeToolbar();
+    const count = h.tb.root.querySelector<HTMLElement>('.jlv-search-count')!;
+
+    h.tb.setQueryError('搜索失败（可重试）');
+    assert.strictEqual(count.hidden, false, '失败文案可见');
+    assert.match(count.textContent ?? '', /搜索失败/, '显示失败而非计数');
+    assert.ok(count.classList.contains('error'), '带 error 类（视觉上可与计数区分）');
+
+    // 有真实结果时撤掉失败态并回到计数
+    h.tb.setSearchResult(7, 0);
+    assert.ok(!count.classList.contains('error'), '失败态已撤');
+    assert.match(count.textContent ?? '', /1\/7/);
+
+    // 「0 匹配」是**真实结论**，必须与失败态分开表达
+    h.tb.setSearchResult(0, 0);
+    assert.strictEqual(count.hidden, true, '无命中时隐藏计数区');
+    assert.ok(!count.classList.contains('error'));
+  });
+
   it('setFilterTruncated：控制「过滤结果被截断」提示的显隐', () => {
     const h = makeToolbar();
     const note = h.tb.root.querySelector<HTMLElement>('.jlv-filter-note');

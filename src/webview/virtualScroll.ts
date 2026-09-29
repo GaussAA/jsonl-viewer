@@ -11,7 +11,8 @@
 
 import type { FieldLike } from './logic.ts';
 import { parseJumpTarget } from './logic.ts';
-import { escapeHtml } from './utils.ts';
+import { findRanges } from '../core/query.ts';
+import { renderHighlight } from './utils.ts';
 
 /** 目录每页固定条数。 */
 export const PAGE_SIZE = 20;
@@ -121,6 +122,13 @@ export class VirtualRecordList {
    * 不记住草稿的话，用户敲到一半的输入会被重建冲掉 —— 表现为「输页码输不进去」。
    */
   private jumpDraft: string | undefined;
+  /**
+   * 当前生效的搜索词（用于卡片预览命中高亮）。
+   *
+   * 为何由外部注入而非列表自查：搜索状态的唯一来源在 queryActions，
+   * 列表只负责「按给定的词把命中标出来」——注入式让两处不会各自演进。
+   */
+  private searchNeedle: string | null = null;
   readonly pageSize: number;
   private disposed = false;
   /** 换页动画序号：防止快速连点时旧 setTimeout 覆盖新渲染。 */
@@ -233,6 +241,19 @@ export class VirtualRecordList {
 
   getScrollTop(): number {
     return this.scrollEl.scrollTop;
+  }
+
+  /**
+   * 设置用于卡片预览高亮的搜索词（null = 清除高亮）。
+   *
+   * 只影响**已渲染**的卡片：列表不会为高亮去预取数据 —— 那等于把「内存与可视区成正比」
+   * 这一核心约束换成「为了标几个字把整文件读一遍」。
+   */
+  setSearchNeedle(needle: string | null): void {
+    const next = needle && needle.length > 0 ? needle : null;
+    if (next === this.searchNeedle) return;
+    this.searchNeedle = next;
+    this.refresh();
   }
 
   select(line: number): void {
@@ -548,14 +569,22 @@ export class VirtualRecordList {
           : this.cb.summarize && entry.value !== undefined
             ? this.cb.summarize(entry.value)
             : [];
-      preview.innerHTML = items
-        .slice(0, 3)
-        .map((it) => {
-          const cls = previewKind(it.display);
-          const val = it.display.length > 40 ? `${it.display.slice(0, 40)}…` : it.display;
-          return `<span class="key">${escapeHtml(it.key)}</span>: <span class="${cls}">${escapeHtml(val)}</span>`;
-        })
-        .join(' · ');
+      // 逐段构建 DOM（不再拼 innerHTML）：既让命中片段能以 <mark> 呈现，
+      // 也让用户数据彻底不进 HTML 解析器（用户数据 → 文本节点，恒定安全）。
+      const needle = this.searchNeedle;
+      items.slice(0, 3).forEach((it, idx) => {
+        if (idx > 0) preview.appendChild(document.createTextNode(' · '));
+        const keyEl = document.createElement('span');
+        keyEl.className = 'key';
+        keyEl.textContent = it.key;
+        preview.appendChild(keyEl);
+        preview.appendChild(document.createTextNode(': '));
+        const valEl = document.createElement('span');
+        valEl.className = previewKind(it.display);
+        const val = it.display.length > 40 ? `${it.display.slice(0, 40)}…` : it.display;
+        renderHighlight(valEl, val, needle ? findRanges(val, needle) : []);
+        preview.appendChild(valEl);
+      });
     }
     card.appendChild(preview);
 
@@ -911,8 +940,6 @@ function previewKind(display: string): string {
   if (display === 'true' || display === 'false') return 'bool';
   return 'str';
 }
-
-/* escapeHtml 已提取到 utils.ts */
 
 /* ------------------- 复制行号 ------------------- */
 

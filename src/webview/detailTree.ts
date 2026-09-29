@@ -26,6 +26,8 @@ import {
 } from './detailLogic.ts';
 import type { PathSeg } from './detailLogic.ts';
 import { isFieldEditableKind, parseFieldInput } from './editLogic.ts';
+import { findRanges } from '../core/query.ts';
+import { renderHighlight } from './utils.ts';
 
 /** 挂在 `.jlv-tree-node` 上的懒展开元数据（替代散落的 as unknown as 链式断言）。 */
 interface TreeNodeMeta {
@@ -96,6 +98,12 @@ export interface DetailTreeController {
   clear(): void;
   /** 设置上一条/下一条按钮的启用状态。 */
   setNavEnabled(prev: boolean, next: boolean): void;
+  /** 打开「本条记录内查找」条并聚焦输入框（Ctrl+F / 工具按钮）。 */
+  showFind(): void;
+  /** 关闭查找条并撤掉高亮。 */
+  hideFind(): void;
+  /** 查找条是否打开（装配层用于 Esc 分层处理）。 */
+  isFindOpen(): boolean;
   /** 释放监听器。 */
   dispose(): void;
 }
@@ -195,6 +203,15 @@ export function createDetailTree(
   btnNextRecord.appendChild(icon('', ICON_NEXT));
   btnNextRecord.addEventListener('click', () => navHandlers.onNextRecord?.());
 
+  const btnFind = document.createElement('button');
+  btnFind.type = 'button';
+  btnFind.className = 'jlv-dh-tool';
+  btnFind.title = '在本条记录内查找（Ctrl+F）';
+  btnFind.setAttribute('aria-label', '在本条记录内查找');
+  btnFind.dataset.act = 'find';
+  btnFind.appendChild(icon('', ICON_SEARCH));
+  btnFind.addEventListener('click', () => showFind());
+
   const btnCopy = document.createElement('button');
   btnCopy.type = 'button';
   btnCopy.className = 'jlv-dh-tool';
@@ -211,7 +228,7 @@ export function createDetailTree(
   btnEdit.appendChild(icon('', ICON_EDIT));
   btnEdit.addEventListener('click', () => navHandlers.onEdit?.());
 
-  tools.append(btnExpandAll, btnPrevRecord, btnNextRecord, btnEdit, btnCopy);
+  tools.append(btnExpandAll, btnPrevRecord, btnNextRecord, btnFind, btnEdit, btnCopy);
   header.append(dhLeft, tools);
 
   /* 树体 */
@@ -221,6 +238,38 @@ export function createDetailTree(
   body.setAttribute('aria-label', 'JSON 内容');
 
   card.append(header, body);
+  root.appendChild(card);
+  host.appendChild(root);
+
+  /* ---------------- 详情内查找（Ctrl+F） ----------------
+     只对**已渲染**的节点做匹配与高亮：这既是最有用的范围（用户正在看的这段），
+     也避免「为查找把整条记录展开」——大记录一展开就是几万个节点。 */
+  const findBar = document.createElement('div');
+  findBar.className = 'jlv-find';
+  findBar.hidden = true;
+  const findInput = document.createElement('input');
+  findInput.type = 'text';
+  findInput.className = 'jlv-find-input';
+  findInput.placeholder = '本条记录内查找（仅已展开部分）';
+  findInput.setAttribute('aria-label', '在本条记录内查找');
+  const findCount = document.createElement('span');
+  findCount.className = 'jlv-find-count';
+  findCount.setAttribute('aria-live', 'polite');
+  const mkFindBtn = (label: string, title: string, act: string): HTMLButtonElement => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'jlv-find-btn';
+    b.textContent = label;
+    b.title = title;
+    b.setAttribute('aria-label', title);
+    b.dataset.act = act;
+    return b;
+  };
+  const btnFindPrev = mkFindBtn('↑', '上一个命中（Shift+Enter）', 'findPrev');
+  const btnFindNext = mkFindBtn('↓', '下一个命中（Enter）', 'findNext');
+  const btnFindClose = mkFindBtn('✕', '关闭查找（Esc）', 'findClose');
+  findBar.append(findInput, findCount, btnFindPrev, btnFindNext, btnFindClose);
+  card.append(header, findBar, body);
   root.appendChild(card);
   host.appendChild(root);
 
@@ -322,6 +371,9 @@ export function createDetailTree(
     if (disposed) return;
     renderBreadcrumb();
     renderBody();
+    // 重建会丢掉所有 <mark>：展开/折叠/加载更多之后必须重新套用，
+    // 否则用户点一次「展开」查找高亮就整体消失了。
+    if (findNeedle) applyFind();
   }
 
   function renderBreadcrumb(): void {
@@ -824,6 +876,111 @@ export function createDetailTree(
     });
   }
 
+  /* ---------------- 查找：应用 / 计数 / 跳转 ---------------- */
+
+  /** 当前查找词（空串 = 不高亮）。 */
+  let findNeedle = '';
+  /** 已跳转到的命中序号（用于「3/17」与上下条）。 */
+  let findCursor = 0;
+
+  /**
+   * 把查找高亮应用到**已渲染**的行。
+   *
+   * 原文存在元素的 dataset 里而不是从 DOM 反解：高亮会把文本节点换成 text + <mark> 的组合，
+   * 没有原文这一层，第二次匹配就会在「已被切碎的上一次结果」上做，越搜越乱。
+   */
+  function applyFind(): void {
+    for (const row of Array.from(body.querySelectorAll<HTMLElement>('.jlv-tree-row'))) {
+      for (const sel of ['.jlv-key', '.jlv-value']) {
+        const el = row.querySelector<HTMLElement>(sel);
+        if (!el) continue;
+        if (el.dataset.findOrig === undefined) el.dataset.findOrig = el.textContent ?? '';
+        const text = el.dataset.findOrig;
+        renderHighlight(el, text, findNeedle ? findRanges(text, findNeedle) : []);
+      }
+    }
+    // 上一次的「当前命中」标记已随重渲染失效，游标一并收敛。
+    const hits = findHits();
+    if (findCursor >= hits.length) findCursor = 0;
+    markActiveHit(hits);
+    updateFindCount(hits.length);
+  }
+
+  function findHits(): HTMLElement[] {
+    return Array.from(body.querySelectorAll<HTMLElement>('mark.jlv-hit'));
+  }
+
+  function markActiveHit(hits: HTMLElement[]): void {
+    for (const [i, el] of hits.entries()) el.classList.toggle('active', i === findCursor);
+  }
+
+  function updateFindCount(total: number): void {
+    if (!findNeedle) {
+      findCount.textContent = '';
+      return;
+    }
+    findCount.textContent = total === 0 ? '无命中' : `${findCursor + 1}/${total}`;
+  }
+
+  /** 跳转到下一个/上一个命中（环形）。命中可能在折叠的子树里 —— 那时它根本没渲染，
+   *  故不做「自动展开去找」：那等于替用户做了「展开到哪一层」的决定。 */
+  function stepFind(dir: 1 | -1): void {
+    const hits = findHits();
+    if (hits.length === 0) return;
+    findCursor = (findCursor + dir + hits.length) % hits.length;
+    markActiveHit(hits);
+    hits[findCursor].scrollIntoView({ block: 'center' });
+    updateFindCount(hits.length);
+  }
+
+  function showFind(): void {
+    findBar.hidden = false;
+    findInput.focus();
+    findInput.select();
+    applyFind();
+  }
+
+  function hideFind(): void {
+    findBar.hidden = true;
+    findNeedle = '';
+    findInput.value = '';
+    findCursor = 0;
+    applyFind(); // 撤掉所有高亮
+  }
+
+  findInput.addEventListener('input', () => {
+    findNeedle = findInput.value.trim();
+    findCursor = 0;
+    applyFind();
+    // 输入即定位到首个命中：搜索框里的实时反馈比「按了 Enter 才跳」更贴近预期。
+    if (findNeedle && findHits().length > 0) {
+      findHits()[0].scrollIntoView({ block: 'center' });
+    }
+  });
+  findInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      e.stopPropagation();
+      hideFind();
+      return;
+    }
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      stepFind(e.shiftKey ? -1 : 1);
+    }
+  });
+  btnFindPrev.addEventListener('click', () => stepFind(-1));
+  btnFindNext.addEventListener('click', () => stepFind(1));
+  btnFindClose.addEventListener('click', () => hideFind());
+
+  // Ctrl/Cmd+F：在详情面板内打开查找（焦点在详情里时生效）。
+  // 不用 document 级监听：那会与列表/工具栏的快捷键抢同一组按键。
+  root.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && (e.key === 'f' || e.key === 'F')) {
+      e.preventDefault();
+      showFind();
+    }
+  });
+
   /* ---------------- 公开 API ---------------- */
 
   const controller: DetailTreeController = {
@@ -881,6 +1038,9 @@ export function createDetailTree(
       selectedSegs = [];
       render();
     },
+    showFind,
+    hideFind,
+    isFindOpen: () => !findBar.hidden,
     setNavEnabled(prev, next) {
       btnPrevRecord.disabled = !prev;
       btnNextRecord.disabled = !next;
@@ -938,6 +1098,8 @@ const ICON_NEXT =
   '<svg width="12" height="12" viewBox="0 0 16 16"><path d="M6 3l5 5-5 5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 const ICON_COPY =
   '<svg width="12" height="12" viewBox="0 0 16 16"><rect x="5" y="5" width="8" height="9" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M11 2.5H4.5A1.5 1.5 0 0 0 3 4v7.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>';
+const ICON_SEARCH =
+  '<svg width="12" height="12" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.2" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M10.2 10.2L14 14" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>';
 const ICON_EDIT =
   '<svg width="12" height="12" viewBox="0 0 16 16"><path d="M11.2 2.3a1.6 1.6 0 0 1 2.3 2.3L5.9 12.2l-3 .8.8-3z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>';
 

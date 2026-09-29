@@ -344,6 +344,39 @@ describe('VirtualRecordList（视图层覆盖率补强）', () => {
     assert.strictEqual(list.getPageInfo().page, pageBefore, '越界记录号不跳转');
   });
 
+  it('F1：setSearchNeedle 后卡片预览标出命中，清除后撤掉', () => {
+    const { list, loaded } = makeList();
+    list.setTotalRows(3);
+    loaded.add(0);
+    loaded.add(1);
+    list.refresh();
+
+    const marks = (): NodeListOf<HTMLElement> =>
+      globalThis.document.querySelectorAll<HTMLElement>('.jlv-card-preview mark.jlv-hit');
+    assert.strictEqual(marks().length, 0, '前置：未搜索时无高亮');
+
+    list.setSearchNeedle('1'); // 三条记录的 id 分别是 0/1/2 → 命中的是 id=1
+    assert.ok(marks().length > 0, '搜索词注入后应出现命中标记');
+    assert.ok(
+      Array.from(marks()).every((m) => m.textContent === '1'),
+      '标记内容即命中片段本身'
+    );
+
+    list.setSearchNeedle(null);
+    assert.strictEqual(marks().length, 0, '清除搜索词后高亮一并撤掉');
+  });
+
+  it('F1：高亮用的搜索词来自用户数据 —— 只成为文本，不成为 HTML', () => {
+    const { list, loaded } = makeList();
+    list.setTotalRows(1);
+    loaded.add(0);
+    list.refresh();
+
+    list.setSearchNeedle('<b>');
+    const preview = globalThis.document.querySelector('.jlv-card-preview')!;
+    assert.strictEqual(preview.querySelector('b'), null, '不得解析出标签');
+  });
+
   it('可访问性：菜单键 / Shift+F10 打开与鼠标一致的右键菜单（O13）', () => {
     const { list } = makeList();
     list.setTotalRows(100);

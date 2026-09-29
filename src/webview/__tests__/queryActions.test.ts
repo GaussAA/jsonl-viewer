@@ -29,12 +29,15 @@ interface Harness {
     requests: string[];
     select: number[];
     scrollToLine: number[];
+    /** 命中高亮词（null = 清除）。 */
+    needles: (string | null)[];
     translations: (number[] | null)[];
     refresh: number;
     searchResult: [number, number][];
     filterTruncated: boolean[];
     layouts: FieldLayout[];
     detail: number[];
+    queryErrors: (string | null)[];
     nav: number;
     persist: number;
   };
@@ -50,12 +53,14 @@ function makeHarness(): Harness {
     requests: [],
     select: [],
     scrollToLine: [],
+    needles: [],
     translations: [],
     refresh: 0,
     searchResult: [],
     filterTruncated: [],
     layouts: [],
     detail: [],
+    queryErrors: [],
     nav: 0,
     persist: 0,
   };
@@ -97,6 +102,9 @@ function makeHarness(): Harness {
     scrollToLine(l: number) {
       calls.scrollToLine.push(l);
     },
+    setSearchNeedle(n: string | null) {
+      calls.needles.push(n);
+    },
     setTranslation(m: number[] | null) {
       calls.translations.push(m);
     },
@@ -108,6 +116,10 @@ function makeHarness(): Harness {
   const toolbar = {
     setSearchResult(t: number, i: number) {
       calls.searchResult.push([t, i]);
+    },
+    /** 失败态文案（null = 清除）。失败若冒充「0 匹配」，用户会误判文件里没有该词。 */
+    setQueryError(m: string | null) {
+      calls.queryErrors.push(m);
     },
     setFilterTruncated(t: boolean) {
       calls.filterTruncated.push(t);
@@ -216,7 +228,7 @@ describe('createQueryActions（T5 #31 抽取回归）', () => {
     assert.strictEqual(h.state.searchTruncated, true, '超出部分标记截断');
   });
 
-  it('runSearch：请求失败—复位在途标记与工具栏，不抛错', async () => {
+  it('runSearch：请求失败—复位在途标记并显示失败态（而不是冒充 0 匹配）', async () => {
     const h = makeHarness();
     const actions = createQueryActions(h.deps);
 
@@ -226,7 +238,24 @@ describe('createQueryActions（T5 #31 抽取回归）', () => {
     await flush();
 
     assert.strictEqual(h.state.searchInFlight, null, '在途标记清空');
-    assert.deepStrictEqual(h.calls.searchResult, [[0, 0]], '工具栏复位');
+    // 关键：失败**不得**汇报成「0 匹配」——那会让用户以为文件里没有这个词。
+    assert.deepStrictEqual(h.calls.searchResult, [], '不得把失败当成计数 0');
+    assert.deepStrictEqual(h.calls.queryErrors, ['搜索失败（可重试）'], '给出可行动的失败文案');
+  });
+
+  it('runSearch：成功后清除失败态（失败提示不残留）', async () => {
+    const h = makeHarness();
+    const actions = createQueryActions(h.deps);
+
+    actions.runSearch('x');
+    h.rejectLast();
+    await flush();
+    assert.strictEqual(h.calls.queryErrors.at(-1), '搜索失败（可重试）');
+
+    actions.runSearch('x');
+    h.resolveLast({ matches: [3], total: 1, truncated: false });
+    await flush();
+    assert.strictEqual(h.calls.queryErrors.at(-1), null, '有结果即撤掉失败态');
   });
 
   it('stepSearch：±1 导航按 nextMatchIndex/prevMatchIndex 计算并跳转', () => {

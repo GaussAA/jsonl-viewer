@@ -121,3 +121,54 @@ export function matchesFilter(value: unknown, cond: FieldCondition): boolean {
 export function isEmptyCondition(cond: FieldCondition | null | undefined): boolean {
   return !cond || !cond.field || !cond.op;
 }
+
+/* --------------------- 命中区间（高亮的单一来源） --------------------- */
+
+/**
+ * 在文本中找出 `needle` 的全部**非重叠**出现区间（左到右）。
+ *
+ * 为何放在 core：宿主侧的搜索语义（字面量、非重叠、大小写不敏感只折 ASCII A–Z）
+ * 与前端高亮必须一致 —— 两处各写一份匹配逻辑，早晚会出现「搜索说命中、高亮标不出来」
+ * 这类自相矛盾的界面。返回的是 `[start, end)` 区间数组，供调用方自己决定怎么呈现。
+ *
+ * 边界：needle 为空返回空数组（空串会匹配每个位置，那不是搜索而是灾难）；
+ * 大小写不敏感时**只折叠 ASCII A–Z**（与 searchEngine 的 Buffer 折叠口径一致，
+ * 避免 `toLowerCase()` 改写多字节序列）。
+ */
+export function findRanges(
+  text: string,
+  needle: string,
+  caseInsensitive = true
+): [number, number][] {
+  if (!needle) return [];
+  const haystack = caseInsensitive ? foldAsciiLowerStr(text) : text;
+  const target = caseInsensitive ? foldAsciiLowerStr(needle) : needle;
+  const out: [number, number][] = [];
+  let from = 0;
+  for (;;) {
+    const at = haystack.indexOf(target, from);
+    if (at < 0) break;
+    out.push([at, at + target.length]);
+    from = at + target.length; // 非重叠推进（与搜索一致）
+  }
+  return out;
+}
+
+/** 只把 ASCII A–Z 折叠成小写，其余字符原样（长度不变，索引与原文一一对应）。 */
+function foldAsciiLowerStr(s: string): string {
+  let changed = false;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c >= 65 && c <= 90) {
+      changed = true;
+      break;
+    }
+  }
+  if (!changed) return s;
+  let out = '';
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    out += c >= 65 && c <= 90 ? String.fromCharCode(c + 32) : s[i];
+  }
+  return out;
+}

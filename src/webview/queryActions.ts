@@ -97,6 +97,8 @@ export function createQueryActions(deps: QueryActionsDeps): QueryActions {
       state.searchMatches = [];
       state.searchTruncated = false;
       deps.getToolbar().setSearchResult(0, 0);
+      // 清空搜索 → 同时清掉卡片上的命中高亮（否则会留下一个「已经不存在」的标记）。
+      deps.getList().setSearchNeedle(null);
       deps.schedulePersist();
       return;
     }
@@ -119,6 +121,10 @@ export function createQueryActions(deps: QueryActionsDeps): QueryActions {
         state.searchMatches = (res?.matches ?? []).slice(0, SEARCH_LIMIT);
         state.searchTruncated = !!res?.truncated || (res?.total ?? 0) > state.searchMatches.length;
         const toolbar = deps.getToolbar();
+        deps.getToolbar().setQueryError(null); // 有结果了 → 撤掉失败态
+        // 命中高亮：把搜索词交给列表，由它把**已渲染卡片**里的命中片段标出来。
+        // 只标已渲染的（不为高亮预取数据）——「为什么这行算命中」通常一眼就能看清那几行。
+        deps.getList().setSearchNeedle(q);
         if (state.searchMatches.length > 0) {
           toolbar.setSearchResult(state.searchMatches.length, 0);
           jumpToMatch(state.searchMatches[0]);
@@ -128,7 +134,8 @@ export function createQueryActions(deps: QueryActionsDeps): QueryActions {
       })
       .catch(() => {
         if (state.searchInFlight?.rid === requestId) state.searchInFlight = null;
-        deps.getToolbar().setSearchResult(0, 0);
+        // 失败 ≠ 没有命中：显示 0 会让用户以为文件里真的没有这个词，从而做出错误判断。
+        deps.getToolbar().setQueryError('搜索失败（可重试）');
       });
   }
 
@@ -171,6 +178,7 @@ export function createQueryActions(deps: QueryActionsDeps): QueryActions {
         state.filterMap = matches && matches.length > 0 ? matches : [];
         const toolbar = deps.getToolbar();
         const list = deps.getList();
+        toolbar.setQueryError(null);
         // M7：宿主结果被截断时不再静默显示不全的匹配集。
         toolbar.setFilterTruncated(!!res?.truncated);
         // 保留滚动位置尽力：不清 scrollTop，直接重建翻译。
@@ -182,6 +190,8 @@ export function createQueryActions(deps: QueryActionsDeps): QueryActions {
       .catch(() => {
         if (state.filterInFlight?.rid === requestId) state.filterInFlight = null;
         deps.getToolbar().setFilterTruncated(false);
+        // 过滤失败时**保留旧 filterMap**（不把用户丢进空视图），但要如实说明这次没生效。
+        deps.getToolbar().setQueryError('过滤失败（可重试），仍显示上一次结果');
       });
   }
 

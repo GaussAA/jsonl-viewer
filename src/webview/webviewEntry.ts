@@ -36,7 +36,7 @@ import { createFieldEdit } from './fieldEdit.ts';
 import { createBadLinesOps } from './badLinesOps.ts';
 import { createPersistRestore } from './persistRestore.ts';
 import { createFocusTarget } from './focusTarget.ts';
-import { createVSCodeApi, RpcBus } from './rpc.ts';
+import { CancelledError, createVSCodeApi, RpcBus } from './rpc.ts';
 import { createAppState } from './appState.ts';
 import type { VSCodeApi } from './rpc.ts';
 import { summarizeWithLayout } from './queryLogic.ts';
@@ -801,8 +801,18 @@ export function main(): void {
       // 让用户滚动浏览时就能看见「原来这里有几行是坏的」。
       badLinesOps.scheduleRefresh();
       return true;
-    } catch {
-      // 被 supersede 取消或超时：忽略（已有更新的窗口请求接手），避免 unhandled rejection。
+    } catch (err) {
+      // 被 supersede 取消：静默（已有更新的窗口请求接手），且避免 unhandled rejection。
+      if (err instanceof CancelledError) return false;
+      // 真失败（超时 / 宿主内部错误）：**必须说话**。此前一律静默 → 卡片永远停在
+      // 「加载中…」，用户无法区分「还没读到」与「读挂了」，也没有任何重试入口。
+      banner.show(
+        `读取失败：${err instanceof Error ? err.message : String(err)}（可重试）`,
+        '重试',
+        () => {
+          list.refresh();
+        }
+      );
       return false;
     } finally {
       for (let i = 0; i < missing.count; i++) state.pending.delete(missing.start + i);

@@ -89,6 +89,13 @@ export function createToolbar(
   setLayout(layout: FieldLayout): void;
   setSearchResult(total: number, index: number): void;
   setFilterTruncated(truncated: boolean): void;
+  /**
+   * 查询失败态：非 null 时在计数位置显示失败文案。
+   *
+   * 为何必须有它：原先失败走的是 `setSearchResult(0, 0)` —— 与「真的没有命中」
+   * 在界面上完全同形。用户看到「0」只会认为文件里没有这个词，而不会想到「是请求挂了」。
+   */
+  setQueryError(message: string | null): void;
   /** 替换输入框（未展开时仍存在，只是不可见）。 */
   replaceInput(): HTMLInputElement;
   /** 展开 / 收起替换行；返回展开后的状态。 */
@@ -769,8 +776,26 @@ export function createToolbar(
     if (layoutPanel) applyLayoutToPanel(layout);
   };
 
+  const setQueryError = (message: string | null): void => {
+    if (message === null) {
+      matchInfo.classList.remove('error');
+      if (!matchInfo.dataset.count) matchInfo.hidden = true;
+      matchInfo.textContent = matchInfo.dataset.count ?? '';
+      return;
+    }
+    matchInfo.classList.add('error');
+    matchInfo.hidden = false;
+    matchInfo.textContent = message;
+    delete matchInfo.dataset.count;
+    prevBtn.disabled = true;
+    nextBtn.disabled = true;
+  };
+
   const setSearchResult = (total: number, index: number): void => {
+    // 一旦有真实计数，失败态即告结束（否则「0 匹配」会顶着一句错误文案）。
+    matchInfo.classList.remove('error');
     if (total <= 0) {
+      delete matchInfo.dataset.count;
       matchInfo.hidden = true;
       matchInfo.textContent = '';
       prevBtn.disabled = true;
@@ -782,6 +807,7 @@ export function createToolbar(
     nextBtn.disabled = false;
     const shown = Math.max(1, index + 1);
     matchInfo.textContent = `${shown}/${total}`;
+    matchInfo.dataset.count = matchInfo.textContent;
   };
 
   /** M7：过滤结果被宿主截断时显示提示。 */
@@ -799,6 +825,7 @@ export function createToolbar(
 
   return {
     root,
+    setQueryError,
     els,
     update,
     refresh: () => update({}),
