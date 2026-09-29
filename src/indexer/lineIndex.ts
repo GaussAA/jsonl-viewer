@@ -70,7 +70,10 @@ export interface LineRange {
 
 /** `scan` 选项。 */
 export interface ScanOpts {
-  /** 超长行阈值（字节）。超过即该行 yield error 而非无界拼接。默认 MAX_LINE_BYTES。 */
+  /**
+   * 超长行阈值（字节）。超过即该行 yield error 而非无界拼接；**该行仍只占一个行号**
+   * （须读到真正的换行才闭合）。默认 MAX_LINE_BYTES。
+   */
   maxLineBytes?: number;
 }
 
@@ -322,9 +325,13 @@ export class LineIndex implements LineIndexStats {
   /**
    * 顺序扫描 [fromLine, toLineExclusive) 的行，从最近检查点顺读、按 `\n` 推进。
    * 单次顺序 IO，供 readRecord / readBatch / search / filter 复用；yield 的
-   * `bytes` 为剥离行尾的 subarray（无拷贝）。超长行（无换行且长度 ≥
-   * `opts.maxLineBytes`；缺省 MAX_LINE_BYTES）以 `error` 标记 yield（不抛、
-   * 不中断遍历），保证调用方内存有界；补读以 totalBytes 为界，兼容内存/边界读取器。
+   * `bytes` 为剥离行尾的 subarray（无拷贝）。补读以 totalBytes 为界，兼容内存/边界读取器。
+   *
+   * **超长行**（已读满一块仍无换行，且累计 ≥ `opts.maxLineBytes`；缺省 MAX_LINE_BYTES）：
+   * 不把正文交给调用方（`bytes` 为空、带 `error` 标记），**但仍要读到真正的换行才算闭合**
+   * —— 整行只占**一个**行号。这一点是硬约束：构建阶段（`build`）按真实换行计数，
+   * 若这里把一条超长行按「读取块」切成 N 段各计一行，扫描给出的行号就会多于索引的，
+   * 其后每次读取都整体前移 —— 读到的是超长行的尾巴，**且不报错**。
    */
   async *scan(
     reader: ByteReader,
@@ -349,21 +356,78 @@ export class LineIndex implements LineIndexStats {
     const trimCR = (b: Buffer): Buffer =>
       b.length > 0 && b[b.length - 1] === 13 ? b.subarray(0, b.length - 1) : b;
 
+    // 超长行的**跳过态**：已确认这一行超阈值，但还没读到它的换行符。
+    // 期间只累计长度、不保留正文（内存有界），闭合成**一行**后才 cur++。
+    let skipping = false;
+    let skipStart = 0; // 该超长行的起始绝对偏移
+    const tooLarge = (len: number): string =>
+      `line too large: ${len} bytes exceeds maxLineBytes ${maxLineBytes}`;
+
     while (cur < to) {
       const nl = buf.indexOf(10);
-      if (nl === -1) {
-        // 当前累积行（无换行）已超阈值 → 超长行：计 1 行，报错（跳过段不 yield 正文）。
-        if (buf.length >= maxLineBytes) {
+
+      if (skipping) {
+        // 继续消费本行的剩余字节，直到了解它到底有多长。
+        const have = abs;
+        const remaining = this.totalBytes - have;
+        if (remaining <= 0) {
+          // 该超长行一直延伸到文件末尾：就此闭合为一行。
           if (cur >= from) {
             yield {
               line: cur,
-              start: abs,
-              end: abs + buf.length,
+              start: skipStart,
+              end: abs,
               bytes: EMPTY,
-              error: `line too large: ${buf.length} bytes exceeds maxLineBytes ${maxLineBytes}`,
+              error: tooLarge(abs - skipStart),
             };
           }
           cur++;
+          skipping = false;
+          break;
+        }
+        const more = await reader.readBytes(have, Math.min(SCAN_CHUNK_SIZE, remaining));
+        if (more.length === 0) {
+          // 读取器兜底 EOF（同 remaining<=0）。
+          if (cur >= from) {
+            yield {
+              line: cur,
+              start: skipStart,
+              end: abs,
+              bytes: EMPTY,
+              error: tooLarge(abs - skipStart),
+            };
+          }
+          cur++;
+          skipping = false;
+          break;
+        }
+        const at = more.indexOf(10);
+        if (at === -1) {
+          abs += more.length; // 整块丢弃（不拼接正文）
+          continue;
+        }
+        const lineEnd = abs + at + 1; // 含换行符
+        if (cur >= from) {
+          yield {
+            line: cur,
+            start: skipStart,
+            end: lineEnd,
+            bytes: EMPTY,
+            error: tooLarge(lineEnd - skipStart - 1),
+          };
+        }
+        cur++;
+        abs = lineEnd;
+        buf = more.subarray(at + 1); // 换行之后的残留属于下一行
+        skipping = false;
+        continue;
+      }
+
+      if (nl === -1) {
+        // 已读满一块仍无换行，且累计超阈值 → 进入跳过态（整行仍只占一个行号）。
+        if (buf.length >= maxLineBytes) {
+          skipping = true;
+          skipStart = abs;
           abs += buf.length;
           buf = EMPTY;
           continue;
