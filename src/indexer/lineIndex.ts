@@ -521,6 +521,52 @@ export class LineIndex implements LineIndexStats {
     );
   }
 
+  /**
+   * 批量「行数不变」的增量平移：**一次遍历**替代 N 次 `applyLineReplace`。
+   *
+   * 为何需要它：一次「全部替换」可能命中数万行，而每次 `applyLineReplace` 都要把
+   * 整份检查点数组 `map` 一遍并重建实例 —— 5 万命中 × 1 万检查点 ≈ 5×10⁸ 次操作，
+   * 宿主在这之后会明显卡顿。本方法把「每个检查点要加多少偏移」先累加成前缀，
+   * 再单次生成新数组：O(检查点 + 命中 log 命中)。
+   *
+   * 语义与逐个调用完全等价（含调用顺序无关：同一行的多次 delta 会累加），
+   * 未受影响的检查点按引用复用。
+   */
+  applyLineDeltas(deltas: readonly { line: number; delta: number }[]): LineIndex {
+    if (deltas.length === 0) return this;
+    // 行号 → 总偏移（同一行可能被多次命中）。
+    const byLine = new Map<number, number>();
+    let total = 0;
+    for (const d of deltas) {
+      if (!Number.isInteger(d.line) || d.line < 0 || d.line >= this.totalLines) {
+        throw new RangeError(`line out of range: ${d.line} (totalLines=${this.totalLines})`);
+      }
+      if (!Number.isInteger(d.delta)) {
+        throw new TypeError(`delta must be an integer, got ${d.delta}`);
+      }
+      if (d.delta === 0) continue;
+      byLine.set(d.line, (byLine.get(d.line) ?? 0) + d.delta);
+      total += d.delta;
+    }
+    if (byLine.size === 0) return this;
+
+    // 升序行号 + 前缀和：遍历检查点时只需推进游标，无需对每个检查点回看整张表。
+    const lines = [...byLine.keys()].toSorted((a, b) => a - b);
+    let cursor = 0;
+    let shift = 0;
+    const next = this.checkpoints.map((cp) => {
+      while (cursor < lines.length && lines[cursor] < cp.line) {
+        shift += byLine.get(lines[cursor]) ?? 0;
+        cursor++;
+      }
+      return shift === 0 ? cp : { line: cp.line, offset: cp.offset + shift };
+    });
+    return new LineIndex(next, this.totalBytes + total, this.totalLines, this.interval, {
+      buildMs: this.buildMs,
+      eof: this.eof,
+    });
+  }
+
   toStats(): LineIndexStats {
     return {
       totalBytes: this.totalBytes,
@@ -560,6 +606,15 @@ export type IndexDeltaOp =
  * 本函数严格按数组顺序应用 —— **重排序会改变结果**（增删会让后续行号漂移）。
  */
 export function applyIndexOps(li: LineIndex, ops: readonly IndexDeltaOp[]): LineIndex {
+  // 快速路径：整批都是「行数不变」的替换（批量替换 / 撤销 / 重做的典型形态）→ 单次遍历。
+  // 混合 op（含插入删除）不能走它：那类 op 会改变后续行号，必须逐条按序应用。
+  if (ops.length > 0 && ops.every((op) => op.kind === 'replace')) {
+    const replaces: { line: number; delta: number }[] = [];
+    for (const op of ops) {
+      if (op.kind === 'replace') replaces.push({ line: op.line, delta: op.delta });
+    }
+    return li.applyLineDeltas(replaces);
+  }
   let cur = li;
   for (const op of ops) {
     switch (op.kind) {

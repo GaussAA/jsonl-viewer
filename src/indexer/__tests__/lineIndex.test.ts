@@ -547,3 +547,75 @@ test('applyIndexOps：同一批 op 可让两份索引实例完全对齐（宿主
   assert.equal(ra.totalBytes, rb.totalBytes);
   assert.equal(ra.totalLines, rb.totalLines);
 });
+
+/* ------------------- applyLineDeltas（批量替换的索引更新快速路径） ------------------- */
+
+test('applyLineDeltas：与逐个 applyLineReplace 完全等价', async () => {
+  // interval=1 → 每个检查点都可能受某个 delta 影响，等价性检查才有杀伤力。
+  const li = await buildFromString(
+    Array.from({ length: 30 }, (_, i) => `{"i":${i}}`).join('\n') + '\n',
+    7,
+    { checkpointInterval: 1 }
+  );
+  const deltas = [
+    { line: 0, delta: 5 },
+    { line: 7, delta: -3 },
+    { line: 7, delta: 8 }, // 同一行两次：必须累加（+5）
+    { line: 29, delta: 100 },
+  ];
+
+  let one = li;
+  for (const d of deltas) one = one.applyLineReplace(d.line, d.delta);
+  const batch = li.applyLineDeltas(deltas);
+
+  assert.deepEqual(batch.checkpoints, one.checkpoints, '检查点逐条一致');
+  assert.equal(batch.totalBytes, one.totalBytes);
+  assert.equal(batch.totalLines, one.totalLines);
+});
+
+test('applyLineDeltas：边界 —— 空数组返回同一实例、零偏移不产生新对象', async () => {
+  const li = await buildFromString('{"a":1}\n{"b":2}\n');
+  assert.equal(li.applyLineDeltas([]), li, '空批不做任何事');
+  assert.equal(li.applyLineDeltas([{ line: 1, delta: 0 }]), li, '全零 delta 视为无变更');
+});
+
+test('applyLineDeltas：越界行号与非整数 delta 一律抛错（不静默算错）', async () => {
+  const li = await buildFromString('{"a":1}\n{"b":2}\n');
+  assert.throws(() => li.applyLineDeltas([{ line: 2, delta: 1 }]), RangeError);
+  assert.throws(() => li.applyLineDeltas([{ line: -1, delta: 1 }]), RangeError);
+  assert.throws(() => li.applyLineDeltas([{ line: 0, delta: 1.5 }]), TypeError);
+});
+
+test('applyLineDeltas：整批 replace 的 applyIndexOps 走同一结果（快速路径不改语义）', async () => {
+  const li = await buildFromString(
+    Array.from({ length: 20 }, (_, i) => `{"i":${i}}`).join('\n') + '\n',
+    5,
+    { checkpointInterval: 1 }
+  );
+  const ops: IndexDeltaOp[] = [
+    { kind: 'replace', line: 3, delta: 40 },
+    { kind: 'replace', line: 11, delta: -7 },
+  ];
+  const viaOps = applyIndexOps(li, ops);
+  const viaDeltas = li.applyLineDeltas([
+    { line: 3, delta: 40 },
+    { line: 11, delta: -7 },
+  ]);
+  assert.deepEqual(viaOps.checkpoints, viaDeltas.checkpoints);
+  assert.equal(viaOps.totalBytes, viaDeltas.totalBytes);
+});
+
+test('applyLineDeltas：混合 op 不走快速路径（插入/删除必须按序逐条应用）', async () => {
+  const li = await buildFromString('{"a":1}\n{"b":2}\n{"c":3}\n');
+  // 插入会改变后续行号，若被误并入「一次平移」就会算错 —— 结果必须与逐条应用一致。
+  const ops: IndexDeltaOp[] = [
+    { kind: 'replace', line: 0, delta: 4 },
+    { kind: 'insert', line: 2, bytes: 9 },
+  ];
+  let one = li;
+  for (const op of ops) one = applyIndexOps(one, [op]);
+  const all = applyIndexOps(li, ops);
+  assert.deepEqual(all.checkpoints, one.checkpoints);
+  assert.equal(all.totalLines, one.totalLines);
+  assert.equal(all.totalBytes, one.totalBytes);
+});
