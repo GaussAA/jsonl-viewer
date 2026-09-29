@@ -20,6 +20,8 @@ function wait(ms: number): Promise<void> {
 
 interface Harness {
   tb: ReturnType<typeof createToolbar>;
+  /** 工具栏宿主元素（供查询内部按钮）。 */
+  host: HTMLElement;
   calls: {
     search: string[];
     prev: number;
@@ -30,6 +32,8 @@ interface Harness {
     replace: [string, string][];
     /** 「坏行诊断」打开次数。 */
     badLines: number;
+    /** 「跟随末尾」开关回调收到的新状态序列。 */
+    follow: boolean[];
   };
 }
 
@@ -47,6 +51,7 @@ function makeToolbar(): Harness {
     layout: [] as FieldLayout[],
     replace: [] as [string, string][],
     badLines: 0,
+    follow: [] as boolean[],
   };
   const host = doc.createElement('div');
   doc.body.append(host);
@@ -59,6 +64,7 @@ function makeToolbar(): Harness {
       calls.next += 1;
     },
     onReplaceAll: (q, r) => calls.replace.push([q, r]),
+    onToggleFollowTail: (on) => calls.follow.push(on),
     onOpenBadLines: () => {
       calls.badLines += 1;
     },
@@ -66,7 +72,7 @@ function makeToolbar(): Harness {
     onApplyLayout: (l) => calls.layout.push(l),
   });
   host.append(tb.root);
-  return { tb, calls };
+  return { tb, calls, host };
 }
 
 const byTitle = (h: Harness, title: string): HTMLButtonElement => {
@@ -533,5 +539,32 @@ describe('createToolbar（视图层覆盖率补强）', () => {
     h.tb.update({ totalRecords: 100, range: [0, 19], status: 'ready' });
     assert.strictEqual(chipEl(h).hidden, false, '常规刷新不得改动徽章');
     assert.match(chipEl(h).textContent ?? '', /2 坏行/);
+  });
+
+  it('跟随末尾：点击翻转开关并回调新值，视觉随之切换', () => {
+    const h = makeToolbar();
+    const btn = h.host.querySelector<HTMLButtonElement>('.jlv-follow-toggle');
+    assert.ok(btn, '存在「跟随末尾」按钮');
+    assert.strictEqual(btn.getAttribute('aria-pressed'), 'false', '默认关闭');
+
+    btn.click();
+    assert.strictEqual(btn.getAttribute('aria-pressed'), 'true', '开启态');
+    assert.ok(btn.classList.contains('active'), '开启态有高亮');
+    assert.deepStrictEqual(h.calls.follow, [true], '回调收到翻转后的新值');
+
+    btn.click();
+    assert.strictEqual(btn.getAttribute('aria-pressed'), 'false', '再点复位');
+    assert.deepStrictEqual(h.calls.follow, [true, false]);
+  });
+
+  it('跟随末尾：setFollowTail 程序化同步视觉但不触发回调', () => {
+    const h = makeToolbar();
+    h.tb.setFollowTail(true);
+    const btn = h.host.querySelector('.jlv-follow-toggle');
+    assert.strictEqual(btn?.getAttribute('aria-pressed'), 'true');
+    assert.deepStrictEqual(h.calls.follow, [], '程序化设置不产生回调');
+
+    (btn as HTMLButtonElement).click(); // 从 true 翻到 false
+    assert.deepStrictEqual(h.calls.follow, [false]);
   });
 });

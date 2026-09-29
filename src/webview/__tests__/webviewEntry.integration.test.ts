@@ -2143,4 +2143,78 @@ describe('webviewEntry 装配层（集成）', () => {
       assert.ok(app.querySelector('.jlv-edit-backdrop'), '浮层保持打开，用户可重试');
     });
   });
+
+  describe('F6 追尾：TAIL_APPENDED 与「跟随末尾」', () => {
+    it('总数更新；跟随关闭时不跳页，开启后自动跳到最新一页并拉取该页', async () => {
+      const { host, app } = await bootWithRecords();
+      // 先回执首屏：调度按窗口串行推进，首段（当前页）悬在途会卡住后续段。
+      reply(host, lastReq(host, HostEndpoint.READ_RECORDS)!, {
+        startLine: 0,
+        items: makeItems(0, 20),
+        hasMore: true,
+      });
+      await sleep(FLUSH_MS);
+
+      // 跟随关（默认）：总数被更新（否则后续跟随跳页无从发生），但视图停在原页。
+      host.receive({
+        type: HostReply.TAIL_APPENDED,
+        payload: { totalLines: 130, totalRecords: 130, totalBytes: 8192 },
+      });
+      await sleep(FLUSH_MS);
+      assert.ok(card(app, 0), '跟随关闭时仍在首屏');
+      assert.ok(!card(app, 129), '未跳到末页');
+
+      // 开启「跟随末尾」：点击开关，状态落入 UiState 持久化。
+      const followBtn = app.querySelector<HTMLButtonElement>('.jlv-follow-toggle');
+      assert.ok(followBtn, '存在「跟随末尾」开关');
+      followBtn.click();
+      assert.strictEqual(host.state().followTail, true, '开关状态持久化');
+
+      // 文件再次增长：自动跳到最新一页（139 -> 第 7 页），并发出该页数据请求。
+      host.receive({
+        type: HostReply.TAIL_APPENDED,
+        payload: { totalLines: 140, totalRecords: 140, totalBytes: 9216 },
+      });
+      // 换页走「旧卡滑出（exitMs ≈ 310ms）→ 重建 → 节流 40ms → 发请求」的链路，须等全程。
+      await sleep(420);
+
+      const rr = lastReq(host, HostEndpoint.READ_RECORDS)!;
+      assert.strictEqual(Number(rr.startLine), 120, '末页请求自 120 起');
+      assert.notStrictEqual(rr.requestId, undefined);
+
+      reply(host, rr, { startLine: 120, items: makeItems(120, 20), hasMore: false });
+      await sleep(FLUSH_MS);
+      assert.ok(card(app, 139), '最新一条记录已可见');
+      assert.ok(!card(app, 0), '首屏页已被切走');
+    });
+
+    it('有活跃搜索时不自动跳页（结果集不含新行，只更新总数与提示）', async () => {
+      const { host, app } = await bootWithRecords();
+      reply(host, lastReq(host, HostEndpoint.READ_RECORDS)!, {
+        startLine: 0,
+        items: makeItems(0, 20),
+        hasMore: true,
+      });
+      await sleep(FLUSH_MS);
+      // 开启跟随
+      app.querySelector<HTMLButtonElement>('.jlv-follow-toggle')!.click();
+
+      // 制造活跃搜索：发出搜索并回执命中（输入有防抖，须等过窗口）
+      const input = app.querySelector<HTMLInputElement>('.jlv-search input')!;
+      input.value = 'x';
+      fireInput(input);
+      await sleep(360);
+      const sr = lastReq(host, HostEndpoint.SEARCH);
+      assert.ok(sr, '搜索请求已发出');
+      reply(host, sr, { matches: [3], total: 1, truncated: false });
+      await sleep(FLUSH_MS);
+
+      host.receive({
+        type: HostReply.TAIL_APPENDED,
+        payload: { totalLines: 130, totalRecords: 130, totalBytes: 8192 },
+      });
+      await sleep(FLUSH_MS);
+      assert.ok(card(app, 0), '有活跃搜索时不跳页（仍在原页）');
+    });
+  });
 });

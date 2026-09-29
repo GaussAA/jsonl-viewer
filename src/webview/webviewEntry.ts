@@ -172,6 +172,8 @@ function createBanner(): {
 interface UiState {
   listWidth?: number;
   listCollapsed?: boolean;
+  /** F6 追尾「跟随末尾」开关（跨会话记住）。 */
+  followTail?: boolean;
 }
 
 /** 当前 webview 的 VS Code API 句柄（main 中赋值，供本模块级读写函数使用）。 */
@@ -260,6 +262,10 @@ export function main(): void {
     onSearchPrev: () => actions.stepSearch(-1),
     onSearchNext: () => actions.stepSearch(1),
     onReplaceAll: (query, replacement) => editOps.replaceAll(query, replacement),
+    onToggleFollowTail: (on) => {
+      followTail = on;
+      writeUiState({ followTail: on });
+    },
     onOpenHistory: () => historyPanel.open(),
     onOpenBadLines: () => badLinesOps.open(),
     onOpenProfile: () => profileOps.open(),
@@ -267,6 +273,9 @@ export function main(): void {
     onApplyLayout: (layout) => actions.applyLayout(layout),
   });
   toolbar.update({ fileName: '', status: 'connecting', statusText: '连接中…' });
+  // 「跟随末尾」跨会话恢复：状态真身在装配层（持久化），toolbar 只呈现。
+  let followTail = readUiState().followTail === true;
+  toolbar.setFollowTail(followTail);
 
   /* ---------------- 详情面板（JSON 树，Task 5） ---------------- */
   const navHandlers: DetailTreeNavHandlers = {};
@@ -788,18 +797,31 @@ export function main(): void {
   const scheduleFetch = new ThrottleQueue<{ first: number; lastExclusive: number }[]>(
     40,
     async (windows) => {
-      // 逐段串行拉取；任一段被 supersede/超时即放弃剩余段（已有更新的窗口请求接手）。
+      // 逐段串行拉取；只有「取消 / 失败」才放弃剩余段（已有更新的窗口请求接手，或需先呈现错误）。
+      // 「无需拉取」的窗口要**继续走完后续段** —— 批次里常混着已缓存窗口与待拉取窗口
+      // （例：翻到末页时批次 = 当前页 + 末页），首段命中缓存就停会把末页无声放弃。
       for (const win of windows) {
-        const ok = await fetchWindow(win);
-        if (!ok) return;
+        const outcome = await fetchWindow(win);
+        if (outcome === 'aborted') return;
       }
     }
   );
 
-  /** 拉取单个连续窗口。返回 false 表示被取消/超时/无需拉取（调用方应停止后续段）。 */
-  async function fetchWindow(win: { first: number; lastExclusive: number }): Promise<boolean> {
+  /** 拉取单个连续窗口的结果：
+   *  - `'done'`：已拉取并落缓存；
+   *  - `'empty'`：**无需拉取**（整窗已缓存 / 在途）—— 后续段应继续；
+   *  - `'aborted'`：取消 / 超时 / 失败 —— 后续段必须停止（已有更新的请求接手，或需要用户先看到错误）。
+   *
+   * 为何是三态：此前只有 boolean，把「无需拉取」也当「中止」—— 而一次节流批次里
+   * 常混着「已缓存窗口」与「待拉取窗口」（例：翻到末页时，调度批次 = 当前页 + 末页），
+   * 首段命中缓存就 `return`，会把后面的末页无声放弃 —— 表现为「跳过去了，数据永远不来」。
+   */
+  async function fetchWindow(win: {
+    first: number;
+    lastExclusive: number;
+  }): Promise<'done' | 'empty' | 'aborted'> {
     const ov = state.overview;
-    if (!ov) return false;
+    if (!ov) return 'aborted';
     const total = ov.totalRecords;
     const s = clamp(win.first, 0, total);
     const e = clamp(win.lastExclusive, s, total);
@@ -808,7 +830,7 @@ export function main(): void {
       e,
       (line) => state.cache.has(line) || state.pending.has(line)
     );
-    if (!missing) return false;
+    if (!missing) return 'empty';
 
     // 覆盖式取消：若上一请求仍在途，本地标记并请宿主尽力中断。
     if (state.inFlight && !state.inFlight.superseded) {
@@ -830,8 +852,8 @@ export function main(): void {
 
     try {
       const payload = await promise;
-      if (state.inFlight?.rid !== requestId || state.inFlight.superseded) return false;
-      if (payload.items.length === 0) return false;
+      if (state.inFlight?.rid !== requestId || state.inFlight.superseded) return 'aborted';
+      if (payload.items.length === 0) return 'aborted';
       for (const it of payload.items) {
         state.cache.set(it.line, {
           value: it.value,
@@ -848,10 +870,10 @@ export function main(): void {
       // 这一轮可能刚发现新的坏行（宿主集合是惰性积累的）→ 防抖刷新徽章，
       // 让用户滚动浏览时就能看见「原来这里有几行是坏的」。
       badLinesOps.scheduleRefresh();
-      return true;
+      return 'done';
     } catch (err) {
       // 被 supersede 取消：静默（已有更新的窗口请求接手），且避免 unhandled rejection。
-      if (err instanceof CancelledError) return false;
+      if (err instanceof CancelledError) return 'aborted';
       // 真失败（超时 / 宿主内部错误）：**必须说话**。此前一律静默 → 卡片永远停在
       // 「加载中…」，用户无法区分「还没读到」与「读挂了」，也没有任何重试入口。
       banner.show(
@@ -861,7 +883,7 @@ export function main(): void {
           list.refresh();
         }
       );
-      return false;
+      return 'aborted';
     } finally {
       for (let i = 0; i < missing.count; i++) state.pending.delete(missing.start + i);
       if (state.inFlight?.rid === requestId) state.inFlight = null;
@@ -1139,8 +1161,10 @@ export function main(): void {
   });
 
   // F6 追尾：宿主已把尾部新增的行并入索引。行号不变、只有总数变大 —— 更新总数即可，
-  // 已渲染内容不受影响，也不打断当前视图（「跟随末尾」的自动滚动属下一批）。
-  // 有活跃筛选 / 搜索时必须开口：那些结果集不含新行，静默会让用户误以为「筛完了」。
+  // 已渲染内容不受影响，也不打断当前视图。
+  // 有活跃筛选 / 搜索时必须开口：那些结果集不含新行，静默会让用户误以为「筛完了」；
+  // 「跟随末尾」开启且无筛选 / 搜索时，自动跳到最新一页（选中行与详情不动 ——
+  // 跟随只滚列表，替用户改选中就越权了）。
   bus.onTailAppended((info) => {
     if (!state.overview) return;
     state.overview = {
@@ -1153,6 +1177,8 @@ export function main(): void {
     updateToolbar();
     if (state.filterMap !== null || state.searchMatches.length > 0) {
       banner.show('文件有新增内容（已跟进），当前筛选 / 搜索结果未包含新行，可重新执行。');
+    } else if (followTail) {
+      list.scrollToLine(info.totalRecords - 1);
     }
   });
 

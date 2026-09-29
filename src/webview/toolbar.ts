@@ -31,6 +31,11 @@ export interface ToolbarHandlers {
   onSearchNext?: () => void;
   /** 「全部替换」：查询取自搜索框，替换文本取自替换输入框。 */
   onReplaceAll?: (query: string, replacement: string) => void;
+  /**
+   * 「跟随末尾」开关翻转（F6 追尾）。`on` 为翻转后的新状态；
+   * 持久化由装配层负责（toolbar 只管视觉与回调）。
+   */
+  onToggleFollowTail?: (on: boolean) => void;
   /** 「编辑历史」：打开会话历史浮层（撤销/重做/回退到某一步）。 */
   onOpenHistory?: () => void;
   /** 「坏行诊断」：打开坏行浮层（查看 / 扫描 / 全选清除）。 */
@@ -103,6 +108,8 @@ export function createToolbar(
   setLayout(layout: FieldLayout): void;
   setSearchResult(total: number, index: number): void;
   setFilterTruncated(truncated: boolean): void;
+  /** 「跟随末尾」开关的视觉同步（状态真身由装配层持久化，toolbar 只呈现）。 */
+  setFollowTail(on: boolean): void;
   /** 用给定条件回填筛选面板（恢复偏好时调用，保证「所见即当前条件」）。 */
   setFilterCondition(cond: Condition | null): void;
   /**
@@ -209,6 +216,25 @@ export function createToolbar(
   replaceToggle.setAttribute('aria-expanded', 'false');
   replaceToggle.innerHTML = ICON_REPLACE;
 
+  /* 「跟随末尾」（F6 追尾）：开启后文件有新增时自动跳到最新一页。 */
+  let followTail = false;
+  const followBtn = document.createElement('button');
+  followBtn.type = 'button';
+  followBtn.className = 'jlv-nav-btn jlv-follow-toggle';
+  followBtn.title = '跟随末尾：文件新增内容时自动跳到最新一页';
+  followBtn.setAttribute('aria-label', '跟随末尾');
+  followBtn.setAttribute('aria-pressed', 'false');
+  followBtn.textContent = '⤓';
+  followBtn.addEventListener('click', () => {
+    followTail = !followTail;
+    syncFollowTail();
+    handlers.onToggleFollowTail?.(followTail);
+  });
+  const syncFollowTail = (): void => {
+    followBtn.classList.toggle('active', followTail);
+    followBtn.setAttribute('aria-pressed', String(followTail));
+  };
+
   const replaceRow = document.createElement('div');
   replaceRow.className = 'jlv-replace';
   replaceRow.hidden = true;
@@ -254,7 +280,8 @@ export function createToolbar(
     searchClear,
     matchInfo,
     navGroup,
-    replaceToggle
+    replaceToggle,
+    followBtn
   );
   root.appendChild(search);
   root.appendChild(replaceRow);
@@ -973,6 +1000,12 @@ export function createToolbar(
     filterNoteEl.hidden = !truncated;
   };
 
+  const setFollowTail = (on: boolean): void => {
+    if (followTail === on) return;
+    followTail = on;
+    syncFollowTail();
+  };
+
   /** 释放 document 级监听器（webview 关闭时调用）。防止内存泄漏。 */
   const destroy = (): void => {
     filterPanelDispose?.();
@@ -992,6 +1025,7 @@ export function createToolbar(
     setLayout,
     setSearchResult,
     setFilterTruncated,
+    setFollowTail,
     setFilterCondition: (cond: Condition | null): void => {
       panelFilterCond = cond;
       applyCondToFilterPanel?.(cond);

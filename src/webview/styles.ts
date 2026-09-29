@@ -349,6 +349,7 @@ body {
 .jlv-nav-btn:hover:not(:disabled) { background: rgba(255,255,255,0.08); color: var(--jlv-fg); }
 .jlv-nav-btn:disabled { opacity: .3; cursor: default; }
 .jlv-replace-toggle.active { background: color-mix(in srgb, var(--jlv-focus) 22%, transparent); color: var(--jlv-info); }
+.jlv-follow-toggle.active { background: color-mix(in srgb, var(--jlv-focus) 22%, transparent); color: var(--jlv-info); }
 
 /* 替换行（默认收起，点搜索框内的互换图标展开） */
 .jlv-replace {
