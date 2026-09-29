@@ -1,12 +1,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
-import { createReadStream, existsSync, rmSync } from 'node:fs';
+import { createReadStream, existsSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { LineIndex } from '../../indexer/lineIndex.ts';
 import { openFileReader } from '../../parser/jsonParser.ts';
-import { TAIL_BACKUP_SUFFIX, REWRITE_TEMP_SUFFIX } from '../../constants.ts';
+import {
+  TAIL_BACKUP_SUFFIX,
+  TAIL_BACKUP_META_SUFFIX,
+  REWRITE_TEMP_SUFFIX,
+} from '../../constants.ts';
 import {
   replaceLine,
   replaceRange,
@@ -94,6 +98,63 @@ test('replaceLine：变长替换（Δ>0）正确搬移尾部并延长文件', as
     assert.equal(await readFile(path, 'utf8'), 'aa\nBBBBBB\ncc\n');
     assert.equal((await stat(path)).size, 13);
     assert.equal(existsSync(path + TAIL_BACKUP_SUFFIX), false, '成功后应删除 sidecar');
+    // 元数据旁车与备份同生共死：留着它，下次打开会提示「发现遗留备份」而备份其实早已清掉。
+    assert.equal(existsSync(path + TAIL_BACKUP_META_SUFFIX), false, '成功后应删除备份元数据');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('O8：备份区间**含被编辑的那一行**（否则崩溃后恢复不出原行）', async () => {
+  const original = 'aa\nbb\ncc\n';
+  const { dir, path } = await scaffold(original);
+  try {
+    const loc = await locate(path, 1); // 'bb\n' = [3,6)
+    const side = path + TAIL_BACKUP_SUFFIX;
+    let captured: string | null = null;
+    await assert.rejects(() =>
+      replaceLine(path, loc.range, Buffer.from('BBBBBB'), 'lf', {
+        blockSize: 4,
+        shouldCancel: () => {
+          // 搬移已经开始 → 备份此刻必然已落盘，正好用来验证它的区间。
+          if (captured === null) captured = readFileSync(side, 'utf8');
+          return true;
+        },
+      })
+    );
+    // 只备尾部（'cc\n'）的话，崩溃在「新行写了一半」时恢复出来的第 2 行仍是坏的；
+    // 备份自 range.start 起，才让「恢复 = 回到编辑前」真正成立。
+    assert.equal(captured, 'bb\ncc\n', '备份必须自被编辑行起点起，含那一行本身');
+    // 取消 → 自动回滚成功 → 备份与元数据都该清理（否则下次打开会误报「有遗留备份」）。
+    assert.equal(await readFile(path, 'utf8'), original);
+    assert.equal(existsSync(side), false);
+    assert.equal(existsSync(path + TAIL_BACKUP_META_SUFFIX), false);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('O8：元数据记录了恢复所需的三项信息（起点/长度/原大小）', async () => {
+  const original = 'aa\nbb\ncc\n';
+  const { dir, path } = await scaffold(original);
+  try {
+    const loc = await locate(path, 1);
+    const metaPath = path + TAIL_BACKUP_META_SUFFIX;
+    let meta: { backupStart?: number; backupLen?: number; fileSize?: number; version?: number } =
+      {};
+    await assert.rejects(() =>
+      replaceLine(path, loc.range, Buffer.from('BBBBBB'), 'lf', {
+        blockSize: 4,
+        shouldCancel: () => {
+          if (!meta.backupStart) meta = JSON.parse(readFileSync(metaPath, 'utf8'));
+          return true;
+        },
+      })
+    );
+    assert.equal(meta.version, 1);
+    assert.equal(meta.backupStart, 3, '自被编辑行起点');
+    assert.equal(meta.backupLen, 6, "'bb\ncc\n' 共 6 字节");
+    assert.equal(meta.fileSize, 9, '编辑前的文件大小');
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
