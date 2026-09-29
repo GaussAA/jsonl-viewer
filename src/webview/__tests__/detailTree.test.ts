@@ -331,4 +331,21 @@ describe('createDetailTree（视图层覆盖率补强）', () => {
     h.tree.clear();
     assert.strictEqual(h.tree.root.querySelector('.jlv-field-edit'), null, '清空后无入口');
   });
+  it('可访问性：树行带 aria-selected，节点容器带 role=group（O13）', () => {
+    const h = makeTree();
+    h.tree.showRecord({ a: 1, nested: { b: 2 } }, 0);
+
+    const ariaRows = Array.from(globalThis.document.querySelectorAll<HTMLElement>('.jlv-tree-row'));
+    assert.ok(ariaRows.length > 0, '已渲染树行');
+    for (const row of ariaRows) {
+      assert.ok(
+        row.getAttribute('aria-selected') === 'true' ||
+          row.getAttribute('aria-selected') === 'false',
+        '每行都要显式给出 aria-selected（读屏感知选中）'
+      );
+    }
+    // 节点容器必须声明 group，否则 treeitem → div → treeitem 的层级对读屏是断的。
+    const groups = globalThis.document.querySelectorAll('.jlv-tree-node[role="group"]');
+    assert.ok(groups.length > 0, '节点容器应带 role=group');
+  });
 });

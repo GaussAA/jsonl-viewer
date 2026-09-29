@@ -263,6 +263,38 @@ describe('createColumnLayout（T5 #30 抽取回归）', () => {
     assert.strictEqual(leftCol.style.width, '180px', '下限夹取');
   });
 
+  it('可访问性：分隔条具备 separator 语义，且可用方向键调宽（O13）', () => {
+    const { deps, calls } = makeFixtures();
+    const resizer = deps.resizer as HTMLDivElement;
+    createColumnLayout(deps);
+
+    assert.strictEqual(resizer.getAttribute('role'), 'separator', '分隔条角色');
+    assert.strictEqual(resizer.getAttribute('aria-orientation'), 'vertical');
+    assert.strictEqual(resizer.getAttribute('aria-label'), '调整记录目录宽度');
+    assert.strictEqual(resizer.tabIndex, 0, '可聚焦（键盘用户能 Tab 到这里）');
+    assert.ok(resizer.getAttribute('aria-valuenow') !== null, '当前宽度可被读屏读出');
+
+    // jsdom 无布局（宽度恒 0），故只断言「方向键确实写入了新宽度」这一可观测行为。
+    const key = (k: string, shift = false): void => {
+      resizer.dispatchEvent(
+        new (
+          globalThis as unknown as {
+            window: { KeyboardEvent: new (t: string, o?: unknown) => Event };
+          }
+        ).window.KeyboardEvent('keydown', { key: k, shiftKey: shift, bubbles: true })
+      );
+    };
+    const savedBefore = calls.savedW.length;
+    key('ArrowRight');
+    assert.ok(calls.savedW.length > savedBefore, 'ArrowRight 应提交新宽度');
+    key('ArrowLeft', true);
+    assert.ok(calls.savedW.length > savedBefore + 1, 'Shift+ArrowLeft（大步）同样生效');
+    key('Home');
+    assert.ok(calls.savedW.length > savedBefore + 2, 'Home 复位宽度');
+    key('a');
+    assert.strictEqual(calls.savedW.length, savedBefore + 3, '无关按键不改宽度');
+  });
+
   it('折叠态禁止拖拽（pointerdown 直接返回）', () => {
     const { deps } = makeFixtures(900, { reduceMotion: true });
     const resizer = deps.resizer as HTMLDivElement;

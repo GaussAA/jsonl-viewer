@@ -179,6 +179,35 @@ export function createColumnLayout(deps: ColumnLayoutDeps): ColumnLayout {
   // 用 applyCollapsedUI（无动画），避免挂载即播收起动画导致首帧闪烁抖动。
   if (!narrow && deps.listCollapsedFromStore()) applyCollapsedUI(true);
 
+  // 可访问性：分栏拖拽此前纯鼠标可及。给分隔条角色 + 值语义，并补键盘调整
+  //（左右方向键 ±16px / Shift 加速，Home 复位）—— 与 dblclick 复位是同一件事的键盘等价入口。
+  resizer.setAttribute('role', 'separator');
+  resizer.setAttribute('aria-orientation', 'vertical');
+  resizer.setAttribute('aria-label', '调整记录目录宽度');
+  resizer.tabIndex = 0;
+  const syncSeparatorValue = (): void => {
+    resizer.setAttribute(
+      'aria-valuenow',
+      String(Math.round(leftCol.getBoundingClientRect().width))
+    );
+  };
+  syncSeparatorValue();
+  resizer.addEventListener('keydown', (e) => {
+    if (listCollapsed) return;
+    const step = e.shiftKey ? 64 : 16;
+    let next: number | undefined;
+    if (e.key === 'ArrowLeft') next = leftCol.getBoundingClientRect().width - step;
+    else if (e.key === 'ArrowRight') next = leftCol.getBoundingClientRect().width + step;
+    else if (e.key === 'Home') next = DEFAULT_LIST_WIDTH;
+    if (next === undefined) return;
+    e.preventDefault();
+    const w = clampListWidth(next);
+    applyListWidth(w);
+    deps.saveListWidth(w);
+    expandedWidthPx = w;
+    syncSeparatorValue();
+  });
+
   let dragStartX = 0;
   let dragStartW = 0;
   resizer.addEventListener('pointerdown', (e) => {
@@ -199,6 +228,7 @@ export function createColumnLayout(deps: ColumnLayoutDeps): ColumnLayout {
     const cw = clampListWidth(dragStartW + (e.clientX - dragStartX));
     deps.saveListWidth(cw);
     expandedWidthPx = cw;
+    syncSeparatorValue();
   };
   resizer.addEventListener('pointerup', endDrag);
   resizer.addEventListener('pointercancel', endDrag);

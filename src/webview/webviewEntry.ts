@@ -96,6 +96,9 @@ function createBanner(): {
   const root = document.createElement('div');
   root.className = 'jlv-banner';
   root.hidden = true;
+  // 文件变更 / 超时 / 进度这类状态对读屏必须**可播报**（此前是纯视觉元素，读屏完全无感）。
+  root.setAttribute('role', 'status');
+  root.setAttribute('aria-live', 'polite');
 
   const text = document.createElement('span');
   text.className = 'jlv-banner-text';

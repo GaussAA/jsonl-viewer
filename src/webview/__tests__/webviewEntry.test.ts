@@ -34,6 +34,12 @@ describe('webviewEntry 冒烟测试（jsdom）', () => {
     assert.ok(app.querySelector('.jlv-resizer'), '拖拽条已挂载');
   });
 
+  it('可访问性：横幅是可播报的 status 区（O13）', () => {
+    const banner = globalThis.document.querySelector('.jlv-banner')!;
+    assert.strictEqual(banner.getAttribute('role'), 'status', '文件变更/超时/进度需被读屏播报');
+    assert.strictEqual(banner.getAttribute('aria-live'), 'polite');
+  });
+
   it('挂载后 webview 已发出 ready 握手', () => {
     const ready = (host.posted as { type?: unknown }[]).some((m) => m.type === HostEndpoint.READY);
     assert.ok(ready, 'webview 已发出 ready 握手消息');

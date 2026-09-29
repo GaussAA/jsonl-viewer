@@ -468,17 +468,23 @@ export function createDetailTree(
     const node = document.createElement('div');
     node.className = 'jlv-tree-node';
     (node as TreeNode).__value = value; // 存数据引用：局部展开懒构建用
+    // 可访问性：`role=treeitem` 的直接子代若是节点容器，必须声明为 group，
+    // 否则读屏拿到的层级是断的（treeitem → div → treeitem，中间的 div 无角色）。
+    node.setAttribute('role', 'group');
 
     const row = document.createElement('div');
     row.className = 'jlv-tree-row';
     row.dataset.depth = String(depth);
     row.dataset.container = container ? '1' : '0';
     row.dataset.treeKey = pathKey(segs);
-    if (segs.length > 0 && pathKey(segs) === pathKey(selectedSegs)) row.classList.add('selected');
+    const isSelected = segs.length > 0 && pathKey(segs) === pathKey(selectedSegs);
+    if (isSelected) row.classList.add('selected');
 
     // 可访问性：树行语义。容器行可聚焦（Enter/Space 展开折叠）；标量行供读屏游走。
     row.setAttribute('role', 'treeitem');
     row.setAttribute('aria-level', String(depth + 1));
+    // 选中态必须同时对读屏可见（此前只有 CSS class `.selected`，读屏完全感知不到）。
+    row.setAttribute('aria-selected', isSelected ? 'true' : 'false');
     row.tabIndex = container ? 0 : -1;
     if (container) row.setAttribute('aria-expanded', 'false');
 
