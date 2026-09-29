@@ -19,9 +19,9 @@ import {
 import { normalizeCondition } from './core/query.ts';
 import type { Condition } from './core/query.ts';
 import { createLogger, makeTraceId } from './host/logging.ts';
+import { startStaleWatch } from './host/staleWatch.ts';
 import type { LogFields } from './host/logging.ts';
 import {
-  FILE_STALE_POLL_MS,
   MAX_LINE_BYTES,
   MAX_PERSIST_VALUE_BYTES,
   MAX_QUERY_LEN,
@@ -240,7 +240,12 @@ function mountViewer(
     ...(target.reportEdit ? { reportEdit: target.reportEdit } : {}),
   });
 
-  const staleTimer = startStaleWatch({ data, post });
+  // O14：轮询状态机已抽到 host/staleWatch.ts（含单测）—— 这里只负责把它的两个
+  // 出口接到当前会话上：查基线（data.checkStale）与推消息（post FILE_STALE）。
+  const staleTimer = startStaleWatch({
+    checkStale: () => data.checkStale(),
+    signal: (payload) => post({ type: HostReply.FILE_STALE, payload }),
+  });
 
   // Tear down：停止 stale 检测、注销消息订阅，并**释放一次引用**
   // （引用计数归零时才真正关 worker / 释放文件句柄——见 serviceRegistry.release）。
@@ -836,35 +841,6 @@ function registerHostHandlers(deps: HostHandlerDeps): vscode.Disposable {
       }
     })();
   });
-}
-
-interface StaleWatchDeps {
-  data: DataService;
-  post: (msg: RpcMessage) => void;
-}
-
-/**
- * 定期检测文件是否被改 / 删（仅索引构建后有基线）。状态从正常转走样时推送一次 FILE_STALE。
- * 返回 stale 定时器句柄，调用方在 teardown 时 clearInterval。
- */
-function startStaleWatch(deps: StaleWatchDeps): ReturnType<typeof setInterval> {
-  const { data, post } = deps;
-  let staleSignaled = false;
-  return setInterval(async () => {
-    let res;
-    try {
-      res = await data.checkStale();
-    } catch {
-      res = null;
-    }
-    if (!res || res.changed === false) {
-      staleSignaled = false;
-      return;
-    }
-    if (staleSignaled) return; // 已提示过，避免重复弹横幅
-    staleSignaled = true;
-    post({ type: HostReply.FILE_STALE, payload: { message: res.message, deleted: res.deleted } });
-  }, FILE_STALE_POLL_MS);
 }
 
 /**
