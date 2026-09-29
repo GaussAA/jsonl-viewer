@@ -131,6 +131,7 @@ const baseHandlers: HostHandlerMap = {
   [HostEndpoint.GET_HISTORY]: (r) =>
     okReply(HostReply.HISTORY, r.requestId, { entries: [], cursor: 0, dropped: false }),
   [HostEndpoint.EXPORT_LINES]: (r) => errReply(r.requestId, '未实现', 'NOT_IMPLEMENTED'),
+  [HostEndpoint.SCAN_PROFILE]: (r) => errReply(r.requestId, '未实现', 'NOT_IMPLEMENTED'),
   [HostEndpoint.BACKUP_STATUS]: (r) => errReply(r.requestId, '未实现', 'NOT_IMPLEMENTED'),
   [HostEndpoint.RECOVER_BACKUP]: (r) => errReply(r.requestId, '未实现', 'NOT_IMPLEMENTED'),
   [HostEndpoint.UNDO_EDIT]: (r) =>
