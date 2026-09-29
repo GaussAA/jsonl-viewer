@@ -747,8 +747,7 @@ export class DataService {
           ending,
           toReplaceOpts(opts)
         );
-        this.stageIndexOps([{ kind: 'replace', line, delta: res.bytesDelta }]);
-        await this.refreshSnapshot();
+        await this.commitIndex(li, [{ kind: 'replace', line, delta: res.bytesDelta }]);
         bytesDelta = res.bytesDelta;
         inPlace = res.inPlace;
         movedBytes = res.movedBytes;
@@ -825,6 +824,26 @@ export class DataService {
    *
    * @param ops 严格按发生顺序（op 之间会互相影响行号）；调用方负责算好合法顺序。
    */
+  /**
+   * 写盘成功后维护索引的**唯一分流点**：多行（pretty）文件全量重建，紧凑文件增量平移。
+   *
+   * 为何按 `li.multiline` 分流：`LineIndex.applyLine*` 只维护**检查点**，不维护**记录分组**
+   * （`recordEndLines/Offsets`）。在 pretty 文件里用增量，索引会静默从「记录语义」塌回
+   * 「物理行语义」（`totalRecords` 随之从分组数变成行数），此后 `readRecords` 与历史重放
+   * 的行号全部错位 —— 而界面上看不出任何异常。
+   *
+   * 代价是重建（O(文件大小) 重扫）：多行文件的编辑本就低频，「正确性优先 + 接受一次重扫」
+   * 远优于「为省一次重扫引入一套记录分组增量平移」（插入一行是否改变分组需重算深度）。
+   */
+  private async commitIndex(li: LineIndex, ops: IndexDeltaOp[]): Promise<void> {
+    if (li.multiline) {
+      await this.rebuildIndex();
+      return;
+    }
+    this.stageIndexOps(ops);
+    await this.refreshSnapshot();
+  }
+
   private stageIndexOps(ops: readonly IndexDeltaOp[]): void {
     if (!this.index || ops.length === 0) return;
     this.index = applyIndexOps(this.index, ops);
@@ -937,8 +956,7 @@ export class DataService {
         Buffer.alloc(0),
         toReplaceOpts(opts)
       );
-      this.stageIndexOps([{ kind: 'delete', line, bytes: removedBytes }]);
-      await this.refreshSnapshot();
+      await this.commitIndex(li, [{ kind: 'delete', line, bytes: removedBytes }]);
       this.badLines.shiftAfterDelete(line);
       this.history.push({ kind: 'delete', line, before: removedText }, res.bytesDelta);
       return {
@@ -1026,8 +1044,7 @@ export class DataService {
         newLineBytes,
         toReplaceOpts(opts)
       );
-      this.stageIndexOps([{ kind: 'insert', line: at, bytes: newLineBytes.length }]);
-      await this.refreshSnapshot();
+      await this.commitIndex(li, [{ kind: 'insert', line: at, bytes: newLineBytes.length }]);
       this.badLines.shiftAfterInsert(at);
       this.history.push({ kind: 'insert', line: at, text }, res.bytesDelta);
       return {
@@ -1150,7 +1167,7 @@ export class DataService {
     if (edits.length === 0) {
       return DataService.replaceOk(0, skippedInvalid, unchanged, total, 0, false);
     }
-    return this.applyEdits(edits, deltas, changes, total, skippedInvalid, unchanged, opts);
+    return this.applyEdits(li, edits, deltas, changes, total, skippedInvalid, unchanged, opts);
   }
 
   /**
@@ -1216,7 +1233,16 @@ export class DataService {
     if (edits.length === 0) {
       return DataService.replaceOk(0, skippedInvalid, unchanged, wanted.size, 0, false);
     }
-    return this.applyEdits(edits, deltas, changes, wanted.size, skippedInvalid, unchanged, opts);
+    return this.applyEdits(
+      li,
+      edits,
+      deltas,
+      changes,
+      wanted.size,
+      skippedInvalid,
+      unchanged,
+      opts
+    );
   }
 
   /**
@@ -1453,8 +1479,7 @@ export class DataService {
       }
       if (!range) return '定位不到该行';
       await replaceLine(this.path, range, Buffer.from(beforeText, 'utf8'), ending, {});
-      this.stageIndexOps([{ kind: 'replace', line, delta: -previousDelta }]);
-      await this.refreshSnapshot();
+      await this.commitIndex(index, [{ kind: 'replace', line, delta: -previousDelta }]);
       return '';
     } catch (e) {
       return e instanceof Error ? e.message : String(e);
@@ -1803,9 +1828,8 @@ export class DataService {
         for (let i = rows.length - 1; i >= 0; i--) {
           ops.push({ kind: 'delete', line: rows[i].line, bytes: rows[i].end - rows[i].start });
         }
-        this.stageIndexOps(ops);
+        await this.commitIndex(li, ops);
         this.badLines.remapAfterDeletes(wanted);
-        await this.refreshSnapshot();
       }
       this.history.push({ kind: 'deleteMany', ranges }, res.bytesDelta);
 
@@ -1897,9 +1921,8 @@ export class DataService {
         }
         restored += r.lines.length;
       }
-      this.stageIndexOps(ops);
+      await this.commitIndex(li, ops);
       this.badLines.deleteMany(allLines);
-      await this.refreshSnapshot();
 
       return {
         ok: true,
@@ -2035,6 +2058,7 @@ export class DataService {
    * 「释放句柄 → 原子重写 → 拿回句柄 → 更新索引 → 刷新基线」的时序（那是最易漏步的地方）。
    */
   private async applyEdits(
+    li: LineIndex,
     edits: ByteEdit[],
     deltas: { line: number; delta: number }[],
     changes: ReplaceChange[],
@@ -2048,11 +2072,11 @@ export class DataService {
       const res = await this.rewriteAtomic(edits, opts);
       // 索引增量更新：行数不变，逐行平移其后检查点（op 顺序自身无关，但与多种 op 混合时相关）
       // 一次批量 op 走同一条路 —— 宿主侧会用同一函数、同一顺序应用，两侧不会漂移。
-      this.stageIndexOps(
+      await this.commitIndex(
+        li,
         deltas.map<IndexDeltaOp>((d) => ({ kind: 'replace', line: d.line, delta: d.delta }))
       );
       this.badLines.deleteMany(deltas.map((d) => d.line));
-      await this.refreshSnapshot();
 
       const undoBytes = changes.reduce((a, c) => a + c.before.length + c.after.length, 0);
       const undoable =
