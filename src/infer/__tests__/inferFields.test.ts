@@ -131,3 +131,34 @@ test('示例值：小对象保留为结构化对象', async () => {
   const o = res.fields.find((f) => f.key === 'o')!;
   assert.deepEqual(o.sample, { a: 1 });
 });
+
+test('O5：抽样是一次顺序扫描 —— 不重复读同一段（读放大回归）', async () => {
+  // 200 条记录、每条约 500B（含一个长字段），共约 100KB。
+  const big = 'x'.repeat(400);
+  const lines = Array.from({ length: 200 }, (_, i) => JSON.stringify({ id: i, pad: big }));
+  const content = lines.join('\n') + '\n';
+  const buf = Buffer.from(content, 'utf8');
+
+  // 计数读取器：旧实现「逐行 readRecord」要从最近检查点顺读，读量 ≈ Σ(前面所有字节)
+  // ≈ 200 × 半文件；新实现一次顺扫，读量 ≈ 文件大小。
+  let bytesRead = 0;
+  const counting = {
+    async readBytes(start: number, length: number): Promise<Buffer> {
+      bytesRead += length;
+      return buf.subarray(start, start + length);
+    },
+  };
+
+  const li = await LineIndex.build([buf]);
+  const res = await inferFields(counting, li, { sampleLines: 200 });
+
+  assert.equal(res.total, 200, '样本仍全部统计到（改写不得改变结果）');
+  assert.equal(res.scanned, 200);
+  const idField = res.fields.find((f) => f.key === 'id');
+  assert.equal(idField?.freq, 200);
+  // 允许常数级块内重读（scan 的 1MB 补读），但绝不能是「每条记录都从头扫」的量级。
+  assert.ok(
+    bytesRead < buf.length * 3,
+    `读量应与文件大小同量级，实测 bytesRead=${bytesRead} fileSize=${buf.length}`
+  );
+});

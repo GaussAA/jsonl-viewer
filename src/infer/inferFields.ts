@@ -3,8 +3,11 @@
  *
  * 只扫描前 sampleLines 行（默认 200，见 package.json `jsonlViewer.sampleLines`），
  * 绝不对全文件做任何工作：
- *   - 每行仅在需要时从磁盘随机读回其 [start, end) 区间并做单行 JSON 校验 & 解析
- *     （复用近乎相同的逻辑：`readRecord`），坏行/空行直接跳过不计入。
+ *   - **一次顺序扫描**（`scanRecords` 分段读，与列表/搜索同一条路径）取回范围内的记录，
+ *     逐条 JSON 校验 & 解析；坏行/空行直接跳过不计入。
+ *     此前是「逐行调 readRecord」，而 readRecord 要从 ≤ 该行的最近检查点顺读 ——
+ *     抽样 200 条就要把那 200 条之前的内容反复读 198 次（O(抽样² × 行长) 的读放大；
+ *     记录越大越糟，256KB 级记录下可达 GB 级无效 IO），且它落在**打开文件的关键路径**上。
  *   - 记录顶层字段的类型 / 出现频率 / 示例值（截断）/ 覆盖率 / 是否恒为对象或数组。
  *
  * 关于「何时把一行视为一个对象记录」：
@@ -20,7 +23,7 @@
 import type { LineIndex } from '../indexer/lineIndex.ts';
 import type { ByteReader } from '../parser/jsonParser.ts';
 import { SAMPLE_SCAN_LINES } from '../constants.ts';
-import { readRecord } from '../parser/jsonParser.ts';
+import { parseJsonLine, scanRecords } from '../parser/jsonParser.ts';
 
 export type FieldType = 'string' | 'number' | 'boolean' | 'null' | 'object' | 'array' | 'undefined';
 
@@ -177,14 +180,16 @@ export async function inferFields(
   const errorLines: number[] = [];
   let total = 0;
 
-  for (let line = 0; line < scanned; line++) {
-    const r = await readRecord(line, li, reader);
-    if (!r.ok) {
-      errorLines.push(line);
+  // 一次顺序扫描取回 [0, scanned) 的记录：与 readRecords / 搜索走同一条分组骨架，
+  // 不再逐行重扫（见文件头「读放大」说明）。
+  for await (const rec of scanRecords(0, scanned, li, reader)) {
+    const parsed = parseJsonLine(rec.text);
+    if (!parsed.ok || parsed.value === undefined) {
+      errorLines.push(rec.recordNo);
       continue;
     }
     total++;
-    const v = r.value;
+    const v = parsed.value;
     if (v !== null && typeof v === 'object' && !Array.isArray(v)) {
       const obj = v as Record<string, unknown>;
       for (const key of Object.keys(obj)) {
