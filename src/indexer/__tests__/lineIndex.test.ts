@@ -14,7 +14,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { LineIndex, applyIndexOps, type IndexDeltaOp } from '../lineIndex.ts';
-import { MemoryReader, readLineBuffer, type ByteReader } from '../../parser/jsonParser.ts';
+import {
+  MemoryReader,
+  readLineBuffer,
+  readRecord,
+  type ByteReader,
+} from '../../parser/jsonParser.ts';
 
 /** 把字符串切成极小 chunk，强制 \n 落在块边界、跨块定位。 */
 function* chunks(s: string, size: number): Generator<Buffer> {
@@ -618,4 +623,61 @@ test('applyLineDeltas：混合 op 不走快速路径（插入/删除必须按序
   assert.deepEqual(all.checkpoints, one.checkpoints);
   assert.equal(all.totalLines, one.totalLines);
   assert.equal(all.totalBytes, one.totalBytes);
+});
+
+/* ------------------- O16：超长行之后的行号与内容不漂移 ------------------- */
+
+test('O16：超长行只占**一个**行号，其后各行取回原文（构建与扫描同一口径）', async () => {
+  // 首行 1.2MB：**必须跨过 1MB 的读取块边界**才会触发超长行分支
+  //（块内已有换行时，再长的行也会被正常 yield —— 该分支只在「已读满一块仍无换行」时生效）。
+  // 构建阶段按**真实换行**数行 → 3 行；扫描阶段若把超长行按「块」切段各计一行，
+  // 扫描给出的行号就会多于索引的，其后每次读取都整体前移 —— 读到的是超长行的尾巴。
+  const huge = '{"pad":"' + 'x'.repeat(1_200_000) + '"}';
+  const content = `${huge}\n{"i":1}\n{"i":2}\n`;
+  const buf = Buffer.from(content, 'utf8');
+  const li = await LineIndex.build([buf], {});
+  assert.equal(li.totalLines, 3, '索引按真实换行数行');
+
+  const reader = new MemoryReader(buf);
+  const got: Array<{ line: number; text: string; error?: string }> = [];
+  for await (const r of li.scan(reader, 0, li.totalLines, { maxLineBytes: 4096 })) {
+    got.push({
+      line: r.line,
+      text: r.bytes.toString('utf8'),
+      ...(r.error ? { error: r.error } : {}),
+    });
+  }
+
+  assert.equal(got.length, 3, `扫描必须给出与索引一致的 3 行，实得 ${got.length}`);
+  assert.ok(got[0].error, '超长行本身以 error 标记（不把 1.2MB 正文交出去）');
+  assert.equal(got[1].line, 1);
+  assert.equal(got[1].text, '{"i":1}', '第二行必须是它自己');
+  assert.equal(got[2].text, '{"i":2}', '第三行必须是它自己');
+});
+
+test('O16：超长行位于文件末尾（无换行收尾）时也不多计一行', async () => {
+  const huge = 'x'.repeat(1_200_000);
+  const content = `{"i":1}\n${huge}`;
+  const buf = Buffer.from(content, 'utf8');
+  const li = await LineIndex.build([buf], {});
+  assert.equal(li.totalLines, 2);
+
+  const reader = new MemoryReader(buf);
+  const lines: number[] = [];
+  for await (const r of li.scan(reader, 0, li.totalLines, { maxLineBytes: 4096 })) {
+    lines.push(r.line);
+  }
+  assert.deepEqual(lines, [0, 1], '恰好两行，超长行只占一个行号');
+});
+
+test('O16：readRecord 能正确取回超长行**之后**的记录', async () => {
+  const huge = '{"pad":"' + 'y'.repeat(1_200_000) + '"}';
+  const content = `${huge}\n{"i":7}\n`;
+  const buf = Buffer.from(content, 'utf8');
+  const li = await LineIndex.build([buf], {});
+  const reader = new MemoryReader(buf);
+
+  const r = await readRecord(1, li, reader, { maxLineBytes: 4096 });
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.value, { i: 7 }, '第 1 行（0 基）应取回第二条记录，而不是超长行的尾巴');
 });

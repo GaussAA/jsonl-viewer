@@ -114,6 +114,28 @@ test('F5：超长记录被如实跳过（不假装导出）', async () => {
   });
 });
 
+test('O16 回归：同文件中存在超长记录时，**正常记录仍能被正确导出**', async () => {
+  // 这条用例在 O16 修复前是失败的（当时它暴露的缺陷被记为「超长行之后行号漂移」，
+  // 为不锁死坏行为而临时删除）。修复后它成为该缺陷的回归断言：
+  // 超长行只占一个行号，它后面的记录取回的必须是**自己**的原文。
+  await withDir(async (dir) => {
+    const huge = '{"pad":"' + 'x'.repeat(1_200_000) + '"}';
+    const { li, reader } = await makeSource(dir, [huge, '{"i":1}', '{"i":2}']);
+    const target = join(dir, 'out.jsonl');
+
+    const res = await exportLinesToFile(li, reader, [1, 2], target, { maxLineBytes: 1024 });
+    await reader.close();
+
+    assert.strictEqual(res.count, 2);
+    assert.strictEqual(res.skipped, 0, '未选中超长记录，不应产生跳过');
+    assert.strictEqual(
+      await readFile(target, 'utf8'),
+      '{"i":1}\n{"i":2}\n',
+      '导出的是后两条记录本身，而不是超长记录的尾巴'
+    );
+  });
+});
+
 test('F5：目标已存在时原子覆盖（内容为本次导出结果）', async () => {
   await withDir(async (dir) => {
     const { li, reader } = await makeSource(dir, ['{"i":0}', '{"i":1}']);
