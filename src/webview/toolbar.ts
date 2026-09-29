@@ -329,8 +329,19 @@ export function createToolbar(
     h3.append(titleSpan, closeBtn);
     panel.appendChild(h3);
     document.body.appendChild(panel);
+    /** 面板内可聚焦控件（**排除标题栏的关闭按钮**）。 */
+    const focusables = (): HTMLElement[] =>
+      [
+        ...panel.querySelectorAll<HTMLElement>(
+          'button, input:not([type="hidden"]), select, textarea, [tabindex]:not([tabindex="-1"])'
+        ),
+      ].filter((el) => el !== closeBtn && !el.hasAttribute('disabled'));
+
     // 单实例复用：关闭仅淡出后隐藏（不移除 DOM），下次打开直接显示
     const close = (): void => {
+      // 关闭时把焦点还给触发按钮（无论由 Esc / 外点 / 关闭按钮触发）：
+      // 否则键盘用户关闭浮层后「丢失位置」，只能从文档开头重新 Tab。
+      if (panel.contains(document.activeElement)) anchor.focus();
       onClose?.();
       panel.classList.add('closing');
       setTimeout(() => {
@@ -339,15 +350,38 @@ export function createToolbar(
       }, 120); // 与样式 --dur-fast:120ms 对齐（此前 100ms 会截断淡出）
     };
     closeBtn.addEventListener('click', close);
-    // 打开：显示 + 焦点移入第一个可聚焦控件（M9：此前焦点留在触发按钮，读屏/键盘迷失）
+
+    // 打开：显示 + 焦点移入**第一个表单控件**。
+    //
+    // 为何要显式排除关闭按钮：h3（含 closeBtn）在 DOM 上先于表单节点入 panel，
+    // 故宽泛的 `querySelector('button, input, select')` 命中的正是「关闭」——
+    // M9 那次「焦点移入面板」的修复实际把焦点放到了关闭按钮上，紧接着按 Enter 就把面板关了。
     const open = (): void => {
       panel.style.display = 'block';
-      const first = panel.querySelector<HTMLElement>('button, input, select');
+      const first = focusables()[0];
       (first ?? closeBtn).focus();
     };
-    // Esc 关闭面板（焦点在面板内时）
+
+    // Tab 循环（focus trap）：面板是 `aria-modal` 浮层，焦点不该穿到背后的列表上。
+    // 关闭时把焦点还给触发按钮 —— 否则键盘用户关闭面板后「丢失位置」，只能从头 Tab。
     panel.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') close();
+      if (e.key === 'Escape') {
+        close();
+        return;
+      }
+      if (e.key !== 'Tab') return;
+      const items = focusables();
+      if (items.length === 0) return;
+      const first = items[0];
+      const last = items[items.length - 1];
+      const active = document.activeElement as HTMLElement | null;
+      if (e.shiftKey && (active === first || !panel.contains(active))) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && active === last) {
+        e.preventDefault();
+        first.focus();
+      }
     });
     // 外点关闭：点击面板外（且不在触发按钮上）即收起（M9：与原型行为对齐）
     const docPointerDown = (e: PointerEvent): void => {

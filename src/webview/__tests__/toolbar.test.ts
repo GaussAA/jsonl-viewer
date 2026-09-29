@@ -181,6 +181,41 @@ describe('createToolbar（视图层覆盖率补强）', () => {
     assert.ok(!/3\/7/.test(count.textContent ?? ''), '无匹配时不再显示旧计数');
   });
 
+  it('可访问性：浮层打开时焦点落在表单控件（而非「关闭」），关闭后归还原按钮（O10）', () => {
+    const h = makeToolbar();
+    const doc = globalThis.document;
+    const filterBtn = h.tb.root.querySelector<HTMLButtonElement>('button[title="字段值过滤"]');
+    assert.ok(filterBtn, '存在筛选按钮');
+
+    filterBtn.click();
+    const panel = doc.querySelector<HTMLElement>('.jlv-float-panel');
+    assert.ok(panel, '浮层已挂载');
+    assert.strictEqual(panel.style.display, 'block', '浮层已显示');
+
+    const active = doc.activeElement as HTMLElement | null;
+    // 缺陷形态：h3（含关闭按钮）在 DOM 上先于表单控件，宽泛的 querySelector('button, input, select')
+    // 命中的正是「关闭」—— 用户一按 Enter 就把刚打开的面板关了。
+    assert.ok(
+      !active?.classList.contains('jlv-panel-close'),
+      '焦点不得落在关闭按钮上（否则 Enter 会立刻关掉面板）'
+    );
+    assert.ok(panel.contains(active), '焦点应落在浮层内');
+    assert.ok(
+      active?.tagName === 'SELECT' || active?.tagName === 'INPUT' || active?.tagName === 'BUTTON',
+      `应是可操作的控件，实得=${active?.tagName}`
+    );
+
+    // Esc 关闭 → 焦点归还触发按钮（键盘用户不丢位置）
+    panel.dispatchEvent(
+      new (
+        globalThis as unknown as {
+          window: { KeyboardEvent: new (t: string, o?: unknown) => Event };
+        }
+      ).window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true })
+    );
+    assert.strictEqual(doc.activeElement, filterBtn, '关闭后焦点归还原按钮');
+  });
+
   it('setFilterTruncated：控制「过滤结果被截断」提示的显隐', () => {
     const h = makeToolbar();
     const note = h.tb.root.querySelector<HTMLElement>('.jlv-filter-note');
