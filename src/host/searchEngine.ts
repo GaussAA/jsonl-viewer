@@ -95,6 +95,15 @@ export interface SearchLinesResult {
   total: number;
   /** 是否因 maxResults 提前终止。 */
   truncated: boolean;
+  /**
+   * 是否被**主动取消**（本次结果只是「扫到一半」的片段，不是命中全集）。
+   *
+   * 为何必须与 `truncated` 分开：`truncated` 表示「命中太多，列不完」（结果是可信的子集，
+   * 且第一段命中的行号全部有效）；`cancelled` 表示「压根没扫完」（此后的命中一无所知）。
+   * 二者混同会让调用方把半份结果当成命中全集 —— 缓存它、或据此做批量改写，
+   * 都是在**错误的前提上做写操作**。
+   */
+  cancelled?: boolean;
 }
 
 export async function searchLines(
@@ -119,10 +128,21 @@ export async function searchLines(
   const matches: number[] = [];
   let total = 0;
   let truncated = false;
+  // 包一层取消回调：把「是否被取消」从调用方看不见的副作用，变成结果里的一个字段。
+  // 不记下来的话，被取消的搜索与「扫完却无命中」在返回值上完全同形。
+  let cancelled = false;
+  const shouldCancel = (): boolean => {
+    if (cancelled) return true;
+    if (opts.shouldCancel?.()) {
+      cancelled = true;
+      return true;
+    }
+    return false;
+  };
 
   // 单次顺序 IO：记录分组扫描（多行记录聚合为一段文本参与匹配）。
   for await (const rec of scanRecords(start, end, li, reader, {
-    shouldCancel: opts.shouldCancel,
+    shouldCancel,
   })) {
     let hit: boolean;
     if (field) {
@@ -153,7 +173,7 @@ export async function searchLines(
   }
 
   if (truncated) total = Number.MAX_SAFE_INTEGER; // 不精确总数，仅表示「未列尽」。
-  return { matches, total, truncated };
+  return cancelled ? { matches, total, truncated, cancelled } : { matches, total, truncated };
 }
 
 /* ------------------------------ 过滤 ------------------------------ */
@@ -172,6 +192,8 @@ export interface FilterLinesResult {
   total: number;
   /** 是否因 maxResults 提前终止（仍有更多匹配未列出）。 */
   truncated?: boolean;
+  /** 是否被主动取消（结果只是扫描到一半的片段，不是命中全集）。语义见 `SearchLinesResult.cancelled`。 */
+  cancelled?: boolean;
 }
 
 /** 过滤结果默认上限：防御「全行命中」把整文件行号载入 webview 造成内存失控。 */
@@ -197,8 +219,17 @@ export async function filterLines(
   // 单次顺序 IO：记录分组扫描，逐记录解析求值（稀疏索引友好）。
   const matches: number[] = [];
   let truncated = false;
+  let cancelled = false;
+  const shouldCancel = (): boolean => {
+    if (cancelled) return true;
+    if (opts.shouldCancel?.()) {
+      cancelled = true;
+      return true;
+    }
+    return false;
+  };
   for await (const rec of scanRecords(start, end, li, reader, {
-    shouldCancel: opts.shouldCancel,
+    shouldCancel,
   })) {
     const parsed = parseJsonLine(rec.text);
     if (!parsed.ok || parsed.value === undefined) continue; // 坏记录跳过（过滤视图不展示非法记录）
@@ -213,7 +244,13 @@ export async function filterLines(
     }
     if ((rec.recordNo - start) % scanEvery === scanEvery - 1) await yieldToLoop();
   }
-  return { matches, total: truncated ? maxResults + 1 : matches.length, truncated };
+  const result: FilterLinesResult = {
+    matches,
+    total: truncated ? maxResults + 1 : matches.length,
+    truncated,
+  };
+  if (cancelled) result.cancelled = true;
+  return result;
 }
 
 /** 让出一次事件循环（setImmediate），防止长扫描阻塞宿主。 */

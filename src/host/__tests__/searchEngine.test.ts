@@ -129,3 +129,45 @@ test('filterLines: 空条件/无字段 → 全量视图（matches=null）', asyn
   assert.equal(none.matches, null);
   assert.equal(none.total, li.totalLines);
 });
+
+/* ---------------------- 取消语义（O4：与 truncated 严格分开） ---------------------- */
+
+test('searchLines: 被取消时返回 cancelled=true（不是「扫完无命中」）', async () => {
+  const { reader, li } = await makeCtx();
+  const r = await searchLines(reader, li, { query: 'hello', shouldCancel: () => true });
+  assert.equal(r.cancelled, true, '必须显式标记被取消');
+  assert.deepEqual(r.matches, [], '未扫到任何行，故无命中');
+  assert.equal(r.truncated, false, '取消不等于「命中太多列不完」');
+});
+
+test('searchLines: 未被取消时 cancelled 字段缺省（不引入无谓的字段）', async () => {
+  const { reader, li } = await makeCtx();
+  const r = await searchLines(reader, li, { query: 'hello' });
+  assert.equal(r.cancelled, undefined);
+});
+
+test('searchLines: 扫到一半被取消 —— 已得命中保留，但整体标记为 cancelled', async () => {
+  const { reader, li } = await makeCtx();
+  let seen = 0;
+  const r = await searchLines(reader, li, {
+    query: 'hello',
+    // 命中两次后取消：前半的命中必须保留（对排查有用），但结论不可信。
+    shouldCancel: () => seen++ >= 1,
+  });
+  assert.equal(r.cancelled, true);
+  assert.ok(r.matches.length >= 1, `应保留已得命中，实得=${r.matches.length}`);
+});
+
+test('filterLines: 被取消时同样标记 cancelled', async () => {
+  const { reader, li } = await makeCtx();
+  const r = await filterLines(
+    reader,
+    li,
+    { field: 'b', op: 'contains', value: 'hello' },
+    {
+      shouldCancel: () => true,
+    }
+  );
+  assert.equal(r.cancelled, true);
+  assert.equal(r.truncated, false);
+});

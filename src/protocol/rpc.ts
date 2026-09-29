@@ -208,6 +208,14 @@ export interface SearchResultsPayload {
   total: number;
   /** 是否因达到 maxResults 而提前终止（仍有更多命中未列出）。 */
   truncated: boolean;
+  /**
+   * 是否被主动取消（本次只是「扫到一半」的片段，不是命中全集）。
+   *
+   * 与 `truncated` 严格区分：前者意味着「结果是可信子集，只是没列尽」，
+   * 后者意味着「此后是否还有命中一无所知」。前端据此只提示「已中断」，
+   * 而宿主侧的批量替换会直接拒绝基于它的改写。
+   */
+  cancelled?: boolean;
 }
 
 /** 字段过滤结果有效载荷。matches 为 null 表示「不过滤 = 全量视图」。 */
@@ -217,6 +225,8 @@ export interface FilterResultsPayload {
   total: number;
   /** 是否因达到宿主结果上限而提前终止（仍有更多匹配未列出）。 */
   truncated?: boolean;
+  /** 是否被主动取消（结果只是扫描到一半的片段）。语义同 `SearchResultsPayload.cancelled`。 */
+  cancelled?: boolean;
 }
 
 /** 行替换结果。业务失败（冲突 / 校验不过 / 权限不足）也走此载荷，便于前端结构化处理。 */

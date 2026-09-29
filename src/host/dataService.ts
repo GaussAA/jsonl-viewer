@@ -1115,6 +1115,13 @@ export class DataService {
 
     // ① 搜索定位（走 host：worker 或主线程兜底）
     const found = await this.search(query, undefined, 'all');
+    // 被中断的搜索只知道「扫到哪儿」，此后是否还有命中一无所知 ——
+    // 基于它做批量改写就是「漏改一批行却报成功」，宁可拒绝重来。
+    if (found.cancelled) {
+      return DataService.replaceFailure(
+        '查找在扫描完成前被中断，无法确认待改行的全集，已拒绝批量替换；请重试。'
+      );
+    }
     if (found.truncated) {
       return DataService.replaceFailure(
         `命中行超过 ${SEARCH_MAX_RESULTS} 行，无法确认待改行的全集，已拒绝批量替换；请缩小查找范围。`
@@ -2307,7 +2314,9 @@ export class DataService {
     const res = await this.host!.search(query, field, range, SEARCH_MAX_RESULTS, shouldCancel);
     // 残缺结果不缓存：被取消 / 超限截断的都是半份答案，缓存下来会让用户
     // 「再搜一次」依旧拿到不完整的结论，还以为这就是全部。
-    if (!res.truncated) this.rememberQuery(key, res);
+    // 注意 `cancelled` 必须与 `truncated` 一样排除在外 —— 前者甚至是「没扫完」，
+    // 连「结果是可信子集」都不成立（例如某段区间压根没查）。
+    if (!res.truncated && !res.cancelled) this.rememberQuery(key, res);
     return res;
   }
 
@@ -2322,7 +2331,7 @@ export class DataService {
     const hit = this.queryCache.get(key);
     if (hit) return cloneFilterResult(hit as FilterLinesResult);
     const res = await this.host!.filter(cond, FILTER_MAX_RESULTS, shouldCancel);
-    if (!res.truncated) this.rememberQuery(key, res);
+    if (!res.truncated && !res.cancelled) this.rememberQuery(key, res);
     return res;
   }
 
