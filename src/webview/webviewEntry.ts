@@ -1143,6 +1143,24 @@ export function main(): void {
     );
   });
 
+  // F6 追尾：宿主已把尾部新增的行并入索引。行号不变、只有总数变大 —— 更新总数即可，
+  // 已渲染内容不受影响，也不打断当前视图（「跟随末尾」的自动滚动属下一批）。
+  // 有活跃筛选 / 搜索时必须开口：那些结果集不含新行，静默会让用户误以为「筛完了」。
+  bus.onTailAppended((info) => {
+    if (!state.overview) return;
+    state.overview = {
+      ...state.overview,
+      totalLines: info.totalLines,
+      totalRecords: info.totalRecords,
+      totalBytes: info.totalBytes,
+    };
+    list.setTotalRows(info.totalRecords);
+    updateToolbar();
+    if (state.filterMap !== null || state.searchMatches.length > 0) {
+      banner.show('文件有新增内容（已跟进），当前筛选 / 搜索结果未包含新行，可重新执行。');
+    }
+  });
+
   /**
    * 文档复位推送（放弃改动 / revert 触发）。
    *

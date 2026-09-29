@@ -13,7 +13,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { LineIndex, applyIndexOps, type IndexDeltaOp } from '../lineIndex.ts';
+import { LineIndex, applyIndexOps, tailAppendOp, type IndexDeltaOp } from '../lineIndex.ts';
 import {
   MemoryReader,
   readLineBuffer,
@@ -680,4 +680,123 @@ test('O16：readRecord 能正确取回超长行**之后**的记录', async () =>
   const r = await readRecord(1, li, reader, { maxLineBytes: 4096 });
   assert.equal(r.ok, true);
   assert.deepEqual(r.value, { i: 7 }, '第 1 行（0 基）应取回第二条记录，而不是超长行的尾巴');
+});
+
+/* ------------------------- F6：追尾增量（appendTail） ------------------------- */
+
+/**
+ * 判据：「先建前段 + 追尾后段」必须与「一次性整量构建」**逐字段一致**。
+ *
+ * 这比「行数对不对」强得多 —— 检查点只要错一格，其后每次读取都会整体错位一行，
+ * 而那恰恰是最难从症状反推的故障（内容看着大体正确，只是贴错了行号）。
+ */
+async function expectTailEqualsFullBuild(full: string, head: string, interval = 4): Promise<void> {
+  const base = await buildFromString(head, 3, { checkpointInterval: interval });
+  const res = base.appendTail(Buffer.from(full.slice(head.length)));
+  assert.equal(res.ok, true, '前提满足时应吸收');
+  if (!res.ok) return;
+
+  const whole = await buildFromString(full, 3, { checkpointInterval: interval });
+  assert.equal(res.index.totalLines, whole.totalLines, '总行数一致');
+  assert.equal(res.index.totalBytes, whole.totalBytes, '总字节一致');
+  assert.deepEqual(res.index.checkpoints, whole.checkpoints, '检查点逐条一致');
+  assert.equal(res.index.multiline, whole.multiline, '紧凑性判定一致');
+  assert.equal(res.index.endsWithNewline, whole.endsWithNewline, '吸收点性质一致');
+}
+
+test('F6：追尾与整量重建逐字段等价（多个切分点，含检查点对齐）', async () => {
+  const lines = makeLines(20);
+  const full = lines.join('\n') + '\n';
+  // 切分点覆盖：不落在检查点间隔上 / 正落在间隔上 / 末尾一行。
+  for (const at of [1, 2, 4, 5, 8, 17, 19]) {
+    await expectTailEqualsFullBuild(full, lines.slice(0, at).join('\n') + '\n');
+  }
+});
+
+test('F6：连续逐行追尾（模拟日志增长）最终与整量重建等价，且 scan 可读', async () => {
+  const lines = makeLines(30);
+  const full = lines.join('\n') + '\n';
+  let li = await buildFromString('', 3, { checkpointInterval: 4 });
+  assert.equal(li.totalLines, 0, '空文件起步');
+
+  for (const line of lines) {
+    const res = li.appendTail(Buffer.from(`${line}\n`));
+    assert.equal(res.ok, true);
+    if (res.ok) li = res.index;
+  }
+
+  const whole = await buildFromString(full, 3, { checkpointInterval: 4 });
+  assert.equal(li.totalLines, whole.totalLines);
+  assert.equal(li.totalBytes, whole.totalBytes);
+  assert.deepEqual(li.checkpoints, whole.checkpoints, '逐行追尾与一次性构建的锚点必须一致');
+  assert.deepEqual(await scanAll(li, new MemoryReader(Buffer.from(full))), lines);
+});
+
+test('F6：尾部残行不吸收（consumedBytes=0，返回原实例）', async () => {
+  const li = await buildFromString('{"a":1}\n', 3);
+  const res = li.appendTail(Buffer.from('{"a":2}'));
+  assert.equal(res.ok, true);
+  if (!res.ok) return;
+  assert.equal(res.consumedBytes, 0, '写了一半的行不算一行');
+  assert.equal(res.index, li, '没有完整行时原样返回');
+});
+
+test('F6：残行补齐后整行才并入（消费位置记在 totalBytes，字节不丢）', async () => {
+  const head = '{"a":1}\n';
+  const half = '{"a":2}'; // 写进程此刻只落了这半行
+  const full = `${head}${half}\n`;
+  const li = await buildFromString(head, 3);
+
+  // 两轮读都从**同一个** index.totalBytes 起（下列切片按字节取；此处内容为纯 ASCII，
+  // 字节偏移与字符下标重合）。第一轮那半行没换行 → 不吸收。
+  const first = li.appendTail(Buffer.from(full.slice(li.totalBytes, li.totalBytes + half.length)));
+  assert.equal(first.ok, true);
+  if (!first.ok) return;
+  assert.equal(first.consumedBytes, 0, '写了一半的行不吸收');
+
+  // 第二轮：半行写完了，这次读到整行 → 并入。
+  const second = li.appendTail(Buffer.from(full.slice(li.totalBytes)));
+  assert.equal(second.ok, true);
+  if (!second.ok) return;
+  assert.equal(second.index.totalLines, 2);
+  assert.deepEqual(await scanAll(second.index, new MemoryReader(Buffer.from(full))), [
+    '{"a":1}',
+    '{"a":2}',
+  ]);
+});
+
+test('F6：三类前提不成立时一律拒绝（调用方退回整量重建）', async () => {
+  // open-tail：旧内容末尾没有换行 —— 新字节是在**续写**末行，不是开启新行。
+  const open = await buildFromString('{"a":1}', 3);
+  assert.equal(open.endsWithNewline, false);
+  assert.deepEqual(open.appendTail(Buffer.from('\n')), { ok: false, reason: 'open-tail' });
+
+  // multiline：含空行的文件（记录号 ≠ 行号），尾部续算不可靠。
+  const multi = await buildFromString('{"a":1}\n\n', 3);
+  assert.equal(multi.multiline, true);
+  assert.deepEqual(multi.appendTail(Buffer.from('{"a":2}\n')), { ok: false, reason: 'multiline' });
+
+  // not-compact：新增区间里出现空行 / 跨行结构。
+  const base = await buildFromString('{"a":1}\n', 3);
+  assert.deepEqual(base.appendTail(Buffer.from('\n')), { ok: false, reason: 'not-compact' });
+  assert.deepEqual(base.appendTail(Buffer.from('{"a":\n2}\n')), {
+    ok: false,
+    reason: 'not-compact',
+  });
+});
+
+test('F6：追尾可经 applyIndexOps 同步到另一份索引（O1 通道）', async () => {
+  const head = '{"a":1}\n{"a":2}\n';
+  const tail = '{"a":3}\n{"a":4}\n';
+  const a = await buildFromString(head, 3, { checkpointInterval: 2 });
+  const res = a.appendTail(Buffer.from(tail));
+  assert.equal(res.ok, true);
+  if (!res.ok) return;
+
+  // b 模拟索引宿主里那份「同一状态」的索引 —— 两侧必须停在同一条 checkpoints 上。
+  const b = await buildFromString(head, 3, { checkpointInterval: 2 });
+  const synced = applyIndexOps(b, [tailAppendOp(a, res.index)]);
+  assert.equal(synced.totalLines, res.index.totalLines);
+  assert.equal(synced.totalBytes, res.index.totalBytes);
+  assert.deepEqual(synced.checkpoints, res.index.checkpoints);
 });

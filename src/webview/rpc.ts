@@ -23,6 +23,7 @@ import type {
   RpcErrorCode,
   RpcMessage,
   StaleFilePayload,
+  TailAppendedPayload,
 } from '../protocol/rpc.ts';
 import { RPC_TIMEOUT_MS } from '../constants.ts';
 
@@ -80,6 +81,8 @@ export type InitHandler = (payload: InitPayload) => void;
 export type JumpHandler = (payload: JumpToSourcePayload) => void;
 export type StaleHandler = (payload: StaleFilePayload) => void;
 export type ResetHandler = (payload: DocumentResetPayload) => void;
+/** F6 追尾：文件只在尾部增长，宿主已增量跟进（行号不变，总数变大）。 */
+export type TailAppendedHandler = (payload: TailAppendedPayload) => void;
 /** 耗时写操作的进度推送（批量重写的全文件重写阶段）。 */
 export type EditProgressHandler = (payload: EditProgressPayload) => void;
 export type ErrorHandler = (e: {
@@ -111,6 +114,7 @@ export class RpcBus {
   private readonly initHandlers = new Set<InitHandler>();
   private readonly jumpHandlers = new Set<JumpHandler>();
   private readonly staleHandlers = new Set<StaleHandler>();
+  private readonly tailHandlers = new Set<TailAppendedHandler>();
   private readonly resetHandlers = new Set<ResetHandler>();
   private readonly editProgressHandlers = new Set<EditProgressHandler>();
   private readonly errorHandlers = new Set<ErrorHandler>();
@@ -137,6 +141,7 @@ export class RpcBus {
     this.initHandlers.clear();
     this.jumpHandlers.clear();
     this.staleHandlers.clear();
+    this.tailHandlers.clear();
     this.resetHandlers.clear();
     this.editProgressHandlers.clear();
     this.errorHandlers.clear();
@@ -151,6 +156,10 @@ export class RpcBus {
   }
   onStale(cb: StaleHandler): void {
     this.staleHandlers.add(cb);
+  }
+  /** 订阅 F6 追尾推送：文件尾部有新增且索引已跟进，应更新总行数并轻提示。 */
+  onTailAppended(cb: TailAppendedHandler): void {
+    this.tailHandlers.add(cb);
   }
   /** 订阅「文档已从磁盘复位」推送（放弃改动 / revert 后，应清缓存并重拉）。 */
   onDocumentReset(cb: ResetHandler): void {
@@ -244,6 +253,12 @@ export class RpcBus {
     }
     if (msg.type === HostReply.FILE_STALE) {
       for (const h of this.staleHandlers) h((msg as { payload: StaleFilePayload }).payload);
+      return;
+    }
+    if (msg.type === HostReply.TAIL_APPENDED) {
+      for (const h of this.tailHandlers) {
+        h((msg as { payload: TailAppendedPayload }).payload);
+      }
       return;
     }
     if (msg.type === HostReply.DOCUMENT_RESET) {

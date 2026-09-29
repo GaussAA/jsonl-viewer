@@ -130,6 +130,13 @@ export const HostReply = {
   JUMP_TO_SOURCE: 'jumpToSource',
   /** host 主动推送：文件已变更，索引可能过期（webview 展示「重新加载」）。 */
   FILE_STALE: 'fileStale',
+  /**
+   * host 主动推送：文件只在尾部增长，索引已**增量跟进**（F6 追尾）。
+   *
+   * 与 FILE_STALE 互斥：能追上就不打扰用户；webview 只需更新总行数并轻提示，
+   * 已渲染行的行号不变（追加不动旧行）。
+   */
+  TAIL_APPENDED: 'tailAppended',
   /** 行替换结果（成功与业务失败均走此回执，便于携带冲突等结构化原因）。 */
   EDIT_RESULT: 'editResult',
   /** host 主动推送：文档已从磁盘整体复位（放弃改动 / revert），webview 应清缓存并重拉。 */
@@ -230,6 +237,13 @@ export interface StaleFilePayload {
   message: string;
   /** 是否检测到文件被删除（vs 内容变更）。 */
   deleted: boolean;
+}
+
+/** 追尾跟进成功的通告载荷（F6）。行号不变，只是总数变大。 */
+export interface TailAppendedPayload {
+  totalLines: number;
+  totalRecords: number;
+  totalBytes: number;
 }
 
 /** 搜索结果有效载荷。 */
@@ -684,6 +698,7 @@ export type HostResponse =
   | { type: typeof HostReply.ERROR; requestId?: string; message: string; code?: RpcErrorCode }
   | { type: typeof HostReply.JUMP_TO_SOURCE; payload: JumpToSourcePayload }
   | { type: typeof HostReply.FILE_STALE; payload: StaleFilePayload }
+  | { type: typeof HostReply.TAIL_APPENDED; payload: TailAppendedPayload }
   | { type: typeof HostReply.EDIT_RESULT; requestId: string; payload: EditResultPayload }
   | { type: typeof HostReply.DOCUMENT_RESET; payload: DocumentResetPayload }
   | { type: typeof HostReply.REPLACE_RESULT; requestId: string; payload: ReplaceResultPayload }

@@ -85,6 +85,24 @@ export interface ScannedLine extends LineRange {
   error?: string;
 }
 
+/** 追尾增量被拒绝的原因（调用方据此退回整量重建，而不是硬凑）。 */
+export type TailRejectReason =
+  /** 索引本身没扫到 EOF（eof=false）——「文件末尾」无从谈起。 */
+  | 'incomplete-index'
+  /** 多行 / 含空行文件：记录分组需从头维护，尾部续算不可靠。 */
+  | 'multiline'
+  /** 旧内容末尾不是干净换行（末行未闭合）—— 新字节在续写那一行，不是新行。 */
+  | 'open-tail'
+  /** 新增字节里出现空行或结构未闭合的记录：文件已不再是「每行一条」的紧凑形态。 */
+  | 'not-compact';
+
+/** `appendTail` 的结果。 */
+export type TailAppendResult =
+  /** 已吸收：`index` 为新实例，`consumedBytes` 为本次并入的字节数（**可为 0**：尾部还没有完整行）。 */
+  | { ok: true; index: LineIndex; consumedBytes: number }
+  /** 拒绝：调用方必须退回整量重建。 */
+  | { ok: false; reason: TailRejectReason };
+
 interface Checkpoint {
   line: number;
   offset: number;
@@ -114,6 +132,17 @@ export class LineIndex implements LineIndexStats {
   readonly recordEndOffsets: ReadonlyArray<number> | undefined;
   /** 是否存在跨行记录或空行（决定记录号是否等于行号）。 */
   readonly multiline: boolean;
+  /**
+   * **索引的吸收点**是否落在换行符之后（即 `totalBytes` 处恰好是一行的边界）。
+   *
+   * 追尾增量（`appendTail`）的前提之一：末行未闭合时，新字节是在**续写**那一行，
+   * 而不是开启新行 —— 此时以「追加行」的方式并入会凭空多算一行。
+   *
+   * 派生实例（编辑增量）沿用父实例的值：编辑以「行」为单位、行含行尾，故这一点
+   * 不变（唯一例外是改动最后一行且原末尾无换行 —— 那之后的 `appendTail` 会被
+   * 紧凑性校验再挡一次，见该方法说明）。
+   */
+  readonly endsWithNewline: boolean;
 
   constructor(
     checkpoints: Checkpoint[],
@@ -122,7 +151,9 @@ export class LineIndex implements LineIndexStats {
     interval: number,
     stats: { buildMs?: number; eof?: boolean } = {},
     records:
-      { endLines: ReadonlyArray<number>; endOffsets: ReadonlyArray<number> } | undefined = undefined
+      | { endLines: ReadonlyArray<number>; endOffsets: ReadonlyArray<number> }
+      | undefined = undefined,
+    endsWithNewline = true
   ) {
     this.checkpoints = checkpoints;
     this.totalBytes = totalBytes;
@@ -133,6 +164,7 @@ export class LineIndex implements LineIndexStats {
     this.recordEndLines = records?.endLines;
     this.recordEndOffsets = records?.endOffsets;
     this.multiline = records !== undefined;
+    this.endsWithNewline = endsWithNewline;
   }
 
   /** 记录总数：紧凑文件等于行数，多行文件等于分组数。 */
@@ -296,7 +328,18 @@ export class LineIndex implements LineIndexStats {
     const records = multiline
       ? { endLines: recordEndLines, endOffsets: recordEndOffsets }
       : undefined;
-    return new LineIndex(checkpoints, totalBytes, line, interval, { buildMs, eof }, records);
+    // 吸收点是否落在换行之后：`startOff` 停在最后一个已闭合行的末尾，故它与 EOF 重合
+    // 即表示最后一个字节就是换行（`startOff < totalBytes` 则末尾有一段未闭合的内容）。
+    const endsWithNewline = startOff === totalBytes;
+    return new LineIndex(
+      checkpoints,
+      totalBytes,
+      line,
+      interval,
+      { buildMs, eof },
+      records,
+      endsWithNewline
+    );
   }
 
   /** 二分：≤ line 的最大检查点下标；检查点数组按 line 升序。 */
@@ -499,10 +542,15 @@ export class LineIndex implements LineIndexStats {
     const next = this.checkpoints.map((cp) =>
       cp.line > line ? { line: cp.line, offset: cp.offset + deltaBytes } : cp
     );
-    return new LineIndex(next, this.totalBytes + deltaBytes, this.totalLines, this.interval, {
-      buildMs: this.buildMs,
-      eof: this.eof,
-    });
+    return new LineIndex(
+      next,
+      this.totalBytes + deltaBytes,
+      this.totalLines,
+      this.interval,
+      { buildMs: this.buildMs, eof: this.eof },
+      undefined,
+      this.endsWithNewline
+    );
   }
 
   /**
@@ -522,10 +570,15 @@ export class LineIndex implements LineIndexStats {
     // 空文件首次插入：原本没有任何检查点可平移，必须补上第 0 行的锚点，
     // 否则 scan 找不到顺读起点（会访问 checkpoints[0] === undefined）。
     if (this.totalLines === 0) {
-      return new LineIndex([{ line: 0, offset: 0 }], insertedBytes, 1, this.interval, {
-        buildMs: this.buildMs,
-        eof: this.eof,
-      });
+      return new LineIndex(
+        [{ line: 0, offset: 0 }],
+        insertedBytes,
+        1,
+        this.interval,
+        { buildMs: this.buildMs, eof: this.eof },
+        undefined,
+        this.endsWithNewline
+      );
     }
 
     const next = this.checkpoints.map((cp) =>
@@ -543,7 +596,9 @@ export class LineIndex implements LineIndexStats {
       this.totalBytes + insertedBytes,
       this.totalLines + 1,
       this.interval,
-      { buildMs: this.buildMs, eof: this.eof }
+      { buildMs: this.buildMs, eof: this.eof },
+      undefined,
+      this.endsWithNewline
     );
   }
 
@@ -581,7 +636,9 @@ export class LineIndex implements LineIndexStats {
       Math.max(0, this.totalBytes - removedBytes),
       this.totalLines - 1,
       this.interval,
-      { buildMs: this.buildMs, eof: this.eof }
+      { buildMs: this.buildMs, eof: this.eof },
+      undefined,
+      this.endsWithNewline
     );
   }
 
@@ -625,10 +682,98 @@ export class LineIndex implements LineIndexStats {
       }
       return shift === 0 ? cp : { line: cp.line, offset: cp.offset + shift };
     });
-    return new LineIndex(next, this.totalBytes + total, this.totalLines, this.interval, {
-      buildMs: this.buildMs,
-      eof: this.eof,
-    });
+    return new LineIndex(
+      next,
+      this.totalBytes + total,
+      this.totalLines,
+      this.interval,
+      { buildMs: this.buildMs, eof: this.eof },
+      undefined,
+      this.endsWithNewline
+    );
+  }
+
+  /**
+   * 追尾增量：把「已知 EOF 之后新增的字节」并入索引，返回**新实例**（不可变语义）。
+   *
+   * 存在的理由：JSONL 里有很大一部分是**正在增长的日志**。整文件重扫在 GB 级要数秒到
+   * 数十秒，而用户往往只想看最新的几十条 —— 只扫新增的那几 KB 才是相称的代价。
+   *
+   * ## 前提（任一不成立即拒绝，由调用方退回整量重建）
+   * - `eof`：索引本身扫到了 EOF，否则「末尾」无从谈起；
+   * - `!multiline`：多行 / 含空行（含跨行 pretty 记录）的记录分组需从头维护，尾部续算不可靠；
+   * - `endsWithNewline`：旧内容末尾是干净的换行。末行未闭合时，新字节是在**续写**那一行，
+   *   以「追加新行」并入会凭空多算一行。
+   *
+   * ## 只吸收到最后一个换行符
+   * 尾部若残留「写了一半的行」（没有 `\n`），**不吸收**它：消费位置就记在 `totalBytes` 里，
+   * 下一次调用仍会从那里重新读到它 —— 既不需要额外状态，也不会把半行 JSON 当成一条坏记录。
+   * 由此得到一条必须写明的语义：`appendTail` 之后 `totalLines` 可能**小于**对同一时刻的
+   * 文件做整量构建的结果（差末尾那条未闭合的行）。两者在各自前提下都对 —— 增量给出
+   * 「已确定的完整行」，重建给出「眼下看到的全部」。
+   *
+   * ## 新增字节的紧凑性校验
+   * 新增区间内每条记录都必须**结构闭合且非空**；一旦出现空行或跨行结构，说明文件已不是
+   * 「每行一条记录」的形态（那会让记录号 ≠ 行号），整批拒绝。这是「只服务紧凑文件」这一
+   * 前提的最后一道闸门。
+   *
+   * 复杂度 O(新增字节)；`tail` 的大小由调用方把握（它决定一次读多少）。
+   */
+  appendTail(tail: Buffer): TailAppendResult {
+    if (!this.eof) return { ok: false, reason: 'incomplete-index' };
+    if (this.multiline) return { ok: false, reason: 'multiline' };
+    if (!this.endsWithNewline) return { ok: false, reason: 'open-tail' };
+
+    const cut = tail.lastIndexOf(0x0a);
+    if (cut < 0) return { ok: true, index: this, consumedBytes: 0 };
+
+    const checkpoints: Checkpoint[] = [...this.checkpoints];
+    const base = this.totalBytes;
+    let line = this.totalLines;
+    let startOff = base;
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    let hasContent = false;
+
+    for (let i = 0; i <= cut; i++) {
+      const b = tail[i];
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (b === 0x5c /* \ */) escaped = true;
+        else if (b === 0x22 /* " */) inString = false;
+        continue;
+      }
+      if (b === 0x0a) {
+        // 空行 / 结构未闭合：文件已不是紧凑形态 → 整批拒绝（见方法说明）。
+        if (!hasContent || depth !== 0) return { ok: false, reason: 'not-compact' };
+        if (line % this.interval === 0) checkpoints.push({ line, offset: startOff });
+        line++;
+        startOff = base + i + 1;
+        hasContent = false;
+        continue;
+      }
+      if (b === 0x22) inString = true;
+      else if (b === 0x7b /* { */ || b === 0x5b /* [ */) depth++;
+      else if (b === 0x7d /* } */ || b === 0x5d /* ] */) {
+        if (depth > 0) depth--;
+      }
+      if (b !== 0x20 && b !== 0x09 && b !== 0x0d) hasContent = true;
+    }
+
+    return {
+      ok: true,
+      index: new LineIndex(
+        checkpoints,
+        base + cut + 1,
+        line,
+        this.interval,
+        { buildMs: this.buildMs, eof: true },
+        undefined,
+        true // 吸收点必定落在换行之后
+      ),
+      consumedBytes: cut + 1,
+    };
   }
 
   toStats(): LineIndexStats {
@@ -658,7 +803,21 @@ export type IndexDeltaOp =
   /** 在第 line 行之前插入一行，该行连同行尾共 bytes 字节。 */
   | { kind: 'insert'; line: number; bytes: number }
   /** 删除第 line 行，该行连同行尾共 bytes 字节。 */
-  | { kind: 'delete'; line: number; bytes: number };
+  | { kind: 'delete'; line: number; bytes: number }
+  /**
+   * 追尾：在已知 EOF 之后并入若干完整行（`appendTail` 的产物）。
+   *
+   * `checkpoints` 是这些新行里落在检查点间隔上的锚点，按行号升序、且**严格大于**
+   * 既有最大锚点行号 —— 故接收侧只需拼接，无需重排或平移。
+   */
+  | {
+      kind: 'append';
+      /** 新增的完整行数（吸收区间内的换行数）。 */
+      lines: number;
+      /** 新增的字节数（吸收区间长度）。 */
+      bytes: number;
+      checkpoints: ReadonlyArray<{ line: number; offset: number }>;
+    };
 
 /**
  * 按序应用一批增量 op，返回新实例（不可变语义）。
@@ -691,7 +850,39 @@ export function applyIndexOps(li: LineIndex, ops: readonly IndexDeltaOp[]): Line
       case 'delete':
         cur = cur.applyLineDelete(op.line, op.bytes);
         break;
+      case 'append': {
+        // 追尾：新锚点本就升序且大于既有最大锚点 → 直接拼接（紧凑文件无记录分组）。
+        const merged: Checkpoint[] = [...cur.checkpoints, ...op.checkpoints];
+        cur = new LineIndex(
+          merged,
+          cur.totalBytes + op.bytes,
+          cur.totalLines + op.lines,
+          cur.interval,
+          { buildMs: cur.buildMs, eof: true },
+          undefined,
+          true // appendTail 的吸收点必定落在换行之后
+        );
+        break;
+      }
     }
   }
   return cur;
+}
+
+/**
+ * 把一次成功的 `appendTail` 结果描述成可下发给索引宿主的增量 op。
+ *
+ * 与 `applyIndexOps` 同源：**如何描述一次追尾**只有这一处 —— 否则宿主与 worker 侧
+ * 早晚会长出两种解释（O1 已就同类问题定过规矩）。
+ */
+export function tailAppendOp(prev: LineIndex, next: LineIndex): IndexDeltaOp {
+  return {
+    kind: 'append',
+    lines: next.totalLines - prev.totalLines,
+    bytes: next.totalBytes - prev.totalBytes,
+    checkpoints: next.checkpoints.slice(prev.checkpoints.length).map((c) => ({
+      line: c.line,
+      offset: c.offset,
+    })),
+  };
 }

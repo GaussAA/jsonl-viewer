@@ -18,15 +18,24 @@ import { FILE_STALE_POLL_MS } from '../constants.ts';
  *
  * 形状与 `DataService.checkStale()` 的返回**逐字段一致**（判别联合）：这样宿主把
  * 真实服务接进来时不需要任何转换层 —— 转换层正是那种「加一个字段忘了同步」的地方。
+ *
+ * `appended` 分支是 F6 追尾：文件只在尾部增长、索引已增量跟进 —— 这**不是走样**
+ * （基线已被更新），走自己的出口（`onAppended`），且要复位 `staleSignaled`
+ * （追尾说明文件在动，此前的「已提示」前提已不成立）。
  */
 export type StaleCheckLike =
-  { changed: false } | { changed: true; deleted: boolean; message: string } | null;
+  | { changed: false }
+  | { changed: true; deleted: boolean; message: string }
+  | { appended: true; totalLines: number; totalRecords: number; totalBytes: number }
+  | null;
 
 export interface StaleWatchDeps {
   /** 检测一次：返回 null 表示本轮不判定。 */
   checkStale(): Promise<StaleCheckLike | null>;
   /** 推送 FILE_STALE。形状即 `StaleFilePayload`。 */
   signal(payload: { message: string; deleted: boolean }): void;
+  /** 追尾成功：索引已就地扩展，通知前端刷新总行数（可选；F6）。 */
+  onAppended?(info: { totalLines: number; totalRecords: number; totalBytes: number }): void;
   /** 轮询间隔（毫秒）；默认 `FILE_STALE_POLL_MS`。测试注入极小值以免等 5 秒。 */
   pollMs?: number;
 }
@@ -50,8 +59,18 @@ export function startStaleWatch(deps: StaleWatchDeps): ReturnType<typeof setInte
         res = null;
       }
       try {
-        if (!res || !res.changed) {
+        if (!res) {
           // 复位：变化消失后必须能再次提示，否则「改回正常再改坏」将永远收不到提醒。
+          staleSignaled = false;
+          return;
+        }
+        if ('appended' in res) {
+          // 追尾成功不是走样：走自己的出口，并复位「已提示」（文件在动，旧提示的前提已变）。
+          staleSignaled = false;
+          deps.onAppended?.(res);
+          return;
+        }
+        if (!res.changed) {
           staleSignaled = false;
           return;
         }

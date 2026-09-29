@@ -140,3 +140,26 @@ test('O14：clearInterval 后彻底停止（teardown 不留后台轮询）', asy
   await settle();
   assert.equal(calls, frozen, '停止后不再有任何检测');
 });
+
+test('F6：追尾不是走样 —— 走 onAppended 出口，且复位「已提示」', async () => {
+  let mode: 'appended' | 'stale' = 'appended';
+  const appended: number[] = [];
+  const signals: string[] = [];
+  const timer = startStaleWatch({
+    checkStale: async (): Promise<StaleCheckLike> =>
+      mode === 'appended'
+        ? { appended: true, totalLines: 10, totalRecords: 10, totalBytes: 1024 }
+        : { changed: true, deleted: false, message: '走样' },
+    signal: (p) => signals.push(p.message),
+    onAppended: (info) => appended.push(info.totalLines),
+    pollMs: POLL,
+  });
+  await waitUntil(() => appended.length >= 1);
+  assert.equal(signals.length, 0, '追尾不该弹走样横幅');
+
+  mode = 'stale';
+  await waitUntil(() => signals.length >= 1);
+  clearInterval(timer);
+  assert.ok(appended.length >= 1, '追尾走了 onAppended 出口');
+  assert.equal(signals.length, 1, '追尾之后走样仍能正常提示（「已提示」状态被追尾复位）');
+});

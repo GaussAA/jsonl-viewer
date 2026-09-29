@@ -14,7 +14,7 @@
  */
 
 import { stat } from 'node:fs/promises';
-import { LineIndex, applyIndexOps, type IndexDeltaOp } from '../indexer/lineIndex.ts';
+import { LineIndex, applyIndexOps, tailAppendOp, type IndexDeltaOp } from '../indexer/lineIndex.ts';
 import type { ByteReader, ReadRecordOpts } from '../parser/jsonParser.ts';
 import {
   openFileReader,
@@ -50,6 +50,8 @@ import {
   PROGRESS_THROTTLE_MS,
   QUERY_CACHE_MAX,
   MAX_EXPORT_LINES,
+  TAIL_APPEND_MAX_BYTES,
+  TAIL_ANCHOR_BYTES,
 } from '../constants.ts';
 import {
   discardOrphanBackup,
@@ -212,6 +214,13 @@ export interface FileSnapshot {
 export type StaleCheckResult =
   { changed: false } | { changed: true; deleted: boolean; message: string } | null;
 
+/** 一次成功追尾的结果（供扩展层推给 webview 刷新总行数）。 */
+export interface TailAppendedInfo {
+  totalLines: number;
+  totalRecords: number;
+  totalBytes: number;
+}
+
 export interface DataServiceOptions {
   onProgress?: (info: { bytesRead: number; lines: number; done: boolean }) => void;
   readLine?: ReadRecordOpts;
@@ -346,6 +355,14 @@ export class DataService {
   private editing = false;
 
   /**
+   * 追尾指纹：吸收点之前 `TAIL_ANCHOR_BYTES` 字节的副本（连同追尾点 offset 一起保存）。
+   *
+   * 下一轮追尾前先读当前文件的同区间与之比对 —— 文件若被整体替换（日志轮转 / 截断后
+   * 重写），size 同样会变大，只看 size/mtime 分不出来；内容不一致即拒绝追尾。
+   */
+  private tailAnchor: { offset: number; bytes: Buffer } | undefined;
+
+  /**
    * 待回填给索引宿主的增量 op —— 与 `this.index` 的每一步增量是**同一事实**。
    *
    * 为何排队而非每次同步：一次「全部替换」可产出成千上万个 op，逐个跨线程回填是纯浪费；
@@ -440,6 +457,8 @@ export class DataService {
           this.buildStats = stats;
           // 记下本次索引对应的磁盘快照，供后续「文件变更」检测作基线。
           this.snapshot = await this.currentSnapshot();
+          // 追尾指纹同步建立：否则首次追尾必然空转一个轮询周期。
+          await this.refreshTailAnchor(index);
           return index;
         } catch (e) {
           // 失败后允许重试：清空 building，否则后续所有请求会永久 reject。
@@ -483,6 +502,79 @@ export class DataService {
       return { changed: true, deleted: false, message: '文件已更改，行索引可能过期，请重新加载。' };
     }
     return { changed: false };
+  }
+
+  /**
+   * 追尾增量（F6 最小版）：文件**只在尾部增长**时，把新增的完整行并入索引，
+   * 免去 GB 级文件的整量重扫。返回 null 表示本次没有跟进 —— 调用方应继续走
+   * 既有的走样判定（横幅提示重新加载），而不是自行重试。
+   *
+   * 为何拒绝时不自动重建：重建是 O(文件大小) 的重 IO（GB 级数十秒），放在 5s 轮询
+   * 回调里会把后台轮询变成周期性卡顿；横幅让用户自己决定时机。
+   *
+   * 各道闸门（任一不满足即静默放弃，交给横幅）：
+   * - 编辑进行中 / 有未回填的写增量：文件正被本进程改写，尾部读到的是半成品；
+   * - size 未增长：无追尾可言（缩小 / 持平交给走样判定）；
+   * - 索引前提：`eof`、紧凑（`!multiline`）、吸收点落在换行上（`endsWithNewline`）；
+   * - 指纹一致：吸收点之前 256 字节与上次记录相同（防「size 变大但其实被整体替换」）；
+   * - 新增量有界（≤ `TAIL_APPEND_MAX_BYTES`，超限说明不是「缓缓追加」的场景）；
+   * - `appendTail` 接受：新增字节里没有空行 / 跨行结构 / 未闭合记录（详见该方法）。
+   */
+  async tryTailAppend(): Promise<TailAppendedInfo | null> {
+    if (this.editing) return null;
+    if (this.indexOps.length > 0) return null;
+    const li = await this.ensureIndex();
+    const cur = await this.currentSnapshot();
+    if (!cur || cur.size <= li.totalBytes) return null;
+    if (!li.eof || li.multiline || !li.endsWithNewline) return null;
+    if (cur.size - li.totalBytes > TAIL_APPEND_MAX_BYTES) return null;
+
+    // 指纹：锚点缺失（不该发生 —— 构建索引时已建立）或与当前吸收点不齐时重建、本次放弃。
+    if (this.tailAnchor?.offset !== li.totalBytes) {
+      await this.refreshTailAnchor(li);
+      return null;
+    }
+    // 指纹：读当前文件吸收点之前的同区间，与锚点比对 —— 不一致说明文件被整体改写过。
+    const anchorStart = Math.max(0, li.totalBytes - TAIL_ANCHOR_BYTES);
+    const probe = await this.reader!.readBytes(anchorStart, li.totalBytes - anchorStart);
+    if (!probe.equals(this.tailAnchor.bytes)) return null;
+
+    const tail = await this.reader!.readBytes(li.totalBytes, cur.size - li.totalBytes);
+    const res = li.appendTail(tail);
+    if (!res.ok || res.consumedBytes === 0) return null;
+
+    const next = res.index;
+    this.index = next;
+    // 与 O1 同一通道：把这次追尾描述成 op 回填给索引宿主（worker 与主线程共用同一解释）。
+    this.indexOps.push(tailAppendOp(li, next));
+    // 与写路径同一收口点：刷新基线快照（否则下一轮会弹「文件已更改」）、
+    // 作废坏行结论与查询缓存、回填宿主索引 —— 一个都不能少。
+    await this.refreshSnapshot();
+    // 新吸收点之前的内容刚核对过，就地刷新指纹供下一轮比对。
+    await this.refreshTailAnchor(next);
+    return {
+      totalLines: next.totalLines,
+      totalRecords: next.totalRecords,
+      totalBytes: next.totalBytes,
+    };
+  }
+
+  /**
+   * 刷新追尾指纹：记录「吸收点之前 `TAIL_ANCHOR_BYTES` 字节」的副本。
+   *
+   * 建索引 / 重建 / 追尾后都必须调用 —— 追尾首轮即可用，取决于构建时就有了锚点；
+   * 拖到追尾流程里才建，等于让用户白等一个轮询周期（实测踩过）。
+   */
+  private async refreshTailAnchor(li: LineIndex): Promise<void> {
+    if (!this.reader || li.totalBytes === 0) {
+      this.tailAnchor = undefined;
+      return;
+    }
+    const from = Math.max(0, li.totalBytes - TAIL_ANCHOR_BYTES);
+    this.tailAnchor = {
+      offset: li.totalBytes,
+      bytes: await this.reader.readBytes(from, li.totalBytes - from),
+    };
   }
 
   async getOverview(): Promise<OverviewPayload> {
@@ -1469,6 +1561,8 @@ export class DataService {
     this.buildStats = built.result.stats;
     this.reader = await openFileReader(this.path);
     this.snapshot = await this.currentSnapshot();
+    // 追尾指纹随重建一并刷新（索引的吸收点变了，旧指纹不再对应）。
+    await this.refreshTailAnchor(this.index!);
     // 行号已全变：坏行集合与「已全量扫描」结论一并作废。
     this.badLines.reset();
     // 新宿主由本次重建直接产出，索引已是最新；失同步标记随之清零。

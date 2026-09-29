@@ -242,9 +242,14 @@ function mountViewer(
 
   // O14：轮询状态机已抽到 host/staleWatch.ts（含单测）—— 这里只负责把它的两个
   // 出口接到当前会话上：查基线（data.checkStale）与推消息（post FILE_STALE）。
+  // F6：先试追尾 —— 文件只在尾部增长时增量并入索引（不打扰用户）；追不上再走样判定。
   const staleTimer = startStaleWatch({
-    checkStale: () => data.checkStale(),
+    checkStale: async () => {
+      const appended = await data.tryTailAppend();
+      return appended ? { appended: true as const, ...appended } : data.checkStale();
+    },
     signal: (payload) => post({ type: HostReply.FILE_STALE, payload }),
+    onAppended: (info) => post({ type: HostReply.TAIL_APPENDED, payload: info }),
   });
 
   // Tear down：停止 stale 检测、注销消息订阅，并**释放一次引用**
