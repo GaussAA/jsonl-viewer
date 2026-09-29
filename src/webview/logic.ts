@@ -159,6 +159,60 @@ export class ThrottleQueue<T> {
   }
 }
 
+/* ------------------- 跳转目标解析 ------------------- */
+
+/**
+ * 跳转输入的解析结果。
+ *
+ * 三种形态对应三种真实需求：翻页（页码）、定位（记录号 —— 来自日志/报错/同事给的行号）、
+ * 粗定位（比例 —— 只想跳到文件中间看看）。
+ */
+export type JumpTarget =
+  /** 1 基页码。 */
+  | { kind: 'page'; value: number }
+  /** 1 基**展示**记录号（过滤态下按当前视图计数）。 */
+  | { kind: 'record'; value: number }
+  /** 0..1 的比例。 */
+  | { kind: 'ratio'; value: number };
+
+/**
+ * 解析「跳至」输入框的内容。
+ *
+ * 语法（刻意保持极简，`#`/`L` 前缀是记录号的常见书写习惯）：
+ *   `12`      → 第 12 页
+ *   `#1234` / `L1234` → 第 1234 条记录
+ *   `50%`     → 文件的 50% 处
+ * 越界 / 非法一律返回 null —— 由调用方回退（设计体系 §3.3：非法输入不跳转，也不静默跳到别处）。
+ */
+export function parseJumpTarget(
+  raw: string,
+  ctx: { pages: number; totalRows: number }
+): JumpTarget | null {
+  const s = raw.trim();
+  if (!s) return null;
+
+  const record = /^[#lL](\d+)$/.exec(s);
+  if (record) {
+    const n = Number(record[1]);
+    if (!Number.isSafeInteger(n) || n < 1 || n > ctx.totalRows) return null;
+    return { kind: 'record', value: n };
+  }
+
+  const ratio = /^(\d+(?:\.\d+)?)%$/.exec(s);
+  if (ratio) {
+    const pct = Number(ratio[1]);
+    if (!Number.isFinite(pct) || pct < 0) return null;
+    return { kind: 'ratio', value: Math.min(1, pct / 100) };
+  }
+
+  if (/^\d+$/.test(s)) {
+    const p = Number(s);
+    if (!Number.isSafeInteger(p) || p < 1 || p > ctx.pages) return null;
+    return { kind: 'page', value: p };
+  }
+  return null;
+}
+
 /* ------------------- 缺失拉取窗口 ------------------- */
 
 export interface FetchWindow {

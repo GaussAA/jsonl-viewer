@@ -10,6 +10,7 @@
  */
 
 import type { FieldLike } from './logic.ts';
+import { parseJumpTarget } from './logic.ts';
 import { escapeHtml } from './utils.ts';
 
 /** 目录每页固定条数。 */
@@ -113,6 +114,13 @@ export class VirtualRecordList {
    */
   private selectedLines: ReadonlySet<number> = new Set();
   private page = 0; // 当前页（0 起）
+  /**
+   * 「跳至」输入框的草稿值（用户正在输入但尚未提交的内容）。
+   *
+   * 为何必须记住：分页条每次都会重建（取数完成 / 换页 / 过滤变化都会 refresh），
+   * 不记住草稿的话，用户敲到一半的输入会被重建冲掉 —— 表现为「输页码输不进去」。
+   */
+  private jumpDraft: string | undefined;
   readonly pageSize: number;
   private disposed = false;
   /** 换页动画序号：防止快速连点时旧 setTimeout 覆盖新渲染。 */
@@ -304,17 +312,40 @@ export class VirtualRecordList {
     this.render(true);
   }
 
+  /**
+   * 提交跳转输入（页码 / `#记录号` / `百分比`）。
+   *
+   * 非法或越界一律**回退原页码且不跳转**（设计体系 §3.3）—— 静默跳到别的页比不跳更糟：
+   * 用户会以为自己看到的还是他要找的位置。
+   */
   private commitPageInput(): void {
     const input = this.sideEl.querySelector<HTMLInputElement>('.jlv-pager-input');
     if (!input) return;
-    const n = Number(input.value);
-    // 非法/越界值回退原页码（设计体系 §3.3：非法输入不跳转）。
-    if (!Number.isFinite(n) || n < 1 || Math.floor(n) > this.pages) {
+    const target = parseJumpTarget(input.value, { pages: this.pages, totalRows: this.totalRows });
+    if (!target) {
+      this.jumpDraft = undefined;
       input.value = String(this.page + 1);
       return;
     }
-    this.goToPage(Math.floor(n) - 1);
-    input.value = String(this.page + 1);
+    this.jumpDraft = undefined;
+    switch (target.kind) {
+      case 'page':
+        this.goToPage(target.value - 1);
+        input.value = String(this.page + 1);
+        break;
+      case 'record':
+        // 记录号是**展示位**（1 基）：过滤态下按当前视图计数，与用户在界面上数到的一致。
+        this.reveal(this.realLine(target.value - 1));
+        break;
+      case 'ratio': {
+        const d = Math.min(
+          this.totalRows - 1,
+          Math.max(0, Math.floor(this.totalRows * target.value))
+        );
+        this.reveal(this.realLine(d));
+        break;
+      }
+    }
   }
 
   private realLine(d: number): number {
@@ -531,74 +562,84 @@ export class VirtualRecordList {
     // 右键菜单：编辑此行 / 定位到源码行 / 复制行号 / 复制该行 JSON
     card.addEventListener('contextmenu', (e) => {
       e.preventDefault();
-      const items: CtxItem[] = [];
-
-      // 右键的行若在选区中且选区不止一行 → 批量操作置顶。
-      // 用户先框选再右键，意图显然是「对这一批做点什么」，此时把单行操作放前面会误导。
-      const inSelection = this.selectedLines.has(real);
-      const selCount = this.selectedLines.size;
-      if (inSelection && selCount > 1) {
-        if (this.cb.onCopySelected) {
-          items.push({
-            label: `复制选中的 ${selCount} 行`,
-            run: () => this.cb.onCopySelected?.(),
-          });
-        }
-        if (this.cb.onDeleteSelected) {
-          items.push({
-            label: `删除选中的 ${selCount} 行`,
-            run: () => this.cb.onDeleteSelected?.(),
-          });
-        }
-        items.push({ sep: true });
-      }
-
-      if (this.cb.onEditRecord) {
-        items.push({
-          label: `编辑第 ${real + 1} 行`,
-          run: () => this.cb.onEditRecord?.(real),
-        });
-        items.push({ sep: true });
-      }
-      if (this.cb.onInsertRecord) {
-        items.push({
-          label: `在第 ${real + 1} 行前插入`,
-          run: () => this.cb.onInsertRecord?.(real),
-        });
-      }
-      if (this.cb.onDeleteRecord) {
-        items.push({
-          label: `删除第 ${real + 1} 行`,
-          run: () => this.cb.onDeleteRecord?.(real),
-        });
-        items.push({ sep: true });
-      }
-      if (this.cb.onJumpToSource) {
-        items.push({
-          label: `定位到源码行 L${real + 1}`,
-          run: () => this.cb.onJumpToSource?.(real),
-        });
-        items.push({ sep: true });
-      }
-      items.push({
-        label: `复制行号 L${real + 1}`,
-        run: () => void writeClipboard(`L${real + 1}`),
-      });
-      if (entry && entry.ok !== false && entry.value !== undefined) {
-        items.push({
-          label: '复制该行 JSON',
-          run: () => void writeClipboard(formatJsonValue(entry.value)),
-        });
-      } else if (entry && entry.truncated && this.cb.onRequestRecord) {
-        items.push({
-          label: '复制该行 JSON',
-          run: () => void this.copyFullOnDemand(real),
-        });
-      }
-      openContextMenu(e.clientX, e.clientY, items);
+      openContextMenu(e.clientX, e.clientY, this.buildCtxItems(real, entry));
     });
 
     return card;
+  }
+
+  /**
+   * 构造某一行的右键菜单项。
+   *
+   * 抽成方法是为了让**键盘入口**复用同一份清单（Shift+F10 / 菜单键）——
+   * 两处各写一份的话，日后的菜单项早晚只加到鼠标那一份上。
+   */
+  private buildCtxItems(real: number, entry: RecordEntry | undefined): CtxItem[] {
+    const items: CtxItem[] = [];
+
+    // 右键的行若在选区中且选区不止一行 → 批量操作置顶。
+    // 用户先框选再右键，意图显然是「对这一批做点什么」，此时把单行操作放前面会误导。
+    const inSelection = this.selectedLines.has(real);
+    const selCount = this.selectedLines.size;
+    if (inSelection && selCount > 1) {
+      if (this.cb.onCopySelected) {
+        items.push({
+          label: `复制选中的 ${selCount} 行`,
+          run: () => this.cb.onCopySelected?.(),
+        });
+      }
+      if (this.cb.onDeleteSelected) {
+        items.push({
+          label: `删除选中的 ${selCount} 行`,
+          run: () => this.cb.onDeleteSelected?.(),
+        });
+      }
+      items.push({ sep: true });
+    }
+
+    if (this.cb.onEditRecord) {
+      items.push({
+        label: `编辑第 ${real + 1} 行`,
+        run: () => this.cb.onEditRecord?.(real),
+      });
+      items.push({ sep: true });
+    }
+    if (this.cb.onInsertRecord) {
+      items.push({
+        label: `在第 ${real + 1} 行前插入`,
+        run: () => this.cb.onInsertRecord?.(real),
+      });
+    }
+    if (this.cb.onDeleteRecord) {
+      items.push({
+        label: `删除第 ${real + 1} 行`,
+        run: () => this.cb.onDeleteRecord?.(real),
+      });
+      items.push({ sep: true });
+    }
+    if (this.cb.onJumpToSource) {
+      items.push({
+        label: `定位到源码行 L${real + 1}`,
+        run: () => this.cb.onJumpToSource?.(real),
+      });
+      items.push({ sep: true });
+    }
+    items.push({
+      label: `复制行号 L${real + 1}`,
+      run: () => void writeClipboard(`L${real + 1}`),
+    });
+    if (entry && entry.ok !== false && entry.value !== undefined) {
+      items.push({
+        label: '复制该行 JSON',
+        run: () => void writeClipboard(formatJsonValue(entry.value)),
+      });
+    } else if (entry && entry.truncated && this.cb.onRequestRecord) {
+      items.push({
+        label: '复制该行 JSON',
+        run: () => void this.copyFullOnDemand(real),
+      });
+    }
+    return items;
   }
 
   private applySelection(): void {
@@ -698,12 +739,19 @@ export class VirtualRecordList {
     const label = document.createElement('span');
     label.textContent = '跳至';
     const input = document.createElement('input');
-    input.type = 'number';
+    // text 而非 number：要接受 `#1234` / `L1234` / `50%` 这类写法，number 输入框会把它们吞掉。
+    input.type = 'text';
+    input.inputMode = 'numeric';
     input.className = 'jlv-pager-input';
-    input.min = '1';
-    input.max = String(pages);
-    input.value = String(p + 1);
-    input.title = `输入 1-${pages} 之间的页码`;
+    input.size = 8;
+    // 正在输入的内容必须能扛住分页条重建（取数完成后会 refresh）——
+    // 否则用户输入页码到一半，数据一到就把输入冲掉了（O9）。
+    input.value = this.jumpDraft ?? String(p + 1);
+    input.title = `页码 / 记录号 / 百分比（如 12、#1234、50%）`;
+    input.setAttribute('aria-label', '跳转：页码、#记录号或百分比');
+    input.addEventListener('input', () => {
+      this.jumpDraft = input.value;
+    });
     input.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') this.commitPageInput();
     });
@@ -747,6 +795,28 @@ export class VirtualRecordList {
         e.preventDefault();
         void writeClipboard(`L${this.selectedLine + 1}`);
       }
+      return;
+    }
+
+    // 菜单键 / Shift+F10：右键菜单的键盘等价入口。
+    //
+    // 为何必须有：菜单里装着「编辑此行 / 删除 / 定位到源码行 / 复制 JSON」这些**没有其它入口**
+    // 的操作 —— 纯鼠标可及等于把它们对键盘用户整个关掉（也顺带关掉了读屏用户）。
+    if (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10')) {
+      const line = this.selectedLine;
+      if (line === undefined) return;
+      const card = (Array.from(this.inner.children) as HTMLElement[]).find(
+        (el) => Number(el.dataset.line) === line
+      );
+      if (!card) return;
+      e.preventDefault();
+      const rect = card.getBoundingClientRect();
+      // 定位到卡片右侧偏下：与鼠标右键的位置习惯一致，且不会盖住被操作的那一行。
+      openContextMenu(
+        Math.max(4, rect.right - 40),
+        Math.min(rect.bottom - 4, window.innerHeight - 8),
+        this.buildCtxItems(line, this.cb.getRecord(line))
+      );
       return;
     }
 
@@ -906,11 +976,14 @@ let ctxBound = false;
 let ctxFrame = 0;
 
 function ensureCtx(): HTMLElement {
-  if (ctxEl) return ctxEl;
-  const el = document.createElement('div');
-  el.className = 'jlv-ctx';
-  el.hidden = true;
-  document.body.appendChild(el);
+  // 复用已建元素，但**必须确认它仍挂在文档里**：一旦脱离（被宿主清空 body 之类），
+  // 继续改一个游离节点等于菜单静默不显示 —— 复用与可用性以 isConnected 为闸。
+  const el = ctxEl ?? document.createElement('div');
+  if (!ctxEl) {
+    el.className = 'jlv-ctx';
+    el.hidden = true;
+  }
+  if (!el.isConnected) document.body.appendChild(el);
   ctxEl = el;
   return el;
 }

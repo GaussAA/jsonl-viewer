@@ -4,6 +4,7 @@ import {
   computeFetchWindow,
   formatValue,
   LRUCache,
+  parseJumpTarget,
   segmentSortedLines,
   summarizeRecord,
   ThrottleQueue,
@@ -190,4 +191,38 @@ test('LRUCache.delete：返回值并释放容量；未命中返回 undefined 且
   assert.equal(c.size, 2);
   assert.equal(c.has('b'), true);
   assert.equal(c.has('c'), true);
+});
+
+/* ---------------------- parseJumpTarget（跳转输入解析） ---------------------- */
+
+test('parseJumpTarget: 纯数字按页码，越界/非法一律 null', () => {
+  const ctx = { pages: 5, totalRows: 100 };
+  assert.deepEqual(parseJumpTarget('3', ctx), { kind: 'page', value: 3 });
+  assert.equal(parseJumpTarget('6', ctx), null, '超出总页数');
+  assert.equal(parseJumpTarget('0', ctx), null);
+  assert.equal(parseJumpTarget('-2', ctx), null);
+  assert.equal(parseJumpTarget('3.5', ctx), null, '页码不接受小数');
+});
+
+test('parseJumpTarget: # / L 前缀按记录号（大小写皆可）', () => {
+  const ctx = { pages: 5, totalRows: 100 };
+  assert.deepEqual(parseJumpTarget('#87', ctx), { kind: 'record', value: 87 });
+  assert.deepEqual(parseJumpTarget('L87', ctx), { kind: 'record', value: 87 });
+  assert.deepEqual(parseJumpTarget('l87', ctx), { kind: 'record', value: 87 });
+  assert.equal(parseJumpTarget('#101', ctx), null, '超出总记录数');
+  assert.equal(parseJumpTarget('#0', ctx), null);
+});
+
+test('parseJumpTarget: 百分比归一化到 0..1，超过 100% 钳到 1', () => {
+  const ctx = { pages: 5, totalRows: 100 };
+  assert.deepEqual(parseJumpTarget('50%', ctx), { kind: 'ratio', value: 0.5 });
+  assert.deepEqual(parseJumpTarget('7.5%', ctx), { kind: 'ratio', value: 0.075 });
+  assert.deepEqual(parseJumpTarget('250%', ctx), { kind: 'ratio', value: 1 });
+});
+
+test('parseJumpTarget: 空白与垃圾输入一律 null（不静默跳到别处）', () => {
+  const ctx = { pages: 5, totalRows: 100 };
+  for (const bad of ['', '   ', 'abc', '#', '%', '1e3', '3 页']) {
+    assert.equal(parseJumpTarget(bad, ctx), null, '应拒绝：' + JSON.stringify(bad));
+  }
 });

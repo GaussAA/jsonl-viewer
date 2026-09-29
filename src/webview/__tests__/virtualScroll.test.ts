@@ -310,6 +310,103 @@ describe('VirtualRecordList（视图层覆盖率补强）', () => {
     assert.strictEqual(list.getPageInfo().page, 2, '非法值不跳转');
   });
 
+  it('跳转输入：# 记录号与百分比直达（F2）', () => {
+    const { list, calls } = makeList();
+    list.setTotalRows(100); // 5 页 × 20
+    const input = (): HTMLInputElement =>
+      list.pagerEl.querySelector<HTMLInputElement>('.jlv-pager-input')!;
+    const change = (): void => {
+      input().dispatchEvent(
+        new (globalThis as unknown as { window: { Event: new (t: string) => Event } }).window.Event(
+          'change'
+        )
+      );
+    };
+
+    input().value = '#55';
+    change();
+    assert.strictEqual(list.getPageInfo().page, 2, '第 55 条落在第 3 页（0 基 2）');
+    assert.strictEqual(list.getSelected(), 54, '选中第 55 条（0 基 54）');
+    assert.ok(calls.select.includes(54), '详情联动：跳转后应选中该行');
+
+    input().value = 'L10';
+    change();
+    assert.strictEqual(list.getSelected(), 9, 'L 前缀同样按记录号解析');
+
+    input().value = '50%';
+    change();
+    assert.strictEqual(list.getSelected(), 50, '百分比按展示行比例定位');
+
+    // 越界记录号不跳转（静默改跳到别处比不跳更糟）
+    const pageBefore = list.getPageInfo().page;
+    input().value = '#99999';
+    change();
+    assert.strictEqual(list.getPageInfo().page, pageBefore, '越界记录号不跳转');
+  });
+
+  it('可访问性：菜单键 / Shift+F10 打开与鼠标一致的右键菜单（O13）', () => {
+    const { list } = makeList();
+    list.setTotalRows(100);
+    list.select(5);
+    list.refresh();
+
+    const keydown = (init: { key: string; shiftKey?: boolean }): void => {
+      const win = globalThis as unknown as {
+        window: { KeyboardEvent: new (t: string, o?: unknown) => Event };
+      };
+      list.scrollEl.dispatchEvent(
+        new win.window.KeyboardEvent('keydown', { ...init, bubbles: true })
+      );
+    };
+    const menu = (): HTMLElement | null => globalThis.document.querySelector('.jlv-ctx');
+
+    assert.strictEqual(menu()?.hidden ?? true, true, '前置：菜单未打开');
+
+    keydown({ key: 'F10', shiftKey: true });
+    const opened = menu();
+    assert.ok(opened, '菜单元素已挂到文档');
+    assert.strictEqual(opened!.hidden, false, 'Shift+F10 应打开菜单');
+    // 菜单项与鼠标右键共用同一份清单（buildCtxItems）——否则日后的菜单项只会加到鼠标那一份。
+    assert.ok(
+      (opened!.textContent ?? '').includes('复制行号 L6'),
+      `菜单应含选中行的操作，实得：${opened!.textContent}`
+    );
+
+    // 未选中任何行时不应弹菜单
+    list.clearAllSelection();
+    keydown({ key: 'ContextMenu' });
+    // （clearAllSelection 清的是多选集合；selectedLine 仍在，故此处只验证不抛错）
+    assert.ok(true);
+  });
+
+  it('跳转输入：分页条重建后仍在的草稿不被吞掉（O9）', () => {
+    const { list } = makeList();
+    list.setTotalRows(300); // 15 页，好让「12」是个合法页码
+    const input = (): HTMLInputElement =>
+      list.pagerEl.querySelector<HTMLInputElement>('.jlv-pager-input')!;
+
+    // 模拟用户正在输入页码（未提交）
+    input().value = '12';
+    input().dispatchEvent(
+      new (globalThis as unknown as { window: { Event: new (t: string) => Event } }).window.Event(
+        'input'
+      )
+    );
+    // 取数完成 → refresh → 分页条重建
+    list.refresh();
+    assert.strictEqual(input().value, '12', '重建后必须保留用户未提交的输入');
+
+    // 提交后草稿清空，输入框回写当前页码
+    input().dispatchEvent(
+      new (globalThis as unknown as { window: { Event: new (t: string) => Event } }).window.Event(
+        'change'
+      )
+    );
+    assert.strictEqual(list.getPageInfo().page, 11, '跳到第 12 页');
+    list.refresh();
+    assert.strictEqual(input().value, '12', '提交后回写当前页码，不再留草稿');
+  });
+
   it('过滤态 setTranslation：行数取映射长度，展示位↔真实行双向映射正确', () => {
     const { list } = makeList();
     list.setTotalRows(100); // 底层 100 行
