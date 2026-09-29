@@ -26,14 +26,19 @@
  *     自 `tailStart` 起可原样拼回）；尾部超过 `MAX_TAIL_BACKUP_BYTES` 时直接拒绝执行。
  *
  * 约束：仅依赖 `node:fs/promises`，不依赖 `vscode`，可直接用临时文件单测。
+ *
+ * 对外导出（供 `backupRecovery` 复用）：`copyRangeFromFile`（把区间拷回句柄）、
+ * `tailBackupMetaPath` / `TailBackupMeta`（备份元数据的读写契约）。恢复路径与
+ * 回滚路径必须是**同一份**字节搬运实现 —— 两份各写一半的代码早晚只对一半。
  */
 
-import { chmod, open, rename, rm } from 'node:fs/promises';
+import { chmod, open, rename, rm, writeFile } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
 import {
   WRITE_BLOCK_SIZE,
   MAX_TAIL_BACKUP_BYTES,
   TAIL_BACKUP_SUFFIX,
+  TAIL_BACKUP_META_SUFFIX,
   MAX_BATCH_REWRITE_BYTES,
   REWRITE_TEMP_SUFFIX,
 } from '../constants.ts';
@@ -217,18 +222,31 @@ async function applyVariableLength(
   const maxTail = opts.maxTailBackupBytes ?? MAX_TAIL_BACKUP_BYTES;
   const tailStart = range.end;
   const tailLen = fileSize - tailStart;
+  // 备份**从被编辑行起点**到 EOF，而不是只备尾部：
+  // 崩溃可能停在「新行已写入一半」，只备尾部的话恢复出来的文件里那一行仍是坏的 ——
+  // 半吊子恢复比不恢复更危险（用户以为已经还原了）。多备一行的代价可以忽略。
+  const backupStart = range.start;
+  const backupLen = fileSize - backupStart;
 
-  if (tailLen > maxTail) {
+  if (backupLen > maxTail) {
     throw new Error(
-      `变长编辑需搬移 ${tailLen} 字节尾部，超过备份上限 ${maxTail}；` +
+      `变长编辑需备份 ${backupLen} 字节（自第 ${range.start} 字节起），超过备份上限 ${maxTail}；` +
         `请确认代价后调高 maxTailBackupBytes，或改用外部编辑器。`
     );
   }
 
   let backupPath: string | undefined;
-  if (tailLen > 0) {
+  if (backupLen > 0) {
     backupPath = path + TAIL_BACKUP_SUFFIX;
-    await copyRangeToFile(fh, tailStart, tailLen, backupPath, blockSize);
+    await copyRangeToFile(fh, backupStart, backupLen, backupPath, blockSize);
+    // 元数据**必须在搬移前落盘**：崩溃后没有它，备份就只是一段无起点信息的字节。
+    await writeBackupMeta(path, {
+      version: 1,
+      backupStart,
+      backupLen,
+      fileSize,
+      at: Date.now(),
+    });
   }
 
   try {
@@ -243,8 +261,8 @@ async function applyVariableLength(
       const restored = await rollbackToBackup(
         fh,
         backupPath,
-        tailStart,
-        tailLen,
+        backupStart,
+        backupLen,
         fileSize,
         blockSize,
         opts.fsync ?? true
@@ -253,18 +271,18 @@ async function applyVariableLength(
         throw new WriteCancelledError('已取消，文件已按备份恢复原样。', { cause: e });
       }
       const hint = backupPath
-        ? `取消后的回滚未完成，尾部原始字节仍保留在 ${backupPath}（自偏移 ${tailStart} 起可原样拼回）`
+        ? `取消后的回滚未完成，原始字节仍保留在 ${backupPath}（自偏移 ${backupStart} 起可原样拼回）`
         : '该行位于文件末尾（无尾部需搬移），文件未被修改';
       throw new WriteCancelledError(`已取消；${hint}`, { cause: e });
     }
     const hint = backupPath
-      ? `尾部原始字节已保留在 ${backupPath}（自偏移 ${tailStart} 起可原样拼回）`
-      : '该行位于文件末尾，尾部为空、无需备份';
+      ? `原始字节已保留在 ${backupPath}（自偏移 ${backupStart} 起可原样拼回）`
+      : '该行位于文件末尾，该行无尾部，文件未被修改';
     throw new Error(`变长替换失败：${describe(e)}；${hint}`, { cause: e });
   }
 
   const synced = await trySync(fh, opts.fsync ?? true);
-  if (backupPath) await rm(backupPath, { force: true }).catch(() => {});
+  if (backupPath) await clearBackup(path);
   return { bytesDelta: delta, inPlace: false, movedBytes: tailLen, synced };
 }
 
@@ -572,7 +590,7 @@ async function copyRangeToFile(
  *
  * 供回滚使用 —— 见 `rollbackToBackup` 关于「为何整体恢复而非反向搬移」的说明。
  */
-async function copyRangeFromFile(
+export async function copyRangeFromFile(
   src: string,
   fh: FileHandle,
   destOffset: number,
@@ -607,15 +625,15 @@ async function copyRangeFromFile(
 async function rollbackToBackup(
   fh: FileHandle,
   backupPath: string | undefined,
-  tailStart: number,
-  tailLen: number,
+  backupStart: number,
+  backupLen: number,
   fileSize: number,
   blockSize: number,
   fsync: boolean
 ): Promise<boolean> {
-  if (!backupPath || tailLen <= 0) return false;
+  if (!backupPath || backupLen <= 0) return false;
   try {
-    await copyRangeFromFile(backupPath, fh, tailStart, tailLen, blockSize);
+    await copyRangeFromFile(backupPath, fh, backupStart, backupLen, blockSize);
     // 搬移中途文件可能已被撑大（写入超出 EOF 会自动扩展），必须截回原大小。
     await fh.truncate(fileSize);
     await trySync(fh, fsync);
@@ -623,8 +641,47 @@ async function rollbackToBackup(
     // 回滚失败：**保留** sidecar（用户仍可手动恢复），并如实告知 —— 绝不假装已恢复。
     return false;
   }
-  await rm(backupPath, { force: true }).catch(() => {});
+  await clearBackup(dataPathOfBackup(backupPath));
   return true;
+}
+
+/** 由备份文件路径反推其所属的数据文件路径（备份路径 = 数据路径 + 后缀）。 */
+function dataPathOfBackup(backupPath: string): string {
+  return backupPath.slice(0, backupPath.length - TAIL_BACKUP_SUFFIX.length);
+}
+
+/** 备份的元数据（与备份同生共死；崩溃后据它精确恢复）。 */
+export interface TailBackupMeta {
+  version: number;
+  /** 备份内容对应数据文件中的起始偏移。 */
+  backupStart: number;
+  /** 备份内容长度。 */
+  backupLen: number;
+  /** 编辑**之前**的文件大小（恢复时据此截断）。 */
+  fileSize: number;
+  /** 写入时刻（仅供展示，不参与判定）。 */
+  at: number;
+}
+
+/** 元数据旁车路径。 */
+export function tailBackupMetaPath(path: string): string {
+  return path + TAIL_BACKUP_META_SUFFIX;
+}
+
+/** 写元数据（失败不阻断编辑：降级为「只能提示、不能自动恢复」）。 */
+async function writeBackupMeta(path: string, meta: TailBackupMeta): Promise<void> {
+  try {
+    await writeFile(tailBackupMetaPath(path), JSON.stringify(meta), 'utf8');
+  } catch {
+    // 有意吞掉：元数据是**增强**而非前提。没有它，编辑照常进行；
+    // 只是崩溃后用户看到的是「无法自动恢复的孤儿备份」而不是一条恢复路径。
+  }
+}
+
+/** 清除备份与其元数据（成功路径与回滚成功路径共用）。 */
+async function clearBackup(path: string): Promise<void> {
+  await rm(path + TAIL_BACKUP_SUFFIX, { force: true }).catch(() => {});
+  await rm(tailBackupMetaPath(path), { force: true }).catch(() => {});
 }
 
 /* ---------------------------- 辅助 ---------------------------- */

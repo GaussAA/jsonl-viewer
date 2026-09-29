@@ -1292,6 +1292,9 @@ mark.jlv-hit {
   background: var(--jlv-warn); flex: none; margin-top: 3px;
 }
 .jlv-banner-text { flex: 1 1 auto; min-width: 0; overflow: hidden; line-height: 1.4; word-break: break-word; }
+/* 横幅的动作区：可以有一个或多个按钮（如遗留备份的「恢复 / 丢弃」）——
+   拆成容器是为了让第二个动作**有地方放**，而不是被后一次 show 覆盖掉。 */
+.jlv-banner-actions { display: flex; gap: 6px; align-items: center; flex: 0 0 auto; }
 .jlv-banner-action { white-space: nowrap; align-self: center; }
 
 /* ============================================================

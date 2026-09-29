@@ -51,6 +51,12 @@ import {
   QUERY_CACHE_MAX,
   MAX_EXPORT_LINES,
 } from '../constants.ts';
+import {
+  discardOrphanBackup,
+  inspectOrphanBackup,
+  restoreOrphanBackup,
+  type OrphanBackup,
+} from './backupRecovery.ts';
 import { exportLinesToFile, type ExportOpts } from './exporter.ts';
 import { buildIndexWithFallback, type IndexHost } from './indexHost.ts';
 import type { BuildResult } from './workerProtocol.ts';
@@ -2432,6 +2438,44 @@ export class DataService {
     const res = await this.host!.filter(cond, FILTER_MAX_RESULTS, shouldCancel);
     if (!res.truncated && !res.cancelled) this.rememberQuery(key, res);
     return res;
+  }
+
+  /**
+   * 检测中断编辑遗留的备份（O8）。**只报告，不自动恢复**。
+   *
+   * 为何不自动恢复：备份可能属于另一个会话，或已被后续的外部写入覆盖 ——
+   * 自动拿它盖回文件是拿用户的数据赌一个猜测。这里保持「告知 + 显式授权」，
+   * 与本项目对破坏性操作的一贯态度一致。
+   */
+  async inspectBackup(): Promise<OrphanBackup | null> {
+    return inspectOrphanBackup(this.path);
+  }
+
+  /**
+   * 处理遗留备份：恢复或丢弃。
+   *
+   * 恢复会**改写源文件**，因此走写链（`runExclusive`）—— 与编辑互斥；
+   * 恢复完成后必须重扫索引（磁盘内容已不是当前索引描述的那份），但**不在这里做**：
+   * 刷新由调用方（前端拿到结果后触发 reload）驱动，避免「恢复内部又重扫」把
+   * 一次用户动作变成两条并行的重建路径。
+   */
+  async resolveBackup(
+    action: 'restore' | 'discard'
+  ): Promise<{ ok: boolean; restoredBytes?: number; error?: string }> {
+    if (action === 'discard') {
+      await discardOrphanBackup(this.path);
+      return { ok: true };
+    }
+    return this.runExclusive(async () => {
+      const res = await restoreOrphanBackup(this.path);
+      if (res.ok) {
+        // 文件已被改回旧内容：基线与索引描述的都作废，标记为需重建，
+        // 让下一次查询/读取拿到的是新现状（而不是按旧偏移读到的错行）。
+        await this.refreshSnapshot();
+        this.hostDirty = true;
+      }
+      return res;
+    });
   }
 
   /**

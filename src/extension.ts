@@ -554,6 +554,33 @@ function registerHostHandlers(deps: HostHandlerDeps): vscode.Disposable {
             // 把它当全量会得出「文件挺干净」这种与事实相反的结论。
             [HostEndpoint.GET_BAD_LINES]: async (req) =>
               okReply(HostReply.BAD_LINES, req.requestId, data.getBadLines()),
+            // 遗留备份检测（O8）：只报告，不自动恢复 —— 备份可能属于另一个会话，
+            // 自动拿它盖回文件是拿用户的数据赌一个猜测。
+            [HostEndpoint.BACKUP_STATUS]: async (req) => {
+              const info = await data.inspectBackup();
+              return okReply(
+                HostReply.BACKUP_STATUS_RESULT,
+                req.requestId,
+                info
+                  ? {
+                      present: true,
+                      backupPath: info.backupPath,
+                      backupBytes: info.backupBytes,
+                      recoverable: info.recoverable,
+                      ...(info.reason ? { reason: info.reason } : {}),
+                    }
+                  : { present: false }
+              );
+            },
+            // 恢复 / 丢弃遗留备份。恢复会改写源文件（走写链），完成后由 webview
+            // 触发 reload 重扫 —— 这里不自动重扫，一次用户动作不该变成两条重建路径。
+            [HostEndpoint.RECOVER_BACKUP]: async (req) => {
+              const res = await data.resolveBackup(req.action);
+              if (res.ok && req.action === 'restore') {
+                hostLog('已从遗留备份恢复文件', { bytes: res.restoredBytes ?? 0 });
+              }
+              return okReply(HostReply.RECOVER_BACKUP_RESULT, req.requestId, res);
+            },
             // 导出子集：先由**宿主**弹保存对话框（webview 拿不到文件系统），
             // 再把选定路径交给数据服务做「只读源 + 原子写新文件」。
             // 取消对话框与取消写入都报 cancelled —— 与失败严格分开（目标文件从未被创建）。

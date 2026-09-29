@@ -41,6 +41,15 @@ export const MAX_TAIL_BACKUP_BYTES = 64 * 1024 * 1024;
 export const TAIL_BACKUP_SUFFIX = '.jlv-tail-bak';
 
 /**
+ * 备份的**元数据旁车**后缀（与备份同生共死）。
+ *
+ * 为何必须有它：备份文件本身只是「一段字节」，没有起点信息（`backupStart`）就无从拼回 ——
+ * 进程崩溃后被强杀，内存里的偏移随之消失，磁盘上只剩一个不知从何用起的孤儿文件。
+ * 有了元数据，恢复是一条**确定路径**；没有它，只能提示用户「这里有个东西，你自己看」。
+ */
+export const TAIL_BACKUP_META_SUFFIX = '.jlv-tail-bak.json';
+
+/**
  * 批量重写（查找替换）的文件大小上限：1GB。
  *
  * 批量替换走「写同目录临时文件 + 原子 rename」，临时空间需求**等于文件大小**。

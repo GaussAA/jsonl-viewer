@@ -41,6 +41,7 @@ import { createAppState, viewBaseline } from './appState.ts';
 import type { VSCodeApi } from './rpc.ts';
 import { summarizeWithLayout } from './queryLogic.ts';
 import { HostEndpoint } from '../protocol/rpc.ts';
+import type { BackupStatusPayload, RecoverBackupPayload } from '../protocol/rpc.ts';
 import type { EditResultPayload, HistoryPayload, HistoryResultPayload } from '../protocol/rpc.ts';
 import type { InitPayload, OverviewPayload, RecordsPayload } from '../protocol/rpc.ts';
 import { CSS_TEXT } from './styles.ts';
@@ -88,6 +89,13 @@ function clamp(v: number, lo: number, hi: number): number {
 function createBanner(): {
   root: HTMLElement;
   show(text: string, actionLabel?: string, onAction?: () => void): void;
+  /**
+   * 多动作横幅（如遗留备份的「恢复 / 丢弃」）。
+   *
+   * 为何不让调用方拼字符串或连开两次 show：横幅只有一条，第二个 show 会覆盖第一个 ——
+   * 界面看起来「只剩一个按钮」，用户根本不知道还有另一条路可走。
+   */
+  showActions(text: string, actions: Array<{ label: string; onClick: () => void }>): void;
   /** 只换文字，**不触碰按钮** —— 进度更新若走 show() 会让「取消」按钮每次回调都重置闪烁。 */
   setText(message: string): void;
   hide(): void;
@@ -102,23 +110,34 @@ function createBanner(): {
 
   const text = document.createElement('span');
   text.className = 'jlv-banner-text';
-  const action = document.createElement('button');
-  action.className = 'jlv-tbtn jlv-banner-action';
-  let onAction: (() => void) | undefined;
-  action.addEventListener('click', () => onAction?.());
-  root.append(text, action);
+  const actionsEl = document.createElement('div');
+  actionsEl.className = 'jlv-banner-actions';
+  root.append(text, actionsEl);
+
+  /** 重建按钮组。只在动作集合变化时调用 —— 进度更新走 setText，不碰按钮。 */
+  const setActions = (items: Array<{ label: string; onClick: () => void }>): void => {
+    actionsEl.textContent = '';
+    actionsEl.hidden = items.length === 0;
+    for (const it of items) {
+      const b = document.createElement('button');
+      b.className = 'jlv-tbtn jlv-banner-action';
+      b.textContent = it.label;
+      b.addEventListener('click', it.onClick);
+      actionsEl.appendChild(b);
+    }
+  };
 
   const ctrl = {
     root,
     show(message: string, actionLabel = '重新加载', handler?: () => void) {
       text.textContent = message;
-      onAction = handler;
-      if (actionLabel) {
-        action.textContent = actionLabel;
-        action.hidden = false;
-      } else {
-        action.hidden = true;
-      }
+      setActions(actionLabel && handler ? [{ label: actionLabel, onClick: handler }] : []);
+      root.hidden = false;
+      ctrl.active = true;
+    },
+    showActions(message: string, actions: Array<{ label: string; onClick: () => void }>) {
+      text.textContent = message;
+      setActions(actions);
       root.hidden = false;
       ctrl.active = true;
     },
@@ -871,6 +890,9 @@ export function main(): void {
     nav.updateNavEnabled();
     // reload 会清空宿主侧的坏行集合，从零重新积累 —— 徽章须同步（否则会残留旧数字）。
     void badLinesOps.refresh();
+    // O8：问一句有没有「上次编辑中断留下的备份」。放在 init 之后而不是之前 ——
+    // 横幅是共享的，太早显示会被「正在构建索引…」或首屏提示顶掉。
+    void checkOrphanBackup();
 
     // 打开文件默认选中第一条并展示其 JSON；右侧细节树已内置「仅展开顶层、嵌套折叠」的默认态。
     if (state.selectedLine === undefined && payload.totalRecords > 0) {
@@ -1011,6 +1033,80 @@ export function main(): void {
       fetchFields();
     } catch (e) {
       banner.show(e instanceof Error ? e.message : String(e), '重试', () => void reloadFile());
+    }
+  }
+
+  /* ---------------- O8：中断编辑遗留备份的检测与处理 ---------------- */
+
+  /**
+   * 打开后检测是否存在上次中断编辑留下的备份。
+   *
+   * 为何要问这一句：崩溃（或被强杀）恰好落在搬移窗口内时，磁盘上会留下一个孤儿备份
+   * 加一个改了一半的文件 —— 而查看器此前对它一字不提：用户看见一个不明文件，
+   * 既不知道它是什么，也不知道文件可能不是它以为的样子。
+   *
+   * 失败**静默**：这只是一条增强提示，不该因为一次 stat 出错就打扰打开文件的流程。
+   */
+  async function checkOrphanBackup(): Promise<void> {
+    let st: BackupStatusPayload | null = null;
+    try {
+      st = await bus.request<BackupStatusPayload>(HostEndpoint.BACKUP_STATUS, {}).promise;
+    } catch {
+      return;
+    }
+    if (!st?.present) return;
+    const size = `${(st.backupBytes ?? 0).toLocaleString('en-US')} 字节`;
+    if (!st.recoverable) {
+      banner.showActions(`发现上次中断编辑留下的备份（${size}）：${st.reason ?? '无法自动恢复'}`, [
+        { label: '丢弃备份', onClick: () => void discardBackup() },
+      ]);
+      return;
+    }
+    banner.showActions(
+      `发现上次编辑中断留下的备份（${size}）。恢复会把文件还原成编辑前的样子（当前那一处的改动会丢失）。`,
+      [
+        { label: '恢复', onClick: () => void restoreBackup() },
+        { label: '丢弃', onClick: () => void discardBackup() },
+      ]
+    );
+  }
+
+  /** 从遗留备份恢复：先恢复磁盘，再走既有的重新加载通道重扫索引。 */
+  async function restoreBackup(): Promise<void> {
+    banner.showActions('正在从遗留备份恢复…', []);
+    try {
+      const res = await bus.request<RecoverBackupPayload>(
+        HostEndpoint.RECOVER_BACKUP,
+        { action: 'restore' },
+        { timeoutMs: RPC_HEAVY_TIMEOUT_MS }
+      ).promise;
+      if (!res?.ok) {
+        banner.show(res?.error ?? '恢复失败。', '重试', () => void restoreBackup());
+        return;
+      }
+      // 磁盘内容已变：索引、缓存、行号全部作废 —— 复用既有的重载通道，不另走一套。
+      await reloadFile();
+      banner.show(
+        `已从遗留备份恢复（写回 ${(res.restoredBytes ?? 0).toLocaleString('en-US')} 字节），索引已重扫。`
+      );
+    } catch (e) {
+      banner.show(e instanceof Error ? e.message : String(e), '重试', () => void restoreBackup());
+    }
+  }
+
+  /** 丢弃遗留备份（删除备份与元数据）。 */
+  async function discardBackup(): Promise<void> {
+    try {
+      const res = await bus.request<RecoverBackupPayload>(HostEndpoint.RECOVER_BACKUP, {
+        action: 'discard',
+      }).promise;
+      if (!res?.ok) {
+        banner.show(res?.error ?? '丢弃备份失败。');
+        return;
+      }
+      banner.hide();
+    } catch (e) {
+      banner.show(e instanceof Error ? e.message : String(e));
     }
   }
 

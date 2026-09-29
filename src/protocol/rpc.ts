@@ -92,6 +92,10 @@ export const HostEndpoint = {
    * 不进撤销历史。用户不会（也不应）以为 Ctrl+Z 能「撤回导出」。
    */
   EXPORT_LINES: 'exportLines',
+  /** 查询是否有中断编辑遗留的备份（O8）。只报告，不自动恢复。 */
+  BACKUP_STATUS: 'backupStatus',
+  /** 处理遗留备份：恢复或丢弃（恢复会改写源文件，走写链）。 */
+  RECOVER_BACKUP: 'recoverBackup',
 } as const;
 
 /** O(1) 查找表：把 HostEndpoint 所有值预编译成 Set，isHostEndpoint 每次调用不再 O(n) 遍历。 */
@@ -134,6 +138,10 @@ export const HostReply = {
   BAD_LINES: 'badLines',
   /** 导出子集的结果（成功与业务失败均走此回执）。 */
   EXPORT_RESULT: 'exportResult',
+  /** 遗留备份的检测结果。 */
+  BACKUP_STATUS_RESULT: 'backupStatusResult',
+  /** 遗留备份的处理结果（恢复 / 丢弃）。 */
+  RECOVER_BACKUP_RESULT: 'recoverBackupResult',
   /**
    * host 主动推送：耗时写操作的进度（批量重写的全文件重写阶段）。
    *
@@ -482,6 +490,29 @@ export interface ExportResultPayload {
   error?: string;
 }
 
+/** 遗留备份的检测结果（O8）。 */
+export interface BackupStatusPayload {
+  /** 是否存在孤儿备份。false 时其余字段缺省。 */
+  present: boolean;
+  /** 备份文件路径（供界面回显「在哪」）。 */
+  backupPath?: string;
+  /** 备份字节数。 */
+  backupBytes?: number;
+  /** 能否自动恢复；false 时 reason 说明为什么，界面据此只提供「丢弃」。 */
+  recoverable?: boolean;
+  /** 不可恢复的原因（可直接展示）。 */
+  reason?: string;
+}
+
+/** 遗留备份的处理结果。 */
+export interface RecoverBackupPayload {
+  ok: boolean;
+  /** 已写回的字节数（成功时给出）。 */
+  restoredBytes?: number;
+  /** 失败原因（可直接展示）。 */
+  error?: string;
+}
+
 /* webview -> host 的具体请求消息。 */
 export type HostRequest =
   | { type: typeof HostEndpoint.READY }
@@ -601,6 +632,13 @@ export type HostRequest =
        */
       lines: number[];
     }
+  | { type: typeof HostEndpoint.BACKUP_STATUS; requestId: string }
+  | {
+      type: typeof HostEndpoint.RECOVER_BACKUP;
+      requestId: string;
+      /** 恢复（把备份写回源文件）或丢弃（删除备份与元数据）。 */
+      action: 'restore' | 'discard';
+    }
   | { type: typeof HostEndpoint.UNDO_EDIT; requestId: string }
   | { type: typeof HostEndpoint.REDO_EDIT; requestId: string }
   | {
@@ -640,7 +678,13 @@ export type HostResponse =
   | { type: typeof HostReply.HISTORY; requestId: string; payload: HistoryPayload }
   | { type: typeof HostReply.HISTORY_RESULT; requestId: string; payload: HistoryResultPayload }
   | { type: typeof HostReply.BAD_LINES; requestId: string; payload: BadLinesPayload }
-  | { type: typeof HostReply.EXPORT_RESULT; requestId: string; payload: ExportResultPayload };
+  | { type: typeof HostReply.EXPORT_RESULT; requestId: string; payload: ExportResultPayload }
+  | { type: typeof HostReply.BACKUP_STATUS_RESULT; requestId: string; payload: BackupStatusPayload }
+  | {
+      type: typeof HostReply.RECOVER_BACKUP_RESULT;
+      requestId: string;
+      payload: RecoverBackupPayload;
+    };
 
 /**
  * 错误回执的机器可读分类。
@@ -840,6 +884,12 @@ export type HostHandlerMap = {
   ) => Promise<HostResponse> | HostResponse;
   [HostEndpoint.SCAN_BAD_LINES]: (
     req: Extract<HostRequest, { type: typeof HostEndpoint.SCAN_BAD_LINES }>
+  ) => Promise<HostResponse> | HostResponse;
+  [HostEndpoint.BACKUP_STATUS]: (
+    req: Extract<HostRequest, { type: typeof HostEndpoint.BACKUP_STATUS }>
+  ) => Promise<HostResponse> | HostResponse;
+  [HostEndpoint.RECOVER_BACKUP]: (
+    req: Extract<HostRequest, { type: typeof HostEndpoint.RECOVER_BACKUP }>
   ) => Promise<HostResponse> | HostResponse;
   [HostEndpoint.EXPORT_LINES]: (
     req: Extract<HostRequest, { type: typeof HostEndpoint.EXPORT_LINES }>
