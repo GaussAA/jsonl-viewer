@@ -34,6 +34,7 @@ import { createSelection } from './selection.ts';
 import { createEditOps } from './editOps.ts';
 import { createFieldEdit } from './fieldEdit.ts';
 import { createBadLinesOps } from './badLinesOps.ts';
+import { createProfileOps } from './profileOps.ts';
 import { createPersistRestore } from './persistRestore.ts';
 import { createFocusTarget } from './focusTarget.ts';
 import { CancelledError, createVSCodeApi, RpcBus } from './rpc.ts';
@@ -261,6 +262,7 @@ export function main(): void {
     onReplaceAll: (query, replacement) => editOps.replaceAll(query, replacement),
     onOpenHistory: () => historyPanel.open(),
     onOpenBadLines: () => badLinesOps.open(),
+    onOpenProfile: () => profileOps.open(),
     onApplyFilter: (cond) => actions.runFilter(cond),
     onApplyLayout: (layout) => actions.applyLayout(layout),
   });
@@ -317,6 +319,8 @@ export function main(): void {
 
   /** 正在执行的坏行全文件扫描（null = 无）。 */
   let activeScan: { requestId: string } | null = null;
+  /** 在途的画像扫描（进度推送据此渲染面板抬头）。 */
+  let activeProfile: { requestId: string } | null = null;
   /** 正在执行的单行编辑（仅当成本足够大、真的会等待时才置位）。 */
   let activeEdit: { requestId: string } | null = null;
 
@@ -339,6 +343,11 @@ export function main(): void {
     }
     if (info.kind === 'scanBadLines' && activeScan) {
       banner.setText(scanProgressText(info.processedBytes, info.totalBytes));
+      return;
+    }
+    if (info.kind === 'profile' && activeProfile) {
+      // 画像的进度**同时**进面板抬头（卡片上的进度条不该写去别处）。
+      profileOps.setProgress(info.processedBytes, info.totalBytes);
       return;
     }
     if (info.kind === 'edit' && activeEdit) {
@@ -592,6 +601,22 @@ export function main(): void {
     },
   });
   rootEl.appendChild(badLinesOps.root);
+
+  /* ---------------- 数据画像（已抽至 profileOps.ts） ----------------
+   * 只读统计：不改数据、不进写链。与筛选的联动复用同一条链路
+   * （toolbar.setFilterCondition 回填面板 + actions.runFilter 求值），不另开一条。 */
+  const profileOps = createProfileOps({
+    bus,
+    banner,
+    applyFilter: (cond) => {
+      toolbar.setFilterCondition(cond);
+      actions.runFilter(cond);
+    },
+    setActiveProfile: (rid) => {
+      activeProfile = rid === null ? null : { requestId: rid };
+    },
+  });
+  rootEl.appendChild(profileOps.root);
 
   /* ---------------- 写操作域（已抽至 editOps.ts） ----------------
    * 编辑 / 删除 / 批量替换 / 写后复位，统一由 editOps 提供。
@@ -1177,6 +1202,7 @@ export function main(): void {
     editPanel.dispose();
     historyPanel.dispose();
     badLinesOps.dispose();
+    profileOps.dispose();
     fieldEdit.dispose();
     toolbar.destroy();
     document.removeEventListener('keydown', onKeyDown);

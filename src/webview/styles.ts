@@ -1024,6 +1024,34 @@ mark.jlv-hit {
   transition: background var(--jlv-transition);
 }
 .jlv-bad-chip:hover { background: color-mix(in srgb, var(--jlv-warn) 26%, transparent); }
+
+/* ============================================================
+ * 数据画像（F4）：复用坏行浮层的外壳（.jlv-bad / backdrop），
+ * 只是内容换成「一行一个字段」的清单。
+ * ============================================================ */
+.jlv-prof { width: min(620px, 100%); }
+.jlv-prof-row {
+  display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr) auto;
+  align-items: center; gap: 10px;
+  padding: 7px 8px; border-radius: 6px;
+  border-left: 2px solid transparent;
+}
+.jlv-prof-row + .jlv-prof-row { margin-top: 2px; }
+.jlv-prof-row:hover { background: rgba(128, 128, 128, .1); }
+/* 有质量问题的字段（有缺失 / 有 null）：左侧色条点到即止，不整行染色 —— 整片高亮会让
+   「哪里有问题」反而被冲淡。 */
+.jlv-prof-row.has-issue { border-left-color: color-mix(in srgb, var(--jlv-warn) 65%, transparent); }
+.jlv-prof-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.jlv-prof-key {
+  font-family: var(--jlv-mono); font-size: 11px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.jlv-prof-meta { font-size: 10px; opacity: .72; }
+.jlv-prof-top {
+  font-family: var(--jlv-mono); font-size: 10px; opacity: .82;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.jlv-prof-more { opacity: .6; font-style: italic; }
 /* 未做过全文件扫描：虚线边框提示「这是下界，不是确数」 */
 .jlv-bad-chip.partial { border-style: dashed; }
 

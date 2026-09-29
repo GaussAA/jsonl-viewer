@@ -59,6 +59,7 @@ import {
 } from './backupRecovery.ts';
 import { exportLinesToFile, type ExportOpts } from './exporter.ts';
 import { buildIndexWithFallback, type IndexHost } from './indexHost.ts';
+import { profileRecords, type ProfileResult } from './profileEngine.ts';
 import type { BuildResult } from './workerProtocol.ts';
 import { EditHistory } from './editHistory.ts';
 import { BadLineTracker } from './badLineTracker.ts';
@@ -2438,6 +2439,27 @@ export class DataService {
     const res = await this.host!.filter(cond, FILTER_MAX_RESULTS, shouldCancel);
     if (!res.truncated && !res.cancelled) this.rememberQuery(key, res);
     return res;
+  }
+
+  /**
+   * 全量 Schema / 数据质量画像（F4）。
+   *
+   * 与 `getSampleFields`（抽样前 200 条）是**互补**关系，不是替代：抽样求快、在打开路径上；
+   * 画像求准、由用户显式触发。所以这里不做任何缓存 —— 每次都真扫，
+   * 缓存一份「可能已过期」的全量结论比不缓存更危险（用户会据此判断数据质量）。
+   */
+  async scanProfile(
+    opts: {
+      onProgress?: (info: { processedBytes: number; totalBytes: number }) => void;
+      shouldCancel?: () => boolean;
+    } = {}
+  ): Promise<ProfileResult> {
+    const li = await this.ensureIndex();
+    const onProgress = throttleProgress(opts.onProgress);
+    return profileRecords(this.reader!, li, {
+      ...(onProgress ? { onProgress } : {}),
+      ...(opts.shouldCancel ? { shouldCancel: opts.shouldCancel } : {}),
+    });
   }
 
   /**

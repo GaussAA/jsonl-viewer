@@ -554,6 +554,29 @@ function registerHostHandlers(deps: HostHandlerDeps): vscode.Disposable {
             // 把它当全量会得出「文件挺干净」这种与事实相反的结论。
             [HostEndpoint.GET_BAD_LINES]: async (req) =>
               okReply(HostReply.BAD_LINES, req.requestId, data.getBadLines()),
+            // 全量画像（F4）：整文件流式扫描，慢但准 —— 与前 200 条的抽样推断互补。
+            [HostEndpoint.SCAN_PROFILE]: async (req) => {
+              try {
+                const result = await data.scanProfile({
+                  onProgress: (info) =>
+                    post({
+                      type: HostReply.EDIT_PROGRESS,
+                      payload: { kind: 'profile', ...info },
+                    }),
+                  shouldCancel: () => cancel.has(req.requestId),
+                });
+                // 取消**不是失败**：照常回成功，结果里带 cancelled=true，由前端区分文案。
+                return okReply(HostReply.PROFILE_RESULT, req.requestId, { ok: true, result });
+              } catch (e) {
+                return okReply(HostReply.PROFILE_RESULT, req.requestId, {
+                  ok: false,
+                  error: e instanceof Error ? e.message : String(e),
+                });
+              } finally {
+                // 与其它可取消端点同一纪律：收尾必定摘除标记，避免 cancel 集合无界增长。
+                cancel.delete(req.requestId);
+              }
+            },
             // 遗留备份检测（O8）：只报告，不自动恢复 —— 备份可能属于另一个会话，
             // 自动拿它盖回文件是拿用户的数据赌一个猜测。
             [HostEndpoint.BACKUP_STATUS]: async (req) => {

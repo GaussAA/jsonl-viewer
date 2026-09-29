@@ -37,6 +37,8 @@ export interface ToolbarHandlers {
   /** 「坏行诊断」：打开坏行浮层（查看 / 扫描 / 全选清除）。 */
   onOpenBadLines?: () => void;
   onApplyFilter?: (cond: Condition | null) => void;
+  /** 打开全量数据画像（F4）。与「筛选」并列但语义不同：那个改视图，这个只读统计。 */
+  onOpenProfile?: () => void;
   onApplyLayout?: (layout: FieldLayout) => void;
 }
 
@@ -282,6 +284,14 @@ export function createToolbar(
   filterBtn.appendChild(iconSpan('jlv-btn-ic', ICON_FILTER));
   filterBtn.appendChild(document.createTextNode('筛选'));
 
+  const profileBtn = document.createElement('button');
+  profileBtn.type = 'button';
+  profileBtn.className = 'jlv-btn';
+  profileBtn.title = '数据画像：扫描整个文件统计字段分布与数据质量（只读，不改数据）';
+  profileBtn.appendChild(iconSpan('jlv-btn-ic', ICON_PROFILE));
+  profileBtn.appendChild(document.createTextNode('画像'));
+  profileBtn.addEventListener('click', () => handlers.onOpenProfile?.());
+
   const customizeBtn = document.createElement('button');
   customizeBtn.type = 'button';
   customizeBtn.className = 'jlv-btn';
@@ -299,7 +309,7 @@ export function createToolbar(
   filterNoteEl.setAttribute('aria-live', 'polite');
   filterNoteEl.textContent = '过滤结果较多，已截断（约前 5 万条）';
 
-  actions.append(historyBtn, filterBtn, customizeBtn, rangeEl);
+  actions.append(historyBtn, filterBtn, profileBtn, customizeBtn, rangeEl);
   root.appendChild(actions);
   root.appendChild(filterNoteEl);
 
@@ -1040,5 +1050,7 @@ const ICON_REPLACE =
   '<svg width="12" height="12" viewBox="0 0 16 16"><path d="M3 5.5h7.5a2.5 2.5 0 0 1 0 5H6" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><path d="M8 3L5.6 5.5 8 8" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><path d="M13 10.5H9.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>';
 const ICON_HISTORY =
   '<svg width="12" height="12" viewBox="0 0 16 16"><path d="M8 4v4l2.5 1.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><path d="M2.8 8a5.2 5.2 0 1 1 1.5 3.6" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><path d="M2 5.6v2.6h2.6" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const ICON_PROFILE =
+  '<svg width="12" height="12" viewBox="0 0 16 16"><path d="M2 13.2h12" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><rect x="2.5" y="7.5" width="2.4" height="5" rx="0.6" fill="currentColor" opacity="0.55"/><rect x="6.8" y="4.5" width="2.4" height="8" rx="0.6" fill="currentColor" opacity="0.8"/><rect x="11.1" y="2.5" width="2.4" height="10" rx="0.6" fill="currentColor"/></svg>';
 const ICON_COLUMNS =
   '<svg width="12" height="12" viewBox="0 0 16 16"><rect x="2" y="2" width="5" height="12" rx="1" fill="none" stroke="currentColor" stroke-width="1.2"/><rect x="9" y="2" width="5" height="8" rx="1" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>';

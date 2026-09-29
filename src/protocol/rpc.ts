@@ -12,6 +12,16 @@
  */
 
 import type { Condition } from '../core/query.ts';
+// `import type` 只参与编译、运行时被擦除：webview 打包不会因此把宿主模块拉进来。
+import type { ProfileResult } from '../host/profileEngine.ts';
+
+/**
+ * 画像的数据形状 re-export 给 webview。
+ *
+ * 这是 `export type`（纯类型，运行时零产物）：webview 需要字段的结构来渲染，
+ * 但**不能**去 import 宿主模块 —— 那会把 `node:fs` 一类依赖拖进 webview 包。
+ */
+export type { FieldProfile, ProfileResult } from '../host/profileEngine.ts';
 import type { FieldInfo } from '../infer/inferFields.ts';
 import { MAX_PERSIST_KEY_LEN, MAX_PERSIST_VALUE_BYTES, PERSIST_KEY_PREFIX } from '../constants.ts';
 
@@ -96,6 +106,8 @@ export const HostEndpoint = {
   BACKUP_STATUS: 'backupStatus',
   /** 处理遗留备份：恢复或丢弃（恢复会改写源文件，走写链）。 */
   RECOVER_BACKUP: 'recoverBackup',
+  /** 全量 Schema / 数据质量画像（F4）：整文件流式扫描，只统计顶层字段。 */
+  SCAN_PROFILE: 'scanProfile',
 } as const;
 
 /** O(1) 查找表：把 HostEndpoint 所有值预编译成 Set，isHostEndpoint 每次调用不再 O(n) 遍历。 */
@@ -142,6 +154,8 @@ export const HostReply = {
   BACKUP_STATUS_RESULT: 'backupStatusResult',
   /** 遗留备份的处理结果（恢复 / 丢弃）。 */
   RECOVER_BACKUP_RESULT: 'recoverBackupResult',
+  /** 全量画像的结果（成功与业务失败均走此回执）。 */
+  PROFILE_RESULT: 'profileResult',
   /**
    * host 主动推送：耗时写操作的进度（批量重写的全文件重写阶段）。
    *
@@ -423,7 +437,7 @@ export interface EditProgressPayload {
    * 之所以复用同一个推送通道：它表达的本就是「长任务的字节级进度」，
    * 与任务语义无关；新增一种长任务时不该再造一条推送链路。
    */
-  kind: 'replace' | 'scanBadLines' | 'edit' | 'replaceField' | 'export';
+  kind: 'replace' | 'scanBadLines' | 'edit' | 'replaceField' | 'export' | 'profile';
   /** 已处理的原始文件字节数（批量替换时不含被替换区间，它们无需逐字节复制）。 */
   processedBytes: number;
   /** 原始文件总字节数（进度分母）。 */
@@ -509,6 +523,15 @@ export interface RecoverBackupPayload {
   ok: boolean;
   /** 已写回的字节数（成功时给出）。 */
   restoredBytes?: number;
+  /** 失败原因（可直接展示）。 */
+  error?: string;
+}
+
+/** 全量画像的结果。取消**不是失败**：走 ok=true 且 result.cancelled=true。 */
+export interface ProfilePayload {
+  ok: boolean;
+  /** 成功时的画像结果。 */
+  result?: ProfileResult;
   /** 失败原因（可直接展示）。 */
   error?: string;
 }
@@ -632,6 +655,7 @@ export type HostRequest =
        */
       lines: number[];
     }
+  | { type: typeof HostEndpoint.SCAN_PROFILE; requestId: string }
   | { type: typeof HostEndpoint.BACKUP_STATUS; requestId: string }
   | {
       type: typeof HostEndpoint.RECOVER_BACKUP;
@@ -684,7 +708,8 @@ export type HostResponse =
       type: typeof HostReply.RECOVER_BACKUP_RESULT;
       requestId: string;
       payload: RecoverBackupPayload;
-    };
+    }
+  | { type: typeof HostReply.PROFILE_RESULT; requestId: string; payload: ProfilePayload };
 
 /**
  * 错误回执的机器可读分类。
@@ -884,6 +909,9 @@ export type HostHandlerMap = {
   ) => Promise<HostResponse> | HostResponse;
   [HostEndpoint.SCAN_BAD_LINES]: (
     req: Extract<HostRequest, { type: typeof HostEndpoint.SCAN_BAD_LINES }>
+  ) => Promise<HostResponse> | HostResponse;
+  [HostEndpoint.SCAN_PROFILE]: (
+    req: Extract<HostRequest, { type: typeof HostEndpoint.SCAN_PROFILE }>
   ) => Promise<HostResponse> | HostResponse;
   [HostEndpoint.BACKUP_STATUS]: (
     req: Extract<HostRequest, { type: typeof HostEndpoint.BACKUP_STATUS }>
