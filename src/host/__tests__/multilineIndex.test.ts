@@ -71,19 +71,22 @@ test('O3：多行文件插入一行后，索引仍是「记录语义」', async 
   );
 });
 
-test('O3：多行文件删除一行后，索引仍是「记录语义」', async () => {
+test('O3：多行文件删除一条记录后，索引仍是「记录语义」', async () => {
   await withDir((dir) =>
     withService(dir, PRETTY_3, async (ds) => {
       await ds.getOverview();
-      // 删掉最后一条记录的右括号（结构变更，且行数 -1）
-      const res = await ds.deleteRecord(8);
+      // 删中间那条 pretty 记录。deleteRecord 的口径是**记录**：用户在列表上选中的
+      // 是一条记录，落盘必须整条删掉 —— 此前按物理行删（上界与定位都是行号），
+      // 会把用户选中的记录撕掉一个物理行，剩下两行变成坏记录。
+      const res = await ds.deleteRecord(1);
       assert.equal(res.ok, true, res.error ?? '');
 
       assert.equal(ds.peekIndex()?.multiline, true, '删除后不得塌回行语义');
-      // 第 2 条记录变成「悬空」（吞并到 EOF），记录语义下仍是 3 条
-      assert.equal(ds.totalRecords, 3, 'totalRecords 不得退化为物理行数');
-      const page = await ds.readRecords(0, 3);
-      assert.equal(page.items.length, 3);
+      assert.equal(ds.totalRecords, 2, 'totalRecords 必须是 2 条记录（此前会变成物理行数）');
+      const page = await ds.readRecords(0, 2);
+      assert.equal(page.items.length, 2);
+      assert.deepEqual(page.items[0].value, { a: 1 }, '未选中的记录不受影响');
+      assert.deepEqual(page.items[1].value, { a: 3 });
     })
   );
 });

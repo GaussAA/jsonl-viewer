@@ -52,6 +52,7 @@ import {
   MAX_EXPORT_LINES,
   TAIL_APPEND_MAX_BYTES,
   TAIL_ANCHOR_BYTES,
+  MAX_LINE_BYTES,
 } from '../constants.ts';
 import {
   discardOrphanBackup,
@@ -1063,25 +1064,47 @@ export class DataService {
     const li = await this.ensureIndex();
     const reader = this.reader!;
 
-    if (!Number.isInteger(line) || line < 0 || line >= li.totalLines) {
-      return DataService.editFailure(line, `无效行号：${line}`);
+    // 口径必须是**记录号**（与 editRecord 一致）：多行文件里记录号 ≠ 物理行号，
+    // 此前按 totalLines 判上界、按物理行删除 —— 用户选中的是一条 pretty 记录，
+    // 落盘却只删了它的首行，把整条记录撕成碎片。
+    if (!Number.isInteger(line) || line < 0 || line >= li.totalRecords) {
+      return DataService.editFailure(line, `无效记录号：${line}`);
     }
     const conflict = await this.detectWriteConflict(line, opts.expectedTotalLines);
     if (conflict) return conflict;
 
-    const probed = await probeLine(li, reader, line);
-    if (!probed.ok) {
-      return DataService.editFailure(line, describeProbeFailure(line, probed.reason));
+    // 定位**整条记录**：紧凑文件 = 单个物理行（沿用探测路径）；多行文件 = 记录区间
+    // （recordRange 直接给出字节偏移；紧凑文件的该值为 -1，不可用）。
+    let start: number;
+    let end: number;
+    if (li.multiline) {
+      const rr = li.recordRange(line);
+      if (rr.endOffset - rr.startOffset > MAX_LINE_BYTES) {
+        return DataService.editFailure(
+          line,
+          `该记录过大，暂不支持删除：超过 ${MAX_LINE_BYTES} 字节`
+        );
+      }
+      start = rr.startOffset;
+      end = rr.endOffset;
+    } else {
+      const probed = await probeLine(li, reader, line);
+      if (!probed.ok) {
+        return DataService.editFailure(line, describeProbeFailure(line, probed.reason));
+      }
+      start = probed.start;
+      end = probed.end;
     }
-    const removedBytes = probed.end - probed.start;
-    // 旧原文用于撤销：删除的逆操作就是把这段文本插回去。
-    const removedText = await readLineAt(reader, probed.start, probed.end).catch(() => '');
+    const removedBytes = end - start;
+    // 旧原文用于撤销：删除的逆操作就是把这段文本插回去（多行记录 = 聚合原文，
+    // 撤销路径不做单行 / JSON 校验 —— 见 insertRecord 对外入口的说明）。
+    const removedText = await readLineAt(reader, start, end).catch(() => '');
 
     this.editing = true;
     try {
       const res = await replaceRange(
         this.path,
-        { start: probed.start, end: probed.end },
+        { start, end },
         Buffer.alloc(0),
         toReplaceOpts(opts)
       );
@@ -1113,12 +1136,25 @@ export class DataService {
    * 新行的行尾风格取「参考行」——优先前一行，其次插入点所在行；二者皆无（空文件）用 LF。
    * 这样在 CRLF 文件里插入的行同样是 CRLF，不会把行尾风格搅乱。
    */
-  /** 对外入口：串行化插入。 */
+  /** 对外入口：串行化插入。单行与 JSON 约束只放这一层 —— 历史重放（撤销「删除」）
+   *  必须能把**多行 / 当年就是坏记录**的原文原样插回，故内部实现不做这两项检查
+   *  （与 editRecord 对外校验、内部放行的分层完全一致）。 */
   async insertRecord(
     at: number,
     text: string,
     opts: EditRecordOpts = {}
   ): Promise<EditResultPayload> {
+    if (/\r|\n/.test(text)) {
+      return DataService.editFailure(
+        at,
+        'JSONL 每条记录必须单行（文本含换行）。请把记录并回一行后再插入。',
+        { invalid: true }
+      );
+    }
+    const parsed = parseJsonLine(text);
+    if (!parsed.ok) {
+      return DataService.editFailure(at, `JSON 校验未通过：${parsed.error}`, { invalid: true });
+    }
     return this.runExclusive(() => this.insertRecordInternal(at, text, opts));
   }
 
@@ -1136,33 +1172,31 @@ export class DataService {
     const conflict = await this.detectWriteConflict(at, opts.expectedTotalLines);
     if (conflict) return conflict;
 
-    // 与 editRecord 同一口径的 JSONL 单行约束：插入多行文本会把一条记录拆成多行，
-    // 破坏「一行一记录」与索引的行数假设。
-    if (/\r|\n/.test(text)) {
-      return DataService.editFailure(
-        at,
-        'JSONL 每条记录必须单行（文本含换行）。请把记录并回一行后再插入。',
-        { invalid: true }
-      );
-    }
-    const parsed = parseJsonLine(text);
-    if (!parsed.ok) {
-      return DataService.editFailure(at, `JSON 校验未通过：${parsed.error}`, { invalid: true });
-    }
-
-    // 插入点 = 第 at 行的起始偏移；追加到末尾则用文件末尾。
+    // 插入点 = 第 at 条**记录**的起始偏移（多行文件里记录号 ≠ 物理行号，此前按物理行
+    // 探测会把新行插进前面的 pretty 记录中间）；at === totalRecords 表示追加到文件末尾。
+    // 行尾参考：优先前一条记录的尾行（保持 CRLF 文件的风格），at === 0 则取首条记录首行。
     let insertAt = li.totalBytes;
-    let nextEnding: LineEnding | undefined;
+    let refEnding: LineEnding | undefined;
     if (at < li.totalRecords) {
-      const p = await probeLine(li, reader, at);
-      if (!p.ok) return DataService.editFailure(at, describeProbeFailure(at, p.reason));
-      insertAt = p.start;
-      nextEnding = p.ending;
+      if (li.multiline) {
+        insertAt = li.recordRange(at).startOffset;
+        const refLine = at > 0 ? li.recordRange(at - 1).endLine : li.recordRange(0).startLine;
+        const probed = await probeLine(li, reader, refLine);
+        refEnding = probed.ok ? probed.ending : undefined;
+      } else {
+        const probed = await probeLine(li, reader, at);
+        if (!probed.ok) return DataService.editFailure(at, describeProbeFailure(at, probed.reason));
+        insertAt = probed.start;
+        if (at > 0) {
+          const prev = await probeLine(li, reader, at - 1);
+          refEnding = (prev.ok ? prev.ending : undefined) ?? probed.ending;
+        } else {
+          refEnding = probed.ending;
+        }
+      }
     }
-    const prev = at > 0 ? await probeLine(li, reader, at - 1) : undefined;
-    const refEnding = (prev?.ok ? prev.ending : undefined) ?? nextEnding ?? 'lf';
     // 参考行若位于文件末尾且原本无换行，插入的新行仍须自带行尾（否则会与下一行粘连）。
-    const ending: LineEnding = refEnding === 'none' ? 'lf' : refEnding;
+    const ending: LineEnding = !refEnding || refEnding === 'none' ? 'lf' : refEnding;
     const newLineBytes = Buffer.concat([Buffer.from(text, 'utf8'), lineEndingBytes(ending)]);
 
     this.editing = true;
