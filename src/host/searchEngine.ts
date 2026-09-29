@@ -16,8 +16,13 @@
 import type { LineIndex } from '../indexer/lineIndex.ts';
 import type { ByteReader } from '../parser/jsonParser.ts';
 import { parseJsonLine, scanRecords } from '../parser/jsonParser.ts';
-import { matchesFilter, recordFieldValue } from '../core/query.ts';
-import type { FieldCondition } from '../core/query.ts';
+import {
+  hasAnyRealCondition,
+  matchesCondition,
+  matchesFilter,
+  recordFieldValue,
+} from '../core/query.ts';
+import type { Condition } from '../core/query.ts';
 import { SEARCH_SCAN_EVERY } from '../constants.ts';
 
 /* ------------------------------ Buffer 级全文匹配 ------------------------------ */
@@ -206,10 +211,12 @@ const FILTER_MAX_RESULTS = 50_000;
 export async function filterLines(
   reader: ByteReader,
   li: LineIndex,
-  cond: FieldCondition | null,
+  cond: Condition | null,
   opts: FilterLinesOpts = {}
 ): Promise<FilterLinesResult> {
-  if (!cond || !cond.field || !cond.op) return { matches: null, total: li.totalRecords };
+  // 「是否启用了过滤」按**结构**判定（树里有没有真正填过的叶子），
+  // 不再只看顶层 field —— 组合条件的外层是组，没有 field 字段。
+  if (!hasAnyRealCondition(cond)) return { matches: null, total: li.totalRecords };
 
   const start = Math.max(0, opts.scope?.startLine ?? 0);
   const end = Math.min(opts.scope?.endLine ?? li.totalRecords, li.totalRecords);
@@ -233,8 +240,7 @@ export async function filterLines(
   })) {
     const parsed = parseJsonLine(rec.text);
     if (!parsed.ok || parsed.value === undefined) continue; // 坏记录跳过（过滤视图不展示非法记录）
-    const value = recordFieldValue(parsed.value, cond.field);
-    if (matchesFilter(value, cond)) {
+    if (matchesCondition(parsed.value, cond)) {
       if (matches.length >= maxResults) {
         // 达上限立即终止扫描（M1：此前仅停 push 仍扫完全文件）。
         truncated = true;

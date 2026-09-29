@@ -833,6 +833,33 @@ mark.jlv-hit {
   animation: jlv-pop-in var(--jlv-dur-base) var(--jlv-ease);
 }
 .jlv-float-panel.closing { animation: jlv-pop-out var(--jlv-dur-fast) ease-in forwards; }
+
+/* 筛选面板（F3 多条件）：比通用浮层宽一档 —— 一行要放下「非 + 字段 + 运算符 + 值 + 删除」。
+   max-width 只是上限，内容少的面板不会被撑开。 */
+.jlv-panel-filter { max-width: 460px; }
+.jlv-cond-group {
+  display: flex; align-items: center; gap: 6px; margin-bottom: 8px; opacity: 0.9;
+}
+.jlv-cond-group select { flex: 1 1 auto; min-width: 0; }
+.jlv-cond-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
+.jlv-cond-row { display: flex; align-items: center; gap: 6px; }
+.jlv-cond-row select,
+.jlv-cond-row input[type='text'] {
+  flex: 1 1 0; min-width: 56px;
+  padding: 3px 6px; border-radius: 5px;
+  border: 1px solid var(--jlv-border, rgba(128,128,128,0.28));
+  background: transparent; color: inherit; font: inherit;
+}
+.jlv-cond-neg {
+  flex: 0 0 auto; display: inline-flex; align-items: center; gap: 2px;
+  cursor: pointer; user-select: none;
+}
+.jlv-cond-del {
+  flex: 0 0 auto; width: 22px; height: 22px; line-height: 1;
+  border: 1px solid var(--jlv-border, rgba(128,128,128,0.28));
+  border-radius: 5px; background: transparent; color: inherit; cursor: pointer;
+}
+.jlv-cond-del:hover { background: rgba(128,128,128,0.16); }
 .jlv-float-panel h3 {
   font-size: 13px; font-weight: 600; color: var(--jlv-fg);
   margin-bottom: 12px; display: flex; align-items: center; gap: 8px;

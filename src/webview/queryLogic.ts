@@ -24,8 +24,20 @@ import {
   recordFieldValue,
   matchesFilter,
   isEmptyCondition,
+  isConditionGroup,
+  matchesCondition,
+  hasAnyRealCondition,
+  normalizeCondition,
+  conditionSummary,
 } from '../core/query.ts';
-import type { FilterOp, FieldCondition, LocalFieldType } from '../core/query.ts';
+import type {
+  FilterOp,
+  FieldCondition,
+  LocalFieldType,
+  Condition,
+  ConditionGroup,
+  GroupKind,
+} from '../core/query.ts';
 
 /* 评估规则单一来源在 core/query.ts，此处 re-export 兼容既有调用方。 */
 export {
@@ -36,8 +48,23 @@ export {
   recordFieldValue,
   matchesFilter,
   isEmptyCondition,
+  isConditionGroup,
+  matchesCondition,
+  hasAnyRealCondition,
+  normalizeCondition,
+  conditionSummary,
 };
-export type { FilterOp, FieldCondition, LocalFieldType };
+export type { FilterOp, FieldCondition, LocalFieldType, Condition, ConditionGroup, GroupKind };
+
+/**
+ * 持久化偏好的**版本信封**（F3 引入）。
+ *
+ * 为什么需要：过滤条件从「单个扁平 `{field, op, value}`」扩成「叶子或 and/or/not 组」。
+ * 历史数据是叶子形状，天然仍是合法 `Condition`（叶子的形状一字未改），所以**不需要
+ * 迁移逻辑**；写 version 是为了让**下一个**形状变更时有据可依 —— 读到 `version` 缺失
+ * 即知这是 v1 写入的，读到更高的版本号则知道是更新的版本写的、本版本可能读不懂。
+ */
+export const PERSIST_STATE_VERSION = 2;
 
 /* ------------------------------ 常量（webview 专属） ------------------------------ */
 
@@ -63,9 +90,11 @@ export interface FieldLayout {
 /** 持久化偏好（对应宿主 workspaceState 中 jsonlViewer.state.<uri> 的值）。 */
 export interface PersistedState {
   fieldLayout?: FieldLayout;
-  /** null = 当前未启用过滤。 */
-  filter?: FieldCondition | null;
+  /** 过滤条件树；null = 当前未启用过滤。 */
+  filter?: Condition | null;
   searchQuery?: string;
+  /** 版本信封（见 PERSIST_STATE_VERSION）；v1 数据无此字段。 */
+  version?: number;
 }
 
 /* --------------------- 搜索的纯评估函数（webview 侧） --------------------- */
@@ -195,10 +224,11 @@ export function prevMatchIndex(matches: readonly number[], current: number): num
  */
 export function toPersistedState(p: {
   fieldLayout: FieldLayout;
-  filter: FieldCondition | null;
+  filter: Condition | null;
   searchQuery?: string;
 }): PersistedState {
   return {
+    version: PERSIST_STATE_VERSION,
     ...(p.fieldLayout ? { fieldLayout: p.fieldLayout } : {}),
     ...(p.filter ? { filter: p.filter } : { filter: null }),
     ...(p.searchQuery ? { searchQuery: p.searchQuery } : {}),
@@ -211,9 +241,9 @@ export function toPersistedState(p: {
  */
 export function mergePersistedState(
   saved: unknown,
-  current: { fieldLayout: FieldLayout; filter: FieldCondition | null; searchQuery?: string },
+  current: { fieldLayout: FieldLayout; filter: Condition | null; searchQuery?: string },
   knownKeys?: Set<string>
-): { fieldLayout: FieldLayout; filter: FieldCondition | null; searchQuery?: string } {
+): { fieldLayout: FieldLayout; filter: Condition | null; searchQuery?: string } {
   if (!saved || typeof saved !== 'object') return { ...current };
   const s = saved as Record<string, unknown>;
   const merged = { ...current };
@@ -222,24 +252,13 @@ export function mergePersistedState(
     // M13：仅接受合法对象——脏数据（非对象）不覆盖当前布局。
     merged.fieldLayout = normalizeFieldLayout(s.fieldLayout, knownKeys ?? null);
   }
-  if (s.filter && typeof s.filter === 'object') {
-    const f = s.filter as Partial<FieldCondition>;
-    const op = f.op;
-    if (
-      typeof f.field === 'string' &&
-      f.field &&
-      (op === 'eq' || op === 'contains' || op === 'exists' || op === 'type')
-    ) {
-      merged.filter = {
-        field: f.field,
-        op,
-        value: typeof f.value === 'string' ? f.value : '',
-        negate: !!f.negate,
-        caseInsensitive: f.caseInsensitive !== false,
-      };
-    }
-  } else if (s.filter === null) {
+  if (s.filter === null) {
     merged.filter = null;
+  } else if (s.filter && typeof s.filter === 'object') {
+    // v1 的扁平叶子与 v2 的条件树走**同一条**净化路径：叶子的形状一字未改，
+    // 故历史偏好无需迁移即可读回（这正是把叶子保留为联合成员的价值）。
+    const norm = normalizeCondition(s.filter);
+    if (norm) merged.filter = norm;
   }
   if (typeof s.searchQuery === 'string') merged.searchQuery = s.searchQuery;
 

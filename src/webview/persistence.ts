@@ -11,7 +11,7 @@
 import { HostEndpoint } from '../protocol/rpc.ts';
 import type { RpcBus } from './rpc.ts';
 import { toPersistedState } from './queryLogic.ts';
-import type { FieldCondition, FieldLayout } from './queryLogic.ts';
+import type { Condition, FieldLayout } from './queryLogic.ts';
 
 /** 持久化调度读写的 AppState 字段子集。 */
 export interface PersistState {
@@ -20,7 +20,7 @@ export interface PersistState {
   /** 在途防抖定时器（本模块读写）。 */
   persistTimer: ReturnType<typeof setTimeout> | undefined;
   fieldLayout: FieldLayout;
-  filterCond: FieldCondition | null;
+  filterCond: Condition | null;
   searchQuery: string;
 }
 

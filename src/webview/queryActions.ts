@@ -13,8 +13,8 @@
 import { HostEndpoint } from '../protocol/rpc.ts';
 import type { SearchResultsPayload } from '../protocol/rpc.ts';
 import { RPC_HEAVY_TIMEOUT_MS } from '../constants.ts';
-import { nextMatchIndex, prevMatchIndex } from './queryLogic.ts';
-import type { FieldCondition, FieldLayout } from './queryLogic.ts';
+import { hasAnyRealCondition, nextMatchIndex, prevMatchIndex } from './queryLogic.ts';
+import type { Condition, FieldLayout } from './queryLogic.ts';
 import type { VirtualRecordList } from './virtualScroll.ts';
 import type { createToolbar } from './toolbar.ts';
 import type { RpcBus } from './rpc.ts';
@@ -29,7 +29,7 @@ export interface QueryState {
   searchTruncated: boolean;
   searchInFlight: { rid: string; superseded: boolean } | null;
   filterMap: number[] | null;
-  filterCond: FieldCondition | null;
+  filterCond: Condition | null;
   filterInFlight: { rid: string; superseded: boolean } | null;
   selectedLine: number | undefined;
   fieldLayout: FieldLayout;
@@ -62,7 +62,7 @@ export interface QueryActions {
   jumpToMatch(line: number): void;
   runSearch(query: string): void;
   stepSearch(dir: 1 | -1): void;
-  runFilter(cond: FieldCondition | null): void;
+  runFilter(cond: Condition | null): void;
   clearFilterForCond(): void;
   applyLayout(layout: FieldLayout): void;
 }
@@ -150,22 +150,20 @@ export function createQueryActions(deps: QueryActionsDeps): QueryActions {
     jumpToMatch(matches[idx]);
   }
 
-  function runFilter(cond: FieldCondition | null): void {
+  function runFilter(cond: Condition | null): void {
     supersede(state.filterInFlight);
     state.filterInFlight = null;
 
-    if (!cond || !cond.field || !cond.op) {
+    // 「有没有真正填过的条件」按**结构**判定：组合条件的外层是组、没有 field/op 字段，
+    // 沿用旧的 `cond.field && cond.op` 判断会把整组条件当成空条件、静默清掉过滤。
+    if (!hasAnyRealCondition(cond)) {
       clearFilterForCond();
       return;
     }
     state.filterCond = cond;
     const { requestId, promise } = bus.request<{ matches: number[] | null; truncated?: boolean }>(
       HostEndpoint.FILTER,
-      {
-        field: cond.field,
-        op: cond.op,
-        value: cond.value,
-      },
+      { condition: cond },
       { timeoutMs: RPC_HEAVY_TIMEOUT_MS }
     );
     state.filterInFlight = { rid: requestId, superseded: false };

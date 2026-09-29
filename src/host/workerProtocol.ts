@@ -16,7 +16,7 @@
  */
 
 import type { SearchScope, SearchLinesResult, FilterLinesResult } from './searchEngine.ts';
-import type { FieldCondition } from '../core/query.ts';
+import type { Condition } from '../core/query.ts';
 import type { IndexDeltaOp } from '../indexer/lineIndex.ts';
 
 /** 主线程 → worker 的请求。 */
@@ -30,7 +30,7 @@ export type WorkerRequest =
       scope?: SearchScope;
       maxResults: number;
     }
-  | { type: 'filter'; requestId: number; cond: FieldCondition | null; maxResults: number }
+  | { type: 'filter'; requestId: number; cond: Condition | null; maxResults: number }
   /** 关闭文件句柄但**保留索引**（批量替换重写文件前的必要动作）。 */
   | { type: 'releaseFile'; requestId: number }
   /** 重新打开文件句柄（与 releaseFile 配对；索引继续有效）。 */

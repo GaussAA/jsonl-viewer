@@ -18,7 +18,7 @@
 import { LRUCache } from './logic.ts';
 import type { FieldLike } from './logic.ts';
 import type { RecordEntry } from './virtualScroll.ts';
-import type { FieldCondition, FieldLayout } from './queryLogic.ts';
+import type { Condition, FieldLayout } from './queryLogic.ts';
 import type { OverviewPayload } from '../protocol/rpc.ts';
 
 /** 渲染用的记录形状（与 LRUCache 值一致）。 */
@@ -60,7 +60,7 @@ export interface AppState {
   searchInFlight: { rid: string; superseded: boolean } | null;
   /** 过滤态：展示位 -> 真实行号；null = 全量。 */
   filterMap: number[] | null;
-  filterCond: FieldCondition | null;
+  filterCond: Condition | null;
   filterInFlight: { rid: string; superseded: boolean } | null;
   /** 偏好持久化键（jsonlViewer.state.<uri>）；init 后赋值。 */
   persistKey: string | null;

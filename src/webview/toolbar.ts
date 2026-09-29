@@ -5,7 +5,8 @@
  * Task 6 搜索 / 过滤 / 字段定制逻辑保留：搜索防抖、匹配计数与导航、筛选与字段浮层面板。
  */
 
-import type { FieldCondition, FieldLayout } from './queryLogic.ts';
+import { isConditionGroup } from './queryLogic.ts';
+import type { Condition, FieldCondition, FieldLayout, FilterOp } from './queryLogic.ts';
 import { formatBuildMs, formatCount } from './logic.ts';
 
 export interface ToolbarInfo {
@@ -35,7 +36,7 @@ export interface ToolbarHandlers {
   onOpenHistory?: () => void;
   /** 「坏行诊断」：打开坏行浮层（查看 / 扫描 / 全选清除）。 */
   onOpenBadLines?: () => void;
-  onApplyFilter?: (cond: FieldCondition | null) => void;
+  onApplyFilter?: (cond: Condition | null) => void;
   onApplyLayout?: (layout: FieldLayout) => void;
 }
 
@@ -65,8 +66,21 @@ interface FloatPanel<TState extends object = object> extends HTMLElement {
 }
 
 /** 筛选面板的内部状态。 */
-interface FilterPanelState {
+/** 一个条件行：DOM + 读出条件的能力。 */
+interface CondRow {
+  el: HTMLElement;
   fieldSel: HTMLSelectElement;
+  /** 读出本行条件；字段未选（还没填完）时返回 null。 */
+  read: () => FieldCondition | null;
+}
+
+interface FilterPanelState {
+  /** 当前所有条件行（setFields 回填字段选项时要遍历它们）。 */
+  rows: CondRow[];
+  /** 组逻辑选择器（且 / 或）。 */
+  groupSel: HTMLSelectElement;
+  /** 把一棵条件树回填进面板（面板重建后由外部再次调用）。 */
+  applyCond: (cond: Condition | null) => void;
 }
 
 /** 字段定制面板的内部状态。 */
@@ -89,6 +103,8 @@ export function createToolbar(
   setLayout(layout: FieldLayout): void;
   setSearchResult(total: number, index: number): void;
   setFilterTruncated(truncated: boolean): void;
+  /** 用给定条件回填筛选面板（恢复偏好时调用，保证「所见即当前条件」）。 */
+  setFilterCondition(cond: Condition | null): void;
   /**
    * 查询失败态：非 null 时在计数位置显示失败文案。
    *
@@ -290,6 +306,10 @@ export function createToolbar(
   /* ---------- 过滤面板（原型 .jlv-float-panel） ---------- */
   let filterPanel: FloatPanel<FilterPanelState> | null = null;
   let filterPanelDispose: (() => void) | null = null;
+  /** 当前生效的过滤条件（面板回填 / 重开时保持所见即所得）。 */
+  let panelFilterCond: Condition | null = null;
+  /** 由 buildFilterPanel 赋值的回填入口（面板尚未建过时为 null）。 */
+  let applyCondToFilterPanel: ((c: Condition | null) => void) | null = null;
   let panelFields: FieldOption[] = [];
 
   const populateFieldSel = (fieldSel: HTMLSelectElement): void => {
@@ -408,41 +428,184 @@ export function createToolbar(
     };
   };
 
+  /** 条件行数上限：一层 AND/OR 的真实用法远用不到 8 个，设界防面板变成无底洞。 */
+  const MAX_COND_ROWS = 8;
+
   const buildFilterPanel = (): void => {
     const { panel, close, open, dispose } = panelShell('字段筛选', filterBtn, () =>
       filterBtn.classList.remove('active')
     );
     filterPanelDispose = dispose;
-    const fieldSel = document.createElement('select');
-    fieldSel.title = '字段';
-    populateFieldSel(fieldSel);
-    const opSel = document.createElement('select');
-    opSel.title = '运算符';
-    const OPS: Array<[string, FieldCondition['op']]> = [
+    // 条件行比原单条件面板宽（字段+运算符+值+非+删除），单独放宽上限。
+    panel.classList.add('jlv-panel-filter');
+
+    const OPS: Array<[string, FilterOp]> = [
       ['等于', 'eq'],
       ['包含', 'contains'],
       ['存在', 'exists'],
       ['类型', 'type'],
     ];
-    for (const [opLabel, val] of OPS) {
+
+    // 组逻辑：只在条件 ≥ 2 行时显示 —— 单条件时它没有意义，显示出来只会让人以为必须选。
+    const groupRow = document.createElement('div');
+    groupRow.className = 'jlv-cond-group';
+    const groupLabel = document.createElement('span');
+    groupLabel.textContent = '匹配';
+    const groupSel = document.createElement('select');
+    groupSel.title = '条件之间的组合方式';
+    for (const [text, val] of [
+      ['全部条件（且）', 'and'],
+      ['任一条件（或）', 'or'],
+    ]) {
       const o = document.createElement('option');
       o.value = val;
-      o.textContent = opLabel;
-      opSel.appendChild(o);
+      o.textContent = text;
+      groupSel.appendChild(o);
     }
-    const valueInput = document.createElement('input');
-    valueInput.type = 'text';
-    valueInput.placeholder = '值';
-    valueInput.spellcheck = false;
-    const typeSel = document.createElement('select');
-    typeSel.title = '值类型';
-    typeSel.style.display = 'none';
-    for (const t of ['string', 'number', 'boolean', 'null', 'object', 'array']) {
-      const o = document.createElement('option');
-      o.value = t;
-      o.textContent = t;
-      typeSel.appendChild(o);
-    }
+    groupRow.append(groupLabel, groupSel);
+
+    const list = document.createElement('div');
+    list.className = 'jlv-cond-list';
+    const rows: CondRow[] = [];
+
+    const addBtn = document.createElement('button');
+    addBtn.type = 'button';
+    addBtn.className = 'jlv-btn jlv-cond-add';
+    addBtn.textContent = '＋ 添加条件';
+
+    const syncChrome = (): void => {
+      groupRow.hidden = rows.length < 2;
+      addBtn.disabled = rows.length >= MAX_COND_ROWS;
+      addBtn.title = addBtn.disabled ? `最多 ${MAX_COND_ROWS} 个条件` : '再添加一个条件';
+    };
+
+    /** 造一个条件行。init 给定时按它回填（打开面板 / 恢复偏好时用）。 */
+    const makeCondRow = (init?: FieldCondition): CondRow => {
+      const el = document.createElement('div');
+      el.className = 'jlv-cond-row';
+
+      const negWrap = document.createElement('label');
+      negWrap.className = 'jlv-cond-neg';
+      negWrap.title = '取反：该条件「不满足」时才算命中';
+      const neg = document.createElement('input');
+      neg.type = 'checkbox';
+      neg.checked = !!init?.negate;
+      negWrap.append(neg, document.createTextNode('非'));
+
+      const fieldSel = document.createElement('select');
+      fieldSel.title = '字段';
+      populateFieldSel(fieldSel);
+      if (init?.field) fieldSel.value = init.field;
+
+      const opSel = document.createElement('select');
+      opSel.title = '运算符';
+      for (const [opLabel, val] of OPS) {
+        const o = document.createElement('option');
+        o.value = val;
+        o.textContent = opLabel;
+        opSel.appendChild(o);
+      }
+      if (init?.op) opSel.value = init.op;
+
+      const valueInput = document.createElement('input');
+      valueInput.type = 'text';
+      valueInput.placeholder = '值';
+      valueInput.spellcheck = false;
+
+      const typeSel = document.createElement('select');
+      typeSel.title = '值类型';
+      typeSel.style.display = 'none';
+      for (const t of ['string', 'number', 'boolean', 'null', 'object', 'array']) {
+        const o = document.createElement('option');
+        o.value = t;
+        o.textContent = t;
+        typeSel.appendChild(o);
+      }
+
+      const syncTypeUI = (): void => {
+        const op = opSel.value as FilterOp;
+        valueInput.style.display = op === 'exists' ? 'none' : '';
+        typeSel.style.display = op === 'type' ? '' : 'none';
+      };
+      opSel.addEventListener('change', syncTypeUI);
+      if (init) {
+        if (init.op === 'type') typeSel.value = init.value;
+        else valueInput.value = init.value;
+      }
+      syncTypeUI();
+
+      const delBtn = document.createElement('button');
+      delBtn.type = 'button';
+      delBtn.className = 'jlv-cond-del';
+      delBtn.title = '移除此条件';
+      delBtn.setAttribute('aria-label', '移除此条件');
+      delBtn.textContent = '✕';
+
+      el.append(negWrap, fieldSel, opSel, valueInput, typeSel, delBtn);
+
+      const read = (): FieldCondition | null => {
+        const field = fieldSel.value;
+        const op = opSel.value as FilterOp;
+        if (!field || !op) return null;
+        const value = op === 'type' ? typeSel.value : valueInput.value;
+        const base: FieldCondition = { field, op, value };
+        return neg.checked ? { ...base, negate: true } : base;
+      };
+      return { el, fieldSel, read };
+    };
+
+    const addRow = (init?: FieldCondition): void => {
+      if (rows.length >= MAX_COND_ROWS) return;
+      const row = makeCondRow(init);
+      row.el.querySelector<HTMLButtonElement>('.jlv-cond-del')?.addEventListener('click', () => {
+        const i = rows.indexOf(row);
+        if (i >= 0) rows.splice(i, 1);
+        row.el.remove();
+        // 至少留一行空的：全删光只会得到一个空白面板，用户不知道下一步该做什么。
+        if (rows.length === 0) addRow();
+        syncChrome();
+      });
+      rows.push(row);
+      list.appendChild(row.el);
+      syncChrome();
+    };
+
+    /**
+     * 把条件树回填进面板。
+     *
+     * `not` 组在这里做等价转换：`not(a, b)` ≡ `and(非a, 非b)`（都不满足 = 每个都不满足），
+     * 而界面只暴露「且 / 或 + 每项可非」这一层 —— 与其为一个很少用的算子单独做 UI，
+     * 不如把它翻译成界面能表达的形式，语义完全一致。
+     */
+    const applyCond = (cond: Condition | null): void => {
+      for (const r of rows) r.el.remove();
+      rows.length = 0;
+      if (cond && isConditionGroup(cond)) {
+        groupSel.value = cond.kind === 'or' ? 'or' : 'and';
+        for (const it of cond.items) {
+          if (isConditionGroup(it)) continue; // 只回填一层（界面不支持更深的嵌套）
+          addRow(cond.kind === 'not' ? { ...it, negate: !it.negate } : it);
+        }
+      } else if (cond) {
+        groupSel.value = 'and';
+        addRow(cond);
+      }
+      if (rows.length === 0) addRow();
+      syncChrome();
+    };
+
+    const buildCond = (): Condition | null => {
+      const items: FieldCondition[] = [];
+      for (const r of rows) {
+        const c = r.read();
+        if (c) items.push(c);
+      }
+      if (items.length === 0) return null;
+      // 单个条件仍产出**叶子**而不是只有一项的组：与历史序列化形状、协议旧通道
+      // 完全一致，也让「只有一个条件」的界面与旧版逐字段相同。
+      if (items.length === 1) return items[0];
+      return { kind: groupSel.value === 'or' ? 'or' : 'and', items };
+    };
 
     const applyBtn = document.createElement('button');
     applyBtn.className = 'jlv-btn-panel primary';
@@ -451,36 +614,21 @@ export function createToolbar(
     clearBtn.className = 'jlv-btn-panel';
     clearBtn.textContent = '清除';
 
-    const syncTypeUI = (): void => {
-      const op = opSel.value as FieldCondition['op'];
-      valueInput.style.display = op === 'exists' ? 'none' : '';
-      typeSel.style.display = op === 'type' ? '' : 'none';
-    };
-    opSel.addEventListener('change', syncTypeUI);
-    syncTypeUI();
-
-    const buildCond = (): FieldCondition | null => {
-      const field = fieldSel.value;
-      const op = opSel.value as FieldCondition['op'];
-      if (!field || !op) return null;
-      const value = op === 'type' ? typeSel.value : valueInput.value;
-      return { field, op, value };
-    };
+    addBtn.addEventListener('click', () => addRow());
     applyBtn.addEventListener('click', () => {
-      handlers.onApplyFilter?.(buildCond());
+      const cond = buildCond();
+      panelFilterCond = cond;
+      handlers.onApplyFilter?.(cond);
       close(); // close 内 onClose 会移除按钮 active（面板关闭即恢复样式）
     });
     clearBtn.addEventListener('click', () => {
+      panelFilterCond = null;
+      applyCond(null);
       handlers.onApplyFilter?.(null);
       close();
     });
 
-    panel.append(
-      vlabel('字段', fieldSel),
-      vlabel('运算符', opSel),
-      vlabel('值', valueInput),
-      vlabel('类型', typeSel)
-    );
+    panel.append(groupRow, list, addBtn);
     const acts = document.createElement('div');
     acts.className = 'jlv-panel-actions';
     acts.append(clearBtn, applyBtn);
@@ -488,8 +636,10 @@ export function createToolbar(
 
     Object.assign(panel, { close, open });
     const fp = panel as FloatPanel<FilterPanelState>;
-    fp.__state = { fieldSel };
+    fp.__state = { rows, groupSel, applyCond };
     filterPanel = fp;
+    applyCondToFilterPanel = applyCond; // 面板重建后，外部的 setFilterCondition 仍可用
+    applyCond(panelFilterCond); // 打开前已知的条件先回填（否则用户看不到自己设过什么）
   };
 
   filterBtn.addEventListener('click', () => {
@@ -756,8 +906,8 @@ export function createToolbar(
 
   const setFields = (fields: readonly FieldOption[] | null): void => {
     panelFields = fields ? [...fields] : [];
-    const fieldSel = filterPanel?.__state?.fieldSel;
-    if (fieldSel) populateFieldSel(fieldSel);
+    // 每一行都要重填字段选项：新文件可能多出/少了字段，只填第一行会让其余行停在旧选项上。
+    for (const row of filterPanel?.__state?.rows ?? []) populateFieldSel(row.fieldSel);
     if (layoutPanel) {
       panelLayout = trimLayoutToFields(panelLayout, new Set(panelFields.map((f) => f.key)));
       rebuildLayoutRows();
@@ -835,6 +985,10 @@ export function createToolbar(
     setLayout,
     setSearchResult,
     setFilterTruncated,
+    setFilterCondition: (cond: Condition | null): void => {
+      panelFilterCond = cond;
+      applyCondToFilterPanel?.(cond);
+    },
     replaceInput: () => replaceInputEl,
     toggleReplace,
     setReplaceBusy,
@@ -847,16 +1001,6 @@ export function createToolbar(
 function label(text: string, control: HTMLElement): HTMLElement {
   const wrap = document.createElement('label');
   wrap.className = 'jlv-ctrl-label';
-  const t = document.createElement('span');
-  t.textContent = text;
-  wrap.appendChild(t);
-  wrap.appendChild(control);
-  return wrap;
-}
-
-/** 纵向标签（筛选面板：字段名在上、控件在下，占满宽度）。 */
-function vlabel(text: string, control: HTMLElement): HTMLElement {
-  const wrap = document.createElement('label');
   const t = document.createElement('span');
   t.textContent = text;
   wrap.appendChild(t);

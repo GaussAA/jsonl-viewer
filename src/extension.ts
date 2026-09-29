@@ -16,7 +16,8 @@ import {
   HostReply,
   RpcMessage,
 } from './protocol/rpc.ts';
-import type { FieldCondition } from './core/query.ts';
+import { normalizeCondition } from './core/query.ts';
+import type { Condition } from './core/query.ts';
 import { createLogger, makeTraceId } from './host/logging.ts';
 import type { LogFields } from './host/logging.ts';
 import {
@@ -138,6 +139,16 @@ function hostErr(message: string, fields?: LogFields): void {
  * 本查看器依赖「按需随机读磁盘」的核心机制，故不支持——必须给出明确提示，
  * 而不是让底层 fs 抛出难以理解的错误。
  */
+/**
+ * 是否为合法的叶子过滤算子。
+ *
+ * 只服务于**旧扁平通道**的入参校验（新通道的形状由 `normalizeCondition` 全权把关）：
+ * 老客户端把 op 当字符串发来，不校验就等于让任意字符串进到求值分支里。
+ */
+function isFilterOp(op: unknown): boolean {
+  return op === 'eq' || op === 'contains' || op === 'exists' || op === 'type';
+}
+
 function isFsReadable(uri: vscode.Uri): boolean {
   return uri.scheme === 'file' || uri.scheme === 'vscode-remote';
 }
@@ -444,14 +455,17 @@ function registerHostHandlers(deps: HostHandlerDeps): vscode.Disposable {
             },
             // 字段值过滤。
             [HostEndpoint.FILTER]: async (req) => {
-              const cond =
-                req.field &&
-                (req.op === 'eq' ||
-                  req.op === 'contains' ||
-                  req.op === 'exists' ||
-                  req.op === 'type')
-                  ? ({ field: req.field, op: req.op, value: req.value ?? '' } as FieldCondition)
+              // 新客户端走组合条件（F3）；旧客户端仍只发扁平 field/op/value，走兼容分支。
+              // 两条通道都在此净化：协议入参来自 webview，属**不可信输入** ——
+              // 直接把它当条件树求值等于让前端决定宿主的扫描行为。
+              const legacy =
+                req.field && isFilterOp(req.op)
+                  ? { field: req.field, op: req.op, value: req.value ?? '' }
                   : null;
+              const cond: Condition | null =
+                req.condition !== undefined
+                  ? normalizeCondition(req.condition)
+                  : normalizeCondition(legacy);
               const p = await data.filter(cond, () => cancel.has(req.requestId));
               cancel.delete(req.requestId);
               return okReply(HostReply.FILTER_RESULTS, req.requestId, p);

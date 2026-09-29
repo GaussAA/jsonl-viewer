@@ -16,7 +16,7 @@ import { LineIndex, applyIndexOps, type IndexDeltaOp } from '../indexer/lineInde
 import { openFileReader, type ByteReader } from '../parser/jsonParser.ts';
 import { searchLines, filterLines, type SearchScope } from './searchEngine.ts';
 import type { SearchLinesResult, FilterLinesResult } from './searchEngine.ts';
-import type { FieldCondition } from '../core/query.ts';
+import type { Condition } from '../core/query.ts';
 import { INDEX_CHUNK_SIZE, INDEX_REPORT_INTERVAL } from '../constants.ts';
 import type { BuildResult, WorkerRequest, WorkerResponse } from './workerProtocol.ts';
 
@@ -53,7 +53,7 @@ export interface WorkerLike {
   ): Promise<SearchLinesResult>;
   /** 字段值过滤。 */
   filter(
-    cond: FieldCondition | null,
+    cond: Condition | null,
     maxResults: number,
     shouldCancel?: () => boolean
   ): Promise<FilterLinesResult>;
@@ -148,7 +148,7 @@ export class MainThreadIndexHost implements IndexHost {
   }
 
   async filter(
-    cond: FieldCondition | null,
+    cond: Condition | null,
     maxResults: number,
     shouldCancel?: () => boolean
   ): Promise<FilterLinesResult> {
@@ -347,7 +347,7 @@ export class WorkerIndexHost implements IndexHost {
   }
 
   async filter(
-    cond: FieldCondition | null,
+    cond: Condition | null,
     maxResults: number,
     shouldCancel?: () => boolean
   ): Promise<FilterLinesResult> {

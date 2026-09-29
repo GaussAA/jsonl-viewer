@@ -11,6 +11,7 @@
  *   host -> webview : HostResponse（requestId 关联、可能带错误）
  */
 
+import type { Condition } from '../core/query.ts';
 import type { FieldInfo } from '../infer/inferFields.ts';
 import { MAX_PERSIST_KEY_LEN, MAX_PERSIST_VALUE_BYTES, PERSIST_KEY_PREFIX } from '../constants.ts';
 
@@ -498,6 +499,15 @@ export type HostRequest =
   | {
       type: typeof HostEndpoint.FILTER;
       requestId: string;
+      /**
+       * 组合过滤条件（F3）：叶子（单字段）或 and / or / not 组。
+       *
+       * 与下面三个扁平字段**二选一**：新客户端一律走本字段；扁平字段保留为旧客户端的
+       * 兼容通道（它们表达的正是「单个叶子条件」，宿主侧归一化后等价）。
+       * 形状不可信，宿主会 `normalizeCondition` 净化后再求值。
+       */
+      condition?: Condition | null;
+      /** @deprecated 旧扁平单条件通道（老客户端仍在用）；新客户端请用 `condition`。 */
       field?: string;
       op?: string;
       value?: string;

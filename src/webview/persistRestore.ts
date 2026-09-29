@@ -16,7 +16,7 @@
  */
 
 import type { AppState } from './appState.ts';
-import type { FieldCondition, FieldLayout } from './queryLogic.ts';
+import type { Condition, FieldLayout } from './queryLogic.ts';
 import { mergePersistedState } from './queryLogic.ts';
 
 export interface PersistRestoreDeps {
@@ -24,11 +24,13 @@ export interface PersistRestoreDeps {
   /** 应用字段布局 + 读取搜索框（用于回填搜索词）。 */
   toolbar: {
     setLayout(layout: FieldLayout): void;
+    /** 把过滤条件回填进筛选面板（F3）：恢复偏好后面板里也是这一份，不是空的。 */
+    setFilterCondition(cond: Condition | null): void;
     searchInput(): HTMLInputElement | null;
   };
   list: { refresh(): void };
-  /** 用恢复出的条件重算过滤。 */
-  runFilter: (cond: FieldCondition) => void;
+  /** 用恢复出的条件重算过滤（null = 恢复成「不过滤」）。 */
+  runFilter: (cond: Condition | null) => void;
 }
 
 export interface PersistRestore {
@@ -65,6 +67,9 @@ export function createPersistRestore(deps: PersistRestoreDeps): PersistRestore {
       toolbar.setLayout(state.fieldLayout);
       list.refresh();
     }
+    // 回填面板 + 触发求值：只做后者的话，用户打开筛选面板会看到一个空白盒子，
+    // 以为「没有条件」，而列表却明显是被筛过的 —— 这是最容易让人误判的一类不一致。
+    toolbar.setFilterCondition(merged.filter ?? null);
     if (merged.filter) runFilter(merged.filter);
     if (merged.searchQuery) {
       // 恢复搜索词（不自动触发搜索，避免打开即扫全文件；用户可按回车/触发）。

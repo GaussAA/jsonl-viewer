@@ -35,7 +35,7 @@ import {
 import type { ByteEdit, LineEnding } from './fileWriter.ts';
 import { planLineReplace } from '../core/replaceLogic.ts';
 import { jsonValueEquals, locateValue, replaceValueAtPath } from '../core/jsonSpan.ts';
-import type { FieldCondition } from '../core/query.ts';
+import type { Condition } from '../core/query.ts';
 import type { FilterLinesResult, SearchLinesResult } from './searchEngine.ts';
 import {
   SAMPLE_SCAN_LINES,
@@ -2423,10 +2423,7 @@ export class DataService {
   }
 
   /** Task 6 字段值过滤：委托 IndexHost 对流解析并评估，返回匹配行号（结果行号数组有上限）。 */
-  async filter(
-    cond: FieldCondition | null,
-    shouldCancel?: () => boolean
-  ): Promise<FilterLinesResult> {
+  async filter(cond: Condition | null, shouldCancel?: () => boolean): Promise<FilterLinesResult> {
     await this.ensureIndex();
     await this.ensureFreshHost();
     const key = this.queryCacheKey('f', JSON.stringify(cond ?? null));

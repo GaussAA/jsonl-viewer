@@ -11,7 +11,6 @@ import { createReadStream } from 'node:fs';
 import { LineIndex, applyIndexOps } from '../indexer/lineIndex.ts';
 import { openFileReader, type ByteReader } from '../parser/jsonParser.ts';
 import { searchLines, filterLines, type SearchScope } from './searchEngine.ts';
-import type { FieldCondition } from '../core/query.ts';
 import { INDEX_CHUNK_SIZE, INDEX_REPORT_INTERVAL } from '../constants.ts';
 import type { WorkerRequest, WorkerResponse } from './workerProtocol.ts';
 
@@ -111,7 +110,7 @@ async function handle(msg: WorkerRequest): Promise<void> {
           return;
         }
         try {
-          const result = await filterLines(reader, li, msg.cond as FieldCondition | null, {
+          const result = await filterLines(reader, li, msg.cond, {
             maxResults: msg.maxResults,
             shouldCancel: () => cancelled.has(msg.requestId),
           });
