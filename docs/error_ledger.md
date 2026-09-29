@@ -212,3 +212,40 @@
   现改为对所有带 `requestId` 的消息统一回传（`const requestId = 'requestId' in msg ? ... : undefined`）。
 - **预防**：同上的回归测试文件另设两例 —— `SpyHost`（主线程路径）与伪 worker（worker 路径）
   分别断言「第 N 次重建前，第 N-1 个宿主已被 dispose / 上一根 worker 已 terminate」。（2026-09-29）
+
+
+---
+
+## [多行文件写后「记录」变「行」] → [applyLine* 只维护检查点，不维护记录分组] → [索引维护收口到 commitIndex，多行走重建]
+
+- **现象**：pretty 文件上做一次插入/删除/（混排文件里）单行编辑之后，`totalRecords`
+  从「记录分组数」变成「物理行数」——`readRecords` 取回的是行、历史重放的行号也一并错位。
+  **不报错、不崩，界面上看不出异常**，只有把「编辑 → 再读记录」串起来看才暴露。
+- **根因**：`LineIndex.applyLineReplace/Insert/Delete` 只平移**检查点**，而
+  `multiline` 由构造函数第 6 参 `records` 是否存在决定 —— 三个增量方法都没传，
+  于是每调用一次，索引就静默退化为「一行一记录」。
+- **正解**：新增 `DataService.commitIndex(li, ops)` 作为索引维护的**唯一分流点**：
+  `li.multiline` 走 `rebuildIndex()`，紧凑文件才走 `stageIndexOps()` 增量；
+  7 处维护点（编辑/删除/插入/批量删除/区间插回/批量改写/回滚）全部改走它。
+  取舍：多行文件编辑低频，宁可多一次全量扫描，也不为省它去实现「记录分组的增量平移」
+  （插入一行是否改变分组需要重算深度）。
+- **预防**：`multilineIndex.test.ts` 用**不变式**断言而非快照 ——
+  「任何写操作后 `peekIndex().multiline === true` 且 `totalRecords` 仍是记录数」。
+  回滚验证：修复前 4/4 失败。（2026-09-29）
+
+---
+
+## [取消的搜索被当成「没有命中」缓存下来] → [取消是正常 return，与 truncated 同形] → [cancelled 独立成字段]
+
+- **现象**：用户发起搜索后立刻改词/关闭（触发 cancel），随后**再搜同一词**，
+  拿到的仍是那份空/残缺结果 —— 因为残缺结果已按「快照 + 查询词」进了查询缓存。
+  更危险的一面：`replaceText` 的第一步就是 `search()`，基于半份命中集改写 =
+  漏改一批行却报成功。
+- **根因**：`searchLines`/`filterLines` 只有 `truncated` 一个完整性标志，
+  而被取消时是**正常 return**（不抛错、也不置 truncated）——于是「扫到一半」与
+  「扫完无命中」在返回值上完全同形。
+- **正解**：结果增加 `cancelled`（与 `truncated` 严格分开：后者是「可信子集，只是没列尽」，
+  前者是「此后的命中一无所知」）；宿主只在 `!truncated && !cancelled` 时入缓存；
+  `replaceText` 见 `cancelled` 直接拒绝。协议侧加可选字段（纯增量，不改版本号）。
+- **预防**：`queryCancellation.test.ts`（service 层：取消后不缓存）+ `searchEngine.test.ts`
+  （engine 层：取消与截断的语义分界）。回滚验证：修复前 6/6 失败。（2026-09-29）
