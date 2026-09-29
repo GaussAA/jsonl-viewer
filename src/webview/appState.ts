@@ -38,8 +38,6 @@ export interface AppState {
   fields: readonly FieldLike[] | null;
   /** 字段显示定制布局（驱动摘要卡片）。 */
   fieldLayout: FieldLayout;
-  /** 已解析到的最大行号（概要栏「已解析」）。 */
-  maxLoaded: number;
   selectedLine: number | undefined;
   /** 当前在途 readRecord（详情）请求的 supersede 标记，切换选中行时取消。 */
   detailInFlight: { rid: string } | null;
@@ -55,8 +53,6 @@ export interface AppState {
   searchQuery: string;
   /** 最近一次搜索结果匹配的真实行号（升序）。 */
   searchMatches: number[];
-  /** 是否因 host 截断尚有未列出的匹配（不影响 ±1 导航，仅提示）。 */
-  searchTruncated: boolean;
   searchInFlight: { rid: string; superseded: boolean } | null;
   /** 过滤态：展示位 -> 真实行号；null = 全量。 */
   filterMap: number[] | null;
@@ -76,13 +72,11 @@ export function createAppState(): AppState {
     inFlight: null,
     fields: null,
     fieldLayout: { pinned: [], order: [], hidden: [], maxKeys: 4 },
-    maxLoaded: 0,
     selectedLine: undefined,
     detailInFlight: null,
     detailRaw: null,
     searchQuery: '',
     searchMatches: [],
-    searchTruncated: false,
     searchInFlight: null,
     filterMap: null,
     filterCond: null,

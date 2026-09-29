@@ -569,7 +569,6 @@ export function main(): void {
     // 历史回退可能改动任意位置的内容：整体清缓存并重拉（逐行失效没有意义）。
     onChanged: () => {
       state.cache.clear();
-      state.maxLoaded = 0;
       list.refresh();
       updateToolbar();
       if (state.selectedLine !== undefined) void showDetailForLine(state.selectedLine);
@@ -843,7 +842,6 @@ export function main(): void {
           kind: it.kind,
           count: it.count,
         });
-        if (it.line + 1 > state.maxLoaded) state.maxLoaded = it.line + 1;
       }
       // 可视区已有真实数据，重绘展示。
       list.refresh();
@@ -882,7 +880,6 @@ export function main(): void {
     };
     if (ov) {
       info.totalRecords = ov.totalRecords;
-      info.loadedLines = state.cache.size;
       // 翻页式目录：展示当前页的真实行闭区间（1 起）；空页兜底到全量。
       const bounds = list.getCurrentPageRealBounds();
       info.range = bounds ?? ([0, Math.max(0, ov.totalRecords - 1)] as [number, number]);
@@ -996,12 +993,10 @@ export function main(): void {
   function resetLocalState(totalRecords: number): void {
     state.cache.clear();
     state.pending.clear();
-    state.maxLoaded = 0;
     state.fields = null;
     // 索引已重建：行号与原文全部失效，详情原文一并作废。
     state.detailRaw = null;
     state.searchMatches = [];
-    state.searchTruncated = false;
     state.filterMap = null;
     state.filterCond = null;
     // M14：搜索词与持久化定时器一并复位，避免重载后旧过滤被写回持久化。

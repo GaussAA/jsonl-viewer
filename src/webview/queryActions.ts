@@ -26,7 +26,6 @@ export const SEARCH_LIMIT = 5000;
 export interface QueryState {
   searchQuery: string;
   searchMatches: number[];
-  searchTruncated: boolean;
   searchInFlight: { rid: string; superseded: boolean } | null;
   filterMap: number[] | null;
   filterCond: Condition | null;
@@ -95,7 +94,6 @@ export function createQueryActions(deps: QueryActionsDeps): QueryActions {
     const q = query.trim();
     if (!q) {
       state.searchMatches = [];
-      state.searchTruncated = false;
       deps.getToolbar().setSearchResult(0, 0);
       // 清空搜索 → 同时清掉卡片上的命中高亮（否则会留下一个「已经不存在」的标记）。
       deps.getList().setSearchNeedle(null);
@@ -119,7 +117,6 @@ export function createQueryActions(deps: QueryActionsDeps): QueryActions {
         if (state.searchInFlight?.rid !== requestId) return;
         state.searchInFlight = null;
         state.searchMatches = (res?.matches ?? []).slice(0, SEARCH_LIMIT);
-        state.searchTruncated = !!res?.truncated || (res?.total ?? 0) > state.searchMatches.length;
         const toolbar = deps.getToolbar();
         deps.getToolbar().setQueryError(null); // 有结果了 → 撤掉失败态
         // 命中高亮：把搜索词交给列表，由它把**已渲染卡片**里的命中片段标出来。

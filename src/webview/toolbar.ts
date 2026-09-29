@@ -12,7 +12,6 @@ import { formatBuildMs, formatCount } from './logic.ts';
 export interface ToolbarInfo {
   fileName: string;
   totalRecords: number;
-  loadedLines: number;
   range: [number, number];
   buildMs: number | undefined;
   status: 'connecting' | 'indexing' | 'ready' | 'error';
@@ -98,7 +97,6 @@ export function createToolbar(
 ): {
   root: HTMLElement;
   update(info: Partial<ToolbarInfo> & { fileName?: string }): void;
-  refresh(): void;
   els: ToolbarStatsEls;
   searchInput(): HTMLInputElement | null;
   setFields(fields: readonly FieldOption[] | null): void;
@@ -988,7 +986,6 @@ export function createToolbar(
     setQueryError,
     els,
     update,
-    refresh: () => update({}),
     searchInput: () =>
       document.querySelector<HTMLInputElement>('.jlv-search input') ?? searchInputEl,
     setFields,

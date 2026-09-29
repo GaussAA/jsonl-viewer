@@ -162,7 +162,6 @@ export function createFieldEdit(deps: FieldEditDeps): FieldEdit {
             }
             // 改动可能散落全文件，无法逐行失效 —— 整体清空缓存并按需重拉。
             state.cache.clear();
-            state.maxLoaded = 0;
             list.refresh();
             updateToolbar();
             scheduleBadLinesRefresh();

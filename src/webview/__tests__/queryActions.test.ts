@@ -90,7 +90,6 @@ function makeHarness(): Harness {
   const state: QueryState = {
     searchQuery: '',
     searchMatches: [],
-    searchTruncated: false,
     searchInFlight: null,
     filterMap: null,
     filterCond: null,
@@ -186,12 +185,10 @@ describe('createQueryActions（T5 #31 抽取回归）', () => {
     const h = makeHarness();
     const actions = createQueryActions(h.deps);
     h.state.searchMatches = [1, 2];
-    h.state.searchTruncated = true;
 
     actions.runSearch('   ');
 
     assert.deepStrictEqual(h.state.searchMatches, [], '匹配清空');
-    assert.strictEqual(h.state.searchTruncated, false, '截断标记复位');
     assert.deepStrictEqual(h.calls.searchResult, [[0, 0]], '工具栏复位为 0/0');
     assert.strictEqual(h.calls.persist, 1, '触发持久化');
     assert.deepStrictEqual(h.calls.requests, [], '未发起搜索请求');
@@ -209,7 +206,6 @@ describe('createQueryActions（T5 #31 抽取回归）', () => {
     await flush();
 
     assert.deepStrictEqual(h.state.searchMatches, [5, 9], '匹配写入');
-    assert.strictEqual(h.state.searchTruncated, false, 'total 未超则不截断');
     assert.deepStrictEqual(h.calls.searchResult, [[2, 0]], '工具栏计数 2/0');
     assert.deepStrictEqual(h.calls.select, [5], '跳转首个匹配');
     assert.strictEqual(h.state.selectedLine, 5, '选中行更新');
@@ -217,7 +213,7 @@ describe('createQueryActions（T5 #31 抽取回归）', () => {
     assert.ok(h.calls.nav >= 1, '导航态刷新');
   });
 
-  it('runSearch：结果超限—按 SEARCH_LIMIT 截断并标记 truncated', async () => {
+  it('runSearch：结果超限—按 SEARCH_LIMIT 截断', async () => {
     const h = makeHarness();
     const actions = createQueryActions(h.deps);
 
@@ -228,8 +224,11 @@ describe('createQueryActions（T5 #31 抽取回归）', () => {
     });
     await flush();
 
-    assert.strictEqual(h.state.searchMatches.length, SEARCH_LIMIT, '截断到 SEARCH_LIMIT');
-    assert.strictEqual(h.state.searchTruncated, true, '超出部分标记截断');
+    assert.strictEqual(
+      h.state.searchMatches.length,
+      SEARCH_LIMIT,
+      '超出 SEARCH_LIMIT 的部分被截掉'
+    );
   });
 
   it('runSearch：请求失败—复位在途标记并显示失败态（而不是冒充 0 匹配）', async () => {

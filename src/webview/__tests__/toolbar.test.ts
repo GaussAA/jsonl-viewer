@@ -93,7 +93,6 @@ describe('createToolbar（视图层覆盖率补强）', () => {
     h.tb.update({
       fileName: 'big.jsonl',
       totalRecords: 1000,
-      loadedLines: 42,
       range: [0, 20],
       buildMs: 12,
       status: 'ready',
@@ -113,7 +112,6 @@ describe('createToolbar（视图层覆盖率补强）', () => {
     h.tb.update({
       fileName: 'a',
       totalRecords: 0,
-      loadedLines: 0,
       range: [0, 0],
       buildMs: undefined,
       status: 'indexing',
@@ -124,7 +122,6 @@ describe('createToolbar（视图层覆盖率补强）', () => {
     h.tb.update({
       fileName: 'a',
       totalRecords: 0,
-      loadedLines: 0,
       range: [0, 0],
       buildMs: undefined,
       status: 'error',
@@ -477,17 +474,15 @@ describe('createToolbar（视图层覆盖率补强）', () => {
     assert.ok(h.calls.layout.length > beforeCount, '变更后回调 onApplyLayout');
   });
 
-  it('refresh / destroy：均不抛错，且 destroy 后交互安全', () => {
+  it('destroy：不抛错，且 destroy 后交互安全', () => {
     const h = makeToolbar();
     h.tb.update({
       fileName: 'a',
       totalRecords: 5,
-      loadedLines: 5,
       range: [0, 5],
       buildMs: 1,
       status: 'ready',
     });
-    assert.doesNotThrow(() => h.tb.refresh());
     assert.doesNotThrow(() => h.tb.destroy());
     assert.doesNotThrow(() => byTitle(h, '下一个匹配').click(), 'destroy 后点击安全');
   });
@@ -535,7 +530,7 @@ describe('createToolbar（视图层覆盖率补强）', () => {
     h.tb.update({ badLines: { count: 2, partial: false } });
     // updateToolbar() 会被频繁调用且不携带 badLines —— 若它顺手重置徽章，
     // 用户每次滚动都会看到徽章闪一下。
-    h.tb.update({ totalRecords: 100, loadedLines: 20, range: [0, 19], status: 'ready' });
+    h.tb.update({ totalRecords: 100, range: [0, 19], status: 'ready' });
     assert.strictEqual(chipEl(h).hidden, false, '常规刷新不得改动徽章');
     assert.match(chipEl(h).textContent ?? '', /2 坏行/);
   });

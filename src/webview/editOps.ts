@@ -262,7 +262,6 @@ export function createEditOps(deps: EditOpsDeps): EditOps {
           }
           // 改动可能散落全文件，无法逐行失效 —— 整体清空缓存并按需重拉。
           state.cache.clear();
-          state.maxLoaded = 0;
           list.refresh();
           updateToolbar();
           // 内容变了，过滤结果同样不再可信；有过滤条件就重算。
