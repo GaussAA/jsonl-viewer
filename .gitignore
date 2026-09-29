@@ -35,3 +35,10 @@ test_out.txt
 .scratch/
 # WorkBuddy 工作区记忆 / 技能数据（本地协作数据，非项目产物，不入库）
 .workbuddy/
+# 设计稿 / 原型产物：由设计工具导出，非运行时源码；重新导出会整体覆盖，
+# 且其 HTML 格式不受 Prettier 保护 —— 一旦工具再次导出就会让 `prettier --check .`
+# 误报，进而被 pre-commit 钩子拦下提交（见本文件顶部说明）。
+pages/
+*.design
+# 一次性连通性测试页（调试「页面能否加载」用，已无用途）
+/test.html
