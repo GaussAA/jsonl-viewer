@@ -13,6 +13,7 @@
  */
 
 import {
+  arraySegmentCount,
   containerPreview,
   expandContainer,
   isContainer,
@@ -50,6 +51,24 @@ type TreeNode = HTMLElement & TreeNodeMeta;
 
 /** Row HTMLElement + 缓存元数据。 */
 type TreeRow = HTMLElement & TreeRowMeta;
+
+/**
+ * 挂在 `.jlv-load-more` 上的**父容器**元数据（增量追加时用来定位目标容器）。
+ *
+ * 为什么把父值直接挂上，而不是点的时候按 `data-parent` 反查行：
+ * `pathKey` 以 NUL(`\u0000`) 作分隔符，而 `CSS.escape` 会把 NUL 转义成 U+FFFD ——
+ * 于是 `[data-tree-key="\ufffd…"]` 属性选择器**永远匹配不上**含两段以上路径的容器，
+ * 「加载更多」在嵌套容器里会静默退回整树重建（或错插节点）。直接挂元数据既避开了
+ * 这条编码歧义，也省掉一次 O(行数) 的查询。
+ */
+interface LoadMoreMeta {
+  __value?: unknown;
+  __segs?: PathSeg[];
+  __childDepth?: number;
+}
+
+/** LoadMore HTMLElement + 父容器元数据。 */
+type LoadMore = HTMLElement & LoadMoreMeta;
 
 /** 右栏头部工具的导航回调（上一条 / 下一条 JSON 条目）。 */
 export interface DetailTreeNavHandlers {
@@ -406,6 +425,30 @@ export function createDetailTree(
     return s;
   }
 
+  /**
+   * 创建「加载更多」入口。三处渲染点（根的顶层、整树构建、局部懒展开）共用，
+   * 以免键盘/读屏属性在一处补齐、另一处又漏掉（此前根层那一处便缺 role/tabIndex）。
+   *
+   * 同时把父容器的值 / 路径 / 子级深度挂在元素上（见 `LoadMoreMeta`）。
+   */
+  function mkLoadMore(
+    parentKey: string,
+    remaining: number,
+    owner: { value: unknown; segs: readonly PathSeg[]; childDepth: number }
+  ): LoadMore {
+    const more = document.createElement('div') as LoadMore;
+    more.className = 'jlv-load-more';
+    more.dataset.parent = parentKey;
+    more.textContent = `… 还有 ${remaining} 项，点击加载更多`;
+    more.tabIndex = 0;
+    more.setAttribute('role', 'button');
+    more.setAttribute('aria-label', `还有 ${remaining} 项，加载更多`);
+    more.__value = owner.value;
+    more.__segs = [...owner.segs];
+    more.__childDepth = owner.childDepth;
+    return more;
+  }
+
   function renderBody(): void {
     body.textContent = '';
     if (currentValue === undefined) {
@@ -419,13 +462,10 @@ export function createDetailTree(
     if (isContainer(currentValue)) {
       const { items, remaining } = expandContainer(currentValue as object, '$', revealed);
       for (const it of items) buildNode(body, [it.seg], 1, it.value);
-      if (remaining > 0) {
-        const more = document.createElement('div');
-        more.className = 'jlv-load-more';
-        more.dataset.parent = '$';
-        more.textContent = `… 还有 ${remaining} 项，点击加载更多`;
-        body.appendChild(more);
-      }
+      if (remaining > 0)
+        body.appendChild(
+          mkLoadMore('$', remaining, { value: currentValue, segs: [], childDepth: 1 })
+        );
     } else {
       // 根为标量（罕见兜底）：原样展示
       buildNode(body, [], 0, currentValue);
@@ -439,9 +479,6 @@ export function createDetailTree(
     }
   }
 
-  /** 递归构建单个节点及其（已展开的）子树。
-   *  节点 = 块容器（.jlv-tree-node）：header 行在上、子树块（.jlv-tree-block）在其下方逐级缩进；
-   *  避免旧版「子节点作为 flex 项横向堆积到父标签右侧」造成深层嵌套水平压缩的问题。 */
   /**
    * 原地编辑一个标量字段：值 span 原地变输入框，Enter 提交 / Esc 取消 / blur 还原。
    *
@@ -513,7 +550,16 @@ export function createDetailTree(
     input.addEventListener('blur', () => finish(true));
   }
 
-  function buildNode(parent: HTMLElement, segs: PathSeg[], depth: number, value: unknown): void {
+  /**
+   * 递归构建单个节点及其（已展开的）子树。
+   * 节点 = 块容器（.jlv-tree-node）：header 行在上、子树块（.jlv-tree-block）在其下方逐级缩进；
+   * 避免旧版「子节点作为 flex 项横向堆积到父标签右侧」造成深层嵌套水平压缩的问题。
+   *
+   * `parent` 收 `Node` 而非 `HTMLElement`：本函数只需 `appendChild`，放宽后「加载更多」
+   * 可以先把新节点建进 `DocumentFragment`、再一次性插入（见 `loadMoreInto`），
+   * 避免逐个节点触发容器重排。
+   */
+  function buildNode(parent: Node, segs: PathSeg[], depth: number, value: unknown): void {
     const kind = jsonKindOf(value);
     const container = isContainer(value);
 
@@ -626,16 +672,10 @@ export function createDetailTree(
         childrenEl.appendChild(blockInner);
         const { items, remaining } = expandContainer(value as object, pathKey(segs), revealed);
         for (const it of items) buildNode(blockInner, [...segs, it.seg], depth + 1, it.value);
-        if (remaining > 0) {
-          const more = document.createElement('div');
-          more.className = 'jlv-load-more';
-          more.dataset.parent = pathKey(segs);
-          more.textContent = `… 还有 ${remaining} 项，点击加载更多`;
-          more.tabIndex = 0;
-          more.setAttribute('role', 'button');
-          more.setAttribute('aria-label', `还有 ${remaining} 项，加载更多`);
-          blockInner.appendChild(more);
-        }
+        if (remaining > 0)
+          blockInner.appendChild(
+            mkLoadMore(pathKey(segs), remaining, { value, segs, childDepth: depth + 1 })
+          );
         // 仅对「用户本次 toggle 展开的节点」播抽屉动画；批量重建（切换/全部展开/加载更多）保持干脆
         if (pathKey(segs) === lastExpandedKey) {
           lastExpandedKey = null;
@@ -753,13 +793,10 @@ export function createDetailTree(
   ): void {
     const { items, remaining } = expandContainer(value as object, pathKey(segs), revealed);
     for (const it of items) buildNode(inner, [...segs, it.seg], depth + 1, it.value);
-    if (remaining > 0) {
-      const more = document.createElement('div');
-      more.className = 'jlv-load-more';
-      more.dataset.parent = pathKey(segs);
-      more.textContent = `… 还有 ${remaining} 项，点击加载更多`;
-      inner.appendChild(more);
-    }
+    if (remaining > 0)
+      inner.appendChild(
+        mkLoadMore(pathKey(segs), remaining, { value, segs, childDepth: depth + 1 })
+      );
   }
 
   /** 局部展开一个容器节点：懒构建子节点 + 抽屉动画（不整树重建）。 */
@@ -810,6 +847,55 @@ export function createDetailTree(
     return Promise.resolve();
   }
 
+  /**
+   * 「加载更多」的**增量**实现（O12）。
+   *
+   * 为什么不能走 `render()`：整树重建在「全部展开」态会把已展开的整棵子树重造一遍，
+   * 与 `chunkedExpand` 的分批初衷完全抵消 —— 宽记录 / 深树时点一次「加载更多」就冻住
+   * 主线程，而它本该只多出 50 个兄弟节点。这里只把**新增的那一批**插到入口之前。
+   *
+   * 结构约定：「加载更多」恒是其父容器的最后一个子元素，因此插入锚点就是它自己；
+   * 父容器的值 / 路径 / 子级深度由 `mkLoadMore` 直接挂在元素上（见 `LoadMoreMeta`）。
+   */
+  function loadMoreInto(more: HTMLElement): void {
+    const m = more as LoadMore;
+    const container = more.parentElement;
+    const parent = more.dataset.parent ?? '$';
+    const value = m.__value;
+    // 元数据缺失 / 目标容器已不在（理论上不该发生）：退回整树重建 ——
+    // 宁可慢一次，也不要多插或错插节点。
+    if (!container || m.__value === undefined || !isContainer(value)) {
+      render();
+      return;
+    }
+    const segs = m.__segs ?? [];
+    const childDepth = m.__childDepth ?? 1;
+
+    const oldExtra = revealed[parent] ?? 0;
+    const newExtra = oldExtra + LARGE_ARRAY_PREVIEW;
+    const len = Array.isArray(value) ? value.length : 0;
+    // 已经渲染过的项数：新一批要从这里往后切，否则会把旧项再建一遍（重复节点）。
+    const before = arraySegmentCount(len, oldExtra).visible;
+    const { items, remaining } = expandContainer(value as object, parent, { [parent]: newExtra });
+    revealed[parent] = newExtra;
+
+    const frag = document.createDocumentFragment();
+    for (const it of items.slice(before)) {
+      buildNode(frag, [...segs, it.seg], childDepth, it.value);
+    }
+    // 高亮必须先于插入：fragment 插入后即被清空，之后再查它就什么也查不到了。
+    applyFindTo(frag);
+    container.insertBefore(frag, more);
+
+    if (remaining > 0) {
+      more.textContent = `… 还有 ${remaining} 项，点击加载更多`;
+      more.setAttribute('aria-label', `还有 ${remaining} 项，加载更多`);
+    } else {
+      more.remove();
+    }
+    refreshFindState();
+  }
+
   /* 键盘可达：Enter/Space 在树行上触发展开/折叠，在「加载更多」上加载。 */
   body.addEventListener('keydown', (e) => {
     if (e.key !== 'Enter' && e.key !== ' ') return;
@@ -831,9 +917,7 @@ export function createDetailTree(
     const target = e.target as HTMLElement;
     const more = target.closest<HTMLElement>('.jlv-load-more');
     if (more) {
-      const parent = more.dataset.parent ?? '$';
-      revealed[parent] = (revealed[parent] ?? 0) + LARGE_ARRAY_PREVIEW;
-      render();
+      loadMoreInto(more); // 增量追加，不整树重建（O12）
       return;
     }
     const row = target.closest<HTMLElement>('.jlv-tree-row');
@@ -884,13 +968,14 @@ export function createDetailTree(
   let findCursor = 0;
 
   /**
-   * 把查找高亮应用到**已渲染**的行。
+   * 把查找高亮应用到 `scope` 内**已渲染**的行（通常整棵树；增量追加时只传新插入的那一段，
+   * 避免为一个「加载更多」把整棵深树的文本节点全部重写一遍）。
    *
    * 原文存在元素的 dataset 里而不是从 DOM 反解：高亮会把文本节点换成 text + <mark> 的组合，
    * 没有原文这一层，第二次匹配就会在「已被切碎的上一次结果」上做，越搜越乱。
    */
-  function applyFind(): void {
-    for (const row of Array.from(body.querySelectorAll<HTMLElement>('.jlv-tree-row'))) {
+  function applyFindTo(scope: ParentNode): void {
+    for (const row of Array.from(scope.querySelectorAll<HTMLElement>('.jlv-tree-row'))) {
       for (const sel of ['.jlv-key', '.jlv-value']) {
         const el = row.querySelector<HTMLElement>(sel);
         if (!el) continue;
@@ -899,11 +984,19 @@ export function createDetailTree(
         renderHighlight(el, text, findNeedle ? findRanges(text, findNeedle) : []);
       }
     }
-    // 上一次的「当前命中」标记已随重渲染失效，游标一并收敛。
+  }
+
+  /** 命中游标与计数的收敛。结构一变就必须重算：上一次的「当前命中」标记已随之失效。 */
+  function refreshFindState(): void {
     const hits = findHits();
     if (findCursor >= hits.length) findCursor = 0;
     markActiveHit(hits);
     updateFindCount(hits.length);
+  }
+
+  function applyFind(): void {
+    applyFindTo(body);
+    refreshFindState();
   }
 
   function findHits(): HTMLElement[] {

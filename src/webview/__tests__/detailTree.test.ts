@@ -6,6 +6,7 @@ import {
   type DetailTreeController,
   type DetailTreeNavHandlers,
 } from '../detailTree.ts';
+import { LARGE_ARRAY_PREVIEW } from '../detailLogic.ts';
 import type { PathSeg } from '../detailLogic.ts';
 
 /**
@@ -160,6 +161,131 @@ describe('createDetailTree（视图层覆盖率补强）', () => {
 
     more.click();
     assert.ok(rows(h).length > firstPage, `加载更多后行数增长（${firstPage} → ${rows(h).length}）`);
+  });
+
+  /* ---------------- O12：「加载更多」走增量追加，不整树重建 ---------------- */
+
+  /** 点一下「加载更多」入口（jsdom 无布局，click 即触发 body 上的委托）。 */
+  const clickMore = (h: Harness): HTMLElement => {
+    const more = h.tree.root.querySelector<HTMLElement>('.jlv-load-more');
+    assert.ok(more, '存在「加载更多」入口');
+    more.click();
+    return more;
+  };
+
+  it('O12：根层「加载更多」增量追加 —— 既有行节点保持同一引用', () => {
+    const h = makeTree();
+    h.tree.showRecord(Array.from({ length: 5000 }, (_, i) => i));
+
+    const beforeRows = rows(h);
+    const moreBefore = h.tree.root.querySelector<HTMLElement>('.jlv-load-more')!;
+    clickMore(h);
+
+    const after = rows(h);
+    assert.strictEqual(after.length, beforeRows.length + LARGE_ARRAY_PREVIEW, '新增恰好一批');
+    // 旧实现走 render() 整树重建，下面两条断言必然失败 —— 它们正是本回归的判据。
+    assert.strictEqual(after[0], beforeRows[0], '既有行未被重建（同一 DOM 节点）');
+    assert.strictEqual(
+      h.tree.root.querySelector('.jlv-load-more'),
+      moreBefore,
+      '入口复用同一节点（未被重建）'
+    );
+    assert.strictEqual(keys(h)[beforeRows.length], '[50]', '新增项自下标 50 起，且插入在入口之前');
+    assert.match(moreBefore.textContent ?? '', /还有 4900 项/, '剩余计数就地更新');
+  });
+
+  it('O12：嵌套容器的「加载更多」同样增量追加，兄弟节点不受影响', () => {
+    const h = makeTree();
+    h.tree.showRecord({ arr: Array.from({ length: 300 }, (_, i) => i), tail: 'x' });
+
+    // showRecord 默认「完全折叠」（collapseAll 把 depthLimit 归零）：先展开 arr，才有入口可点。
+    rows(h)
+      .find((r) => r.dataset.treeKey === 'k:"arr"')!
+      .click();
+    const beforeRows = rows(h);
+    const tailRow = beforeRows.find((r) => r.dataset.treeKey === 'k:"tail"');
+    assert.ok(tailRow, '存在兄弟字段 tail 的行');
+    clickMore(h);
+
+    assert.strictEqual(rows(h).length, beforeRows.length + LARGE_ARRAY_PREVIEW);
+    assert.strictEqual(
+      rows(h).find((r) => r.dataset.treeKey === 'k:"tail"'),
+      tailRow,
+      '兄弟节点未被重建'
+    );
+  });
+
+  it('O12：局部展开（懒构建）产生的「加载更多」也走增量', () => {
+    const h = makeTree();
+    h.tree.showRecord({ wrap: { arr: Array.from({ length: 300 }, (_, i) => i) } });
+
+    // 逐层点开：wrap → 其内的 arr（后者由 buildChildrenInto 懒构建）
+    rows(h)
+      .find((r) => r.dataset.treeKey === 'k:"wrap"')!
+      .click();
+    const arrRow = rows(h).find((r) => r.dataset.treeKey === 'k:"wrap"\u0000k:"arr"');
+    assert.ok(arrRow, '存在 wrap.arr 的行');
+    arrRow.click();
+
+    const beforeRows = rows(h);
+    clickMore(h);
+    assert.strictEqual(rows(h).length, beforeRows.length + LARGE_ARRAY_PREVIEW, '增量追加一批');
+    assert.strictEqual(rows(h)[0], beforeRows[0], '既有行未被重建');
+  });
+
+  it('O12：耗尽后入口移除，且不产生重复节点', () => {
+    const h = makeTree();
+    h.tree.showRecord(Array.from({ length: LARGE_ARRAY_PREVIEW + 30 }, (_, i) => i));
+    clickMore(h);
+
+    const ks = keys(h);
+    assert.strictEqual(ks.length, LARGE_ARRAY_PREVIEW + 30, '恰好渲染全部项');
+    assert.strictEqual(new Set(ks).size, ks.length, '无重复节点');
+    assert.strictEqual(h.tree.root.querySelector('.jlv-load-more'), null, '无剩余项时入口被移除');
+  });
+
+  it('O12：全部展开态下「加载更多」不再重造整棵树', async () => {
+    const h = makeTree();
+    h.tree.showRecord({ arr: Array.from({ length: 60 }, (_, i) => ({ i })) });
+
+    // 先展开 arr 露出 50 个子行，再「全部展开」——此时才有深层子树可供检验「不重造」。
+    rows(h)
+      .find((r) => r.dataset.treeKey === 'k:"arr"')!
+      .click();
+    h.tree.root.querySelector<HTMLElement>('[data-act="expandToggle"]')!.click();
+    // chunkedExpand 首批同步 50 行、其余经 setTimeout(16) 分批 —— 等它跑完再取样。
+    for (let n = 0; n < 20; n++) {
+      const done = rows(h).every(
+        (r) => r.dataset.container !== '1' || r.classList.contains('expanded')
+      );
+      if (done) break;
+      await wait(20);
+    }
+
+    const deepBefore = rows(h);
+    const lastDeep = deepBefore[deepBefore.length - 1];
+    clickMore(h);
+
+    assert.strictEqual(rows(h)[deepBefore.length - 1], lastDeep, '原已展开的深层节点未被重建');
+    assert.strictEqual(rows(h).length, deepBefore.length + 10 * 2, '新增 10 条，各展开出 1 个子项');
+  });
+
+  it('O12：加载更多后，新增行同样被查找高亮覆盖', () => {
+    const h = makeTree();
+    h.tree.showRecord(
+      Array.from({ length: 200 }, (_, i) => i),
+      0
+    );
+
+    const input = h.tree.root.querySelector<HTMLInputElement>('.jlv-find-input')!;
+    input.value = '1';
+    input.dispatchEvent(new Event('input'));
+    const beforeHits = h.tree.root.querySelectorAll('mark.jlv-hit').length;
+    assert.ok(beforeHits > 0, '首屏有命中');
+
+    clickMore(h);
+    const afterHits = h.tree.root.querySelectorAll('mark.jlv-hit').length;
+    assert.ok(afterHits > beforeHits, `新增段落的命中也被高亮（${beforeHits} → ${afterHits}）`);
   });
 
   it('showLoading / showRecord：加载占位出现后被真实内容替换', () => {
