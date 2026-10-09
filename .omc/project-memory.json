@@ -139,8 +139,8 @@
   "hotPaths": [
     {
       "path": "src/host/dataService.ts",
-      "accessCount": 32,
-      "lastAccessed": 1791529926578,
+      "accessCount": 42,
+      "lastAccessed": 1791530511907,
       "type": "file"
     },
     {
@@ -219,6 +219,12 @@
       "path": "src/host/profileEngine.ts",
       "accessCount": 3,
       "lastAccessed": 1791527922730,
+      "type": "file"
+    },
+    {
+      "path": "src/host/badLineTracker.ts",
+      "accessCount": 3,
+      "lastAccessed": 1791530354087,
       "type": "file"
     },
     {
@@ -345,12 +351,6 @@
       "path": "src/host/logging.ts",
       "accessCount": 1,
       "lastAccessed": 1791525199016,
-      "type": "file"
-    },
-    {
-      "path": "src/host/badLineTracker.ts",
-      "accessCount": 1,
-      "lastAccessed": 1791525199115,
       "type": "file"
     },
     {
