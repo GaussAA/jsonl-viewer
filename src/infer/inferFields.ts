@@ -24,13 +24,16 @@ import type { LineIndex } from '../indexer/lineIndex.ts';
 import type { ByteReader } from '../parser/jsonParser.ts';
 import { SAMPLE_SCAN_LINES } from '../constants.ts';
 import { parseJsonLine, scanRecords } from '../parser/jsonParser.ts';
+import {
+  ARRAY_RECORD_KEY,
+  SCALAR_RECORD_KEY,
+  fieldTypeOf,
+  type LocalFieldType,
+} from '../core/query.ts';
 
-export type FieldType = 'string' | 'number' | 'boolean' | 'null' | 'object' | 'array' | 'undefined';
-
-/** 数组型记录的伪字段键。 */
-export const ARRAY_RECORD_KEY = '$array';
-/** 标量型记录的伪字段键。 */
-export const SCALAR_RECORD_KEY = '$value';
+// Re-export for external use
+export { ARRAY_RECORD_KEY, SCALAR_RECORD_KEY, fieldTypeOf };
+export type FieldType = LocalFieldType;
 
 /** 单一字段的推断结果（webview / ui 复用）。 */
 export interface FieldInfo {
@@ -76,25 +79,6 @@ interface Entry {
   sample?: unknown;
   allObject: boolean;
   allArray: boolean;
-}
-
-/** 值 → FieldType（含 null/undefined 的区分）。 */
-export function fieldTypeOf(value: unknown): FieldType {
-  if (value === null) return 'null';
-  if (value === undefined) return 'undefined';
-  if (Array.isArray(value)) return 'array';
-  switch (typeof value) {
-    case 'object':
-      return 'object';
-    case 'string':
-      return 'string';
-    case 'number':
-      return 'number';
-    case 'boolean':
-      return 'boolean';
-    default:
-      return 'undefined';
-  }
 }
 
 /** 主导类型优先序（前者优先用于平手）。 */

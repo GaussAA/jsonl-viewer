@@ -295,21 +295,9 @@ export function findRanges(
   return out;
 }
 
+import { foldAscii } from './replaceLogic.ts';
+
 /** 只把 ASCII A–Z 折叠成小写，其余字符原样（长度不变，索引与原文一一对应）。 */
 function foldAsciiLowerStr(s: string): string {
-  let changed = false;
-  for (let i = 0; i < s.length; i++) {
-    const c = s.charCodeAt(i);
-    if (c >= 65 && c <= 90) {
-      changed = true;
-      break;
-    }
-  }
-  if (!changed) return s;
-  let out = '';
-  for (let i = 0; i < s.length; i++) {
-    const c = s.charCodeAt(i);
-    out += c >= 65 && c <= 90 ? String.fromCharCode(c + 32) : s[i];
-  }
-  return out;
+  return foldAscii(s);
 }

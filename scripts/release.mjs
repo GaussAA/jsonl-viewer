@@ -108,10 +108,10 @@ if (existsSync(out)) {
   process.exit(1);
 }
 
-console.log(`[release] v${version}  typecheck+test+build ...`);
-// dist 产物守卫测试依赖此开关（默认跳过 —— 与并行 jsdom 测试存在 globalThis 竞态）
+console.log(`[release] v${version}  typecheck+build+test ...`);
+// 先构建 dist/ 产物，再测试（dist-product.test.ts 需要检查已构建的产物）
 process.env.JLV_DIST_PRODUCT = '1';
-sh('pnpm typecheck && pnpm test && pnpm build');
+sh('pnpm typecheck && pnpm build && pnpm test');
 
 console.log(`[release] vsce package -> releases/ ...`);
 sh(`npx vsce package --out "${out}"`);

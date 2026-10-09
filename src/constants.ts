@@ -208,7 +208,9 @@ export const TAIL_APPEND_MAX_BYTES = 8 * 1024 * 1024;
 export const TAIL_ANCHOR_BYTES = 256;
 
 /** 全文/字段搜索每扫描多少行 yield 一次，避免阻塞事件循环。 */
-export const SEARCH_SCAN_EVERY = 256; /** 搜索 / 过滤结果硬上限（超过即截断并标记 truncated=true）。 */
+export const SEARCH_SCAN_EVERY = 256;
+
+/** 搜索 / 过滤结果硬上限（超过即截断并标记 truncated=true）。 */
 export const SEARCH_MAX_RESULTS = 50_000;
 
 /** 过滤结果硬上限——与搜索相同（统一 5 万阈值）。 */

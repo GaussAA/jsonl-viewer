@@ -134,7 +134,6 @@ export async function readLineBuffer(
   return buf.subarray(0, trimmedLen);
 }
 
-/** 基于稀疏索引 scan，按需读取并解析第 line 行（单次顺序 IO，从最近检查点扫到该行）。 */
 /**
  * 读取一条逻辑记录并解析。
  *
@@ -172,7 +171,6 @@ export async function readRecord(
   return { line: recordNo, ok: false, error: parsed.error, rawText, rawBytes };
 }
 
-/** 读取并解析 [startLine, startLine+count) 的一批行（虚拟滚动请求可视区用，连续顺序扫）。 */
 /**
  * 批量读取记录（虚拟滚动可视区用）：[startRecord, startRecord+count) 单遍扫描聚合。
  *

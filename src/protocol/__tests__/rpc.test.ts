@@ -38,6 +38,7 @@ const baseHandlers: HostHandlerMap = {
       uri: 'u',
       protocolVersion: PROTOCOL_VERSION,
       totalLines: 0,
+      totalRecords: 0,
       totalBytes: 0,
       buildMs: 0,
       eof: true,
