@@ -59,7 +59,7 @@ export interface HistoryStepResult {
 }
 
 /** 历史条目占用的近似字节数（正向与反向数据都要留着才能双向执行）。 */
-function historyOpBytes(op: HistoryOp): number {
+export function historyOpBytes(op: HistoryOp): number {
   switch (op.kind) {
     case 'edit':
       return op.before.length + op.after.length;

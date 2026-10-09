@@ -64,7 +64,7 @@ import { exportLinesToFile, type ExportOpts } from './exporter.ts';
 import { buildIndexWithFallback, type IndexHost } from './indexHost.ts';
 import { profileRecords, type ProfileResult } from './profileEngine.ts';
 import type { BuildResult } from './workerProtocol.ts';
-import { EditHistory } from './editHistory.ts';
+import { EditHistory, historyLabel, historyOpBytes } from './editHistory.ts';
 import { BadLineTracker } from './badLineTracker.ts';
 import type { HistoryEntry, HistoryOp, HistoryStepResult } from './editHistory.ts';
 import { buildRecordsPayload, PROTOCOL_VERSION } from '../protocol/rpc.ts';
@@ -884,7 +884,15 @@ export class DataService {
       }
 
       this.badLines.delete(line);
-      this.history.push({ kind: 'edit', line, before: beforeText, after: text }, bytesDelta);
+      this.history.execute({
+        id: `h${Date.now()}`,
+        op: { kind: 'edit', line, before: beforeText, after: text },
+        label: `编辑第 ${line + 1} 行`,
+        lines: 1,
+        bytesDelta,
+        at: Date.now(),
+        bytes: beforeText.length + text.length,
+      });
       return {
         ok: true,
         line,
@@ -1110,7 +1118,17 @@ export class DataService {
       );
       await this.commitIndex(li, [{ kind: 'delete', line, bytes: removedBytes }]);
       this.badLines.shiftAfterDelete(line);
-      this.history.push({ kind: 'delete', line, before: removedText }, res.bytesDelta);
+      const op: HistoryOp = { kind: 'delete', line, before: removedText };
+      const { label, lines } = historyLabel(op);
+      this.history.execute({
+        id: `h${Date.now()}`,
+        op,
+        label,
+        lines,
+        bytesDelta: res.bytesDelta,
+        at: Date.now(),
+        bytes: historyOpBytes(op),
+      });
       return {
         ok: true,
         line,
@@ -1209,7 +1227,17 @@ export class DataService {
       );
       await this.commitIndex(li, [{ kind: 'insert', line: at, bytes: newLineBytes.length }]);
       this.badLines.shiftAfterInsert(at);
-      this.history.push({ kind: 'insert', line: at, text }, res.bytesDelta);
+      const op: HistoryOp = { kind: 'insert', line: at, text };
+      const { label, lines } = historyLabel(op);
+      this.history.execute({
+        id: `h${Date.now()}`,
+        op,
+        label,
+        lines,
+        bytesDelta: res.bytesDelta,
+        at: Date.now(),
+        bytes: historyOpBytes(op),
+      });
       return {
         ok: true,
         line: at,
@@ -1669,29 +1697,20 @@ export class DataService {
   }
 
   private async undoStepInternal(): Promise<HistoryStepResult> {
-    if (this.history.cursorPos === 0) {
-      return {
-        ok: false,
-        steps: 0,
-        cursor: 0,
-        total: this.history.total,
-        error: '没有可撤销的操作',
-      };
-    }
-    const entry = this.history.prevEntry();
-    // 光标已确认 > 0，理论上必然有条目；仍显式守卫——历史状态一旦被别处改动，
-    // 宁可如实报错也不能带着 undefined 去执行回退。
+    const entry = this.history.undo();
     if (!entry) {
       return {
         ok: false,
         steps: 0,
         cursor: this.history.cursorPos,
         total: this.history.total,
-        error: '历史状态已失效，请重新打开后再试',
+        error: '没有可撤销的操作',
       };
     }
     const applied = await this.runHistoryOp(entry, false);
     if (!applied.ok) {
+      // 失败时需要恢复游标（undo() 已经后退了）
+      this.history.stepForward();
       return {
         ok: false,
         steps: 0,
@@ -1700,7 +1719,6 @@ export class DataService {
         error: applied.error,
       };
     }
-    this.history.stepBack();
     return {
       ok: true,
       steps: 1,
@@ -1716,7 +1734,8 @@ export class DataService {
   }
 
   private async redoStepInternal(): Promise<HistoryStepResult> {
-    if (this.history.cursorPos >= this.history.total) {
+    const entry = this.history.redo();
+    if (!entry) {
       return {
         ok: false,
         steps: 0,
@@ -1725,18 +1744,10 @@ export class DataService {
         error: '没有可重做的操作',
       };
     }
-    const entry = this.history.entryAt(this.history.cursorPos);
-    if (!entry) {
-      return {
-        ok: false,
-        steps: 0,
-        cursor: this.history.cursorPos,
-        total: this.history.total,
-        error: '历史状态已失效，请重新打开后再试',
-      };
-    }
     const applied = await this.runHistoryOp(entry, true);
     if (!applied.ok) {
+      // 失败时需要恢复游标（redo() 已经前进了）
+      this.history.stepBack();
       return {
         ok: false,
         steps: 0,
@@ -1745,7 +1756,6 @@ export class DataService {
         error: applied.error,
       };
     }
-    this.history.stepForward();
     return {
       ok: true,
       steps: 1,
@@ -2003,7 +2013,17 @@ export class DataService {
         await this.commitIndex(li, ops);
         this.badLines.remapAfterDeletes(wanted);
       }
-      this.history.push({ kind: 'deleteMany', ranges }, res.bytesDelta);
+      const op: HistoryOp = { kind: 'deleteMany', ranges };
+      const { label, lines } = historyLabel(op);
+      this.history.execute({
+        id: `h${Date.now()}`,
+        op,
+        label,
+        lines,
+        bytesDelta: res.bytesDelta,
+        at: Date.now(),
+        bytes: historyOpBytes(op),
+      });
 
       return {
         ok: true,
@@ -2327,8 +2347,18 @@ export class DataService {
         changes.length <= MAX_REPLACE_UNDO_LINES && undoBytes <= MAX_REPLACE_UNDO_BYTES;
 
       // 注：本方法也被 applyLineTexts 调用（历史回退的原语），那时的 `history.applying`
-      // 为真，history.push 会自动跳过 —— 否则每撤销一次就会生成一条新记录。
-      this.history.push({ kind: 'replaceAll', changes }, res.bytesDelta);
+      // 为真，history.execute 会自动跳过 —— 否则每撤销一次就会生成一条新记录。
+      const op: HistoryOp = { kind: 'replaceAll', changes };
+      const { label, lines } = historyLabel(op);
+      this.history.execute({
+        id: `h${Date.now()}`,
+        op,
+        label,
+        lines,
+        bytesDelta: res.bytesDelta,
+        at: Date.now(),
+        bytes: historyOpBytes(op),
+      });
 
       return {
         ok: true,

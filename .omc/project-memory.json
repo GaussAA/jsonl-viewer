@@ -138,21 +138,21 @@
   },
   "hotPaths": [
     {
+      "path": "src/host/dataService.ts",
+      "accessCount": 32,
+      "lastAccessed": 1791529926578,
+      "type": "file"
+    },
+    {
       "path": "src/host/editHistory.ts",
-      "accessCount": 15,
-      "lastAccessed": 1791529355922,
+      "accessCount": 17,
+      "lastAccessed": 1791529787025,
       "type": "file"
     },
     {
       "path": "src/parser/jsonParser.ts",
       "accessCount": 10,
       "lastAccessed": 1791526550698,
-      "type": "file"
-    },
-    {
-      "path": "src/host/dataService.ts",
-      "accessCount": 9,
-      "lastAccessed": 1791528471954,
       "type": "file"
     },
     {
