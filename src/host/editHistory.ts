@@ -103,6 +103,8 @@ export class EditHistory {
   private cursor = 0;
   private seq = 0;
   private dropped = false;
+  private readonly maxEntries = MAX_HISTORY_ENTRIES;
+  private readonly maxBytes = MAX_HISTORY_BYTES;
 
   /**
    * 正在执行历史回退：期间的写操作**不再入栈**（否则撤销会生成新记录，
@@ -190,6 +192,89 @@ export class EditHistory {
   /** 光标后移一格（重做一步成功后调用）。 */
   stepForward(): void {
     if (this.cursor < this.entries.length) this.cursor++;
+  }
+
+  /**
+   * 执行新编辑命令并入栈（新接口，自动清理 redo 栈）。
+   *
+   * 这是推荐的入口：调用方无需手动调用 clearAfterCursor()，避免遗漏。
+   * 旧的 push() + 手动清理模式仍保留（向后兼容），但标记为 deprecated。
+   *
+   * 注意：此方法接受完整的 HistoryEntry（已包含 label、lines、bytes 等），
+   * 而旧的 push() 接受 HistoryOp + bytesDelta 并自动计算其他字段。
+   */
+  execute(entry: HistoryEntry): void {
+    if (this.applying) return;
+    // 清理 cursor 后的所有条目（即 redo 栈）
+    if (this.cursor < this.entries.length) {
+      this.entries.splice(this.cursor);
+    }
+    // 入栈新命令（直接使用传入的完整 entry）
+    this.entries.push(entry);
+    this.cursor = this.entries.length;
+    this.trim();
+  }
+
+  /**
+   * 撤销一步（返回要撤销的命令，不执行 IO）。
+   *
+   * 返回 null 表示无可撤销内容。调用方负责应用返回的命令到磁盘。
+   * 状态机已自动后退游标。
+   */
+  undo(): HistoryEntry | null {
+    if (this.cursor === 0) return null;
+    this.cursor--;
+    return this.entries[this.cursor];
+  }
+
+  /**
+   * 重做一步（返回要重做的命令，不执行 IO）。
+   *
+   * 返回 null 表示无可重做内容。调用方负责应用返回的命令到磁盘。
+   * 状态机已自动前进游标。
+   */
+  redo(): HistoryEntry | null {
+    if (this.cursor >= this.entries.length) return null;
+    const entry = this.entries[this.cursor];
+    this.cursor++;
+    return entry;
+  }
+
+  /**
+   * 查询当前状态（用于 UI 更新或调试）。
+   *
+   * 返回快照，修改返回对象不影响内部状态。
+   */
+  getState(): { canUndo: boolean; canRedo: boolean; position: number; dropped: boolean } {
+    return {
+      canUndo: this.cursor > 0,
+      canRedo: this.cursor < this.entries.length,
+      position: this.cursor,
+      dropped: this.dropped,
+    };
+  }
+
+  /**
+   * 检查新命令是否会超出容量限制。
+   *
+   * 用于"先查询再决定"模式：调用方可根据返回值决定是否提示用户、降级、或继续。
+   * 不影响内部状态。
+   */
+  wouldExceedLimit(entry: HistoryEntry): boolean {
+    // 检查总字节数上限
+    const currentBytes = this.entries.slice(0, this.cursor).reduce((sum, e) => sum + e.bytes, 0);
+    const newBytes = entry.bytes;
+    if (currentBytes + newBytes > this.maxBytes) {
+      return true;
+    }
+
+    // 检查条目数上限（execute() 会先清理 redo 栈，所以新长度 = cursor + 1）
+    const afterPush = this.cursor + 1;
+    if (afterPush > this.maxEntries) {
+      return true;
+    }
+
+    return false;
   }
 
   /** 整体清空（reload / dispose：行号与偏移已整体失效，旧历史不可再应用）。 */

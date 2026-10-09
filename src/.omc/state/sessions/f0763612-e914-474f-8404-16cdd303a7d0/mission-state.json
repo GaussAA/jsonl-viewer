@@ -1,0 +1,79 @@
+{
+  "updatedAt": "2026-10-09T06:43:57.027Z",
+  "missions": [
+    {
+      "id": "session:f0763612-e914-474f-8404-16cdd303a7d0:none",
+      "source": "session",
+      "name": "none",
+      "objective": "Session mission",
+      "createdAt": "2026-10-09T06:38:31.120Z",
+      "updatedAt": "2026-10-09T06:43:57.027Z",
+      "status": "done",
+      "workerCount": 2,
+      "taskCounts": {
+        "total": 2,
+        "pending": 0,
+        "blocked": 0,
+        "inProgress": 0,
+        "completed": 2,
+        "failed": 0
+      },
+      "agents": [
+        {
+          "name": "general-purpose:a9e3a68",
+          "role": "general-purpose",
+          "ownership": "a9e3a68066a805020",
+          "status": "done",
+          "currentStep": null,
+          "latestUpdate": "completed",
+          "completedSummary": null,
+          "updatedAt": "2026-10-09T06:40:31.941Z"
+        },
+        {
+          "name": "general-purpose:ac8fd3d",
+          "role": "general-purpose",
+          "ownership": "ac8fd3d2a3e060252",
+          "status": "done",
+          "currentStep": null,
+          "latestUpdate": "completed",
+          "completedSummary": null,
+          "updatedAt": "2026-10-09T06:43:57.027Z"
+        }
+      ],
+      "timeline": [
+        {
+          "id": "session-start:a9e3a68066a805020:2026-10-09T06:38:31.120Z",
+          "at": "2026-10-09T06:38:31.120Z",
+          "kind": "update",
+          "agent": "general-purpose:a9e3a68",
+          "detail": "started general-purpose:a9e3a68",
+          "sourceKey": "session-start:a9e3a68066a805020"
+        },
+        {
+          "id": "session-stop:a9e3a68066a805020:2026-10-09T06:40:31.941Z",
+          "at": "2026-10-09T06:40:31.941Z",
+          "kind": "completion",
+          "agent": "general-purpose:a9e3a68",
+          "detail": "completed",
+          "sourceKey": "session-stop:a9e3a68066a805020"
+        },
+        {
+          "id": "session-start:ac8fd3d2a3e060252:2026-10-09T06:41:11.736Z",
+          "at": "2026-10-09T06:41:11.736Z",
+          "kind": "update",
+          "agent": "general-purpose:ac8fd3d",
+          "detail": "started general-purpose:ac8fd3d",
+          "sourceKey": "session-start:ac8fd3d2a3e060252"
+        },
+        {
+          "id": "session-stop:ac8fd3d2a3e060252:2026-10-09T06:43:57.027Z",
+          "at": "2026-10-09T06:43:57.027Z",
+          "kind": "completion",
+          "agent": "general-purpose:ac8fd3d",
+          "detail": "completed",
+          "sourceKey": "session-stop:ac8fd3d2a3e060252"
+        }
+      ]
+    }
+  ]
+}

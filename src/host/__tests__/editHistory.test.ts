@@ -126,3 +126,192 @@ test('historyLabel：各操作类型的描述与行数', () => {
     '替换 1 行'
   );
 });
+
+/* ============================================================================
+ * 新接口测试（EditSession 风格：execute / undo / redo / getState）
+ * ========================================================================= */
+
+test('execute：自动清理 redo 栈 + 入栈', () => {
+  const h = new EditHistory();
+  h.execute({
+    id: '1',
+    op: edit(0, 'a', 'b'),
+    label: '编辑1',
+    lines: 1,
+    bytesDelta: 0,
+    at: 0,
+    bytes: 2,
+  });
+  h.execute({
+    id: '2',
+    op: edit(1, 'c', 'd'),
+    label: '编辑2',
+    lines: 1,
+    bytesDelta: 0,
+    at: 0,
+    bytes: 2,
+  });
+
+  assert.equal(h.total, 2);
+  assert.equal(h.cursorPos, 2);
+
+  // 撤销一步
+  h.stepBack();
+  assert.equal(h.cursorPos, 1);
+
+  // 执行新命令应该清理 redo 栈（不需要手动调用 clearAfterCursor）
+  h.execute({
+    id: '3',
+    op: edit(2, 'e', 'f'),
+    label: '编辑3',
+    lines: 1,
+    bytesDelta: 0,
+    at: 0,
+    bytes: 2,
+  });
+  assert.equal(h.total, 2, '旧的编辑2被清理');
+  assert.equal(h.cursorPos, 2);
+  assert.equal(h.snapshot().entries[1].id, '3');
+});
+
+test('undo：返回命令 + 自动后退游标', () => {
+  const h = new EditHistory();
+  h.execute({
+    id: '1',
+    op: edit(0, 'a', 'b'),
+    label: '编辑1',
+    lines: 1,
+    bytesDelta: 0,
+    at: 0,
+    bytes: 2,
+  });
+  h.execute({
+    id: '2',
+    op: edit(1, 'c', 'd'),
+    label: '编辑2',
+    lines: 1,
+    bytesDelta: 0,
+    at: 0,
+    bytes: 2,
+  });
+
+  const cmd1 = h.undo();
+  assert.notEqual(cmd1, null);
+  assert.equal(cmd1?.id, '2', '返回最近的命令');
+  assert.equal(h.cursorPos, 1, '游标自动后退');
+
+  const cmd2 = h.undo();
+  assert.equal(cmd2?.id, '1');
+  assert.equal(h.cursorPos, 0);
+
+  const cmd3 = h.undo();
+  assert.equal(cmd3, null);
+  assert.equal(h.cursorPos, 0, '游标不越界');
+});
+
+test('redo：返回命令 + 自动前进游标', () => {
+  const h = new EditHistory();
+  h.execute({
+    id: '1',
+    op: edit(0, 'a', 'b'),
+    label: '编辑1',
+    lines: 1,
+    bytesDelta: 0,
+    at: 0,
+    bytes: 2,
+  });
+  h.execute({
+    id: '2',
+    op: edit(1, 'c', 'd'),
+    label: '编辑2',
+    lines: 1,
+    bytesDelta: 0,
+    at: 0,
+    bytes: 2,
+  });
+  h.stepBack();
+  h.stepBack();
+
+  const cmd1 = h.redo();
+  assert.equal(cmd1?.id, '1');
+  assert.equal(h.cursorPos, 1, '游标自动前进');
+
+  const cmd2 = h.redo();
+  assert.equal(cmd2?.id, '2');
+  assert.equal(h.cursorPos, 2);
+
+  const cmd3 = h.redo();
+  assert.equal(cmd3, null);
+  assert.equal(h.cursorPos, 2, '游标不越界');
+});
+
+test('getState：返回当前状态快照', () => {
+  const h = new EditHistory();
+
+  let state = h.getState();
+  assert.equal(state.canUndo, false);
+  assert.equal(state.canRedo, false);
+  assert.equal(state.position, 0);
+
+  h.execute({
+    id: '1',
+    op: edit(0, 'a', 'b'),
+    label: '编辑1',
+    lines: 1,
+    bytesDelta: 0,
+    at: 0,
+    bytes: 2,
+  });
+  h.execute({
+    id: '2',
+    op: edit(1, 'c', 'd'),
+    label: '编辑2',
+    lines: 1,
+    bytesDelta: 0,
+    at: 0,
+    bytes: 2,
+  });
+
+  state = h.getState();
+  assert.equal(state.canUndo, true);
+  assert.equal(state.canRedo, false);
+  assert.equal(state.position, 2);
+
+  h.stepBack();
+  state = h.getState();
+  assert.equal(state.canUndo, true, '仍可撤销');
+  assert.equal(state.canRedo, true, '现在可重做');
+  assert.equal(state.position, 1);
+});
+
+test('wouldExceedLimit：检查容量但不修改状态', () => {
+  const h = new EditHistory();
+
+  const small = {
+    id: '1',
+    op: edit(0, 'a', 'b'),
+    label: '编辑1',
+    lines: 1,
+    bytesDelta: 0,
+    at: 0,
+    bytes: 100,
+  };
+  assert.equal(h.wouldExceedLimit(small), false);
+
+  h.execute(small);
+  assert.equal(h.total, 1);
+
+  const huge = {
+    id: '2',
+    op: edit(1, 'x'.repeat(MAX_HISTORY_BYTES), 'y'.repeat(MAX_HISTORY_BYTES)),
+    label: '巨型编辑',
+    lines: 1,
+    bytesDelta: 0,
+    at: 0,
+    bytes: MAX_HISTORY_BYTES * 2,
+  };
+  assert.equal(h.wouldExceedLimit(huge), true, '超出字节上限');
+
+  assert.equal(h.total, 1, '仍然只有 1 条');
+  assert.equal(h.cursorPos, 1);
+});

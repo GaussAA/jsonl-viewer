@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "tool_input_preview": "{\"command\":\"CONFIG_DIR=\\\"${CLAUDE_CONFIG_DIR:-$HOME/.claude}\\\"\\ncase \\\"$CONFIG_DIR\\\" in\\n  \\\"~\\\") CONFIG_DIR=\\\"$HOME\\\" ;;\\n  \\\"~/\\\"*) CONFIG_DIR=\\\"$HOME/${CONFIG_DIR#\\\\~/}\\\" ;;\\n  \\\"~\\\\\\\\\\\"*) CONFIG_D...",
+  "error": "Exit code 2\n/usr/bin/bash: eval: line 25: unexpected EOF while looking for matching `\"'",
+  "timestamp": "2026-10-09T03:35:15.434Z",
+  "retry_count": 1
+}
