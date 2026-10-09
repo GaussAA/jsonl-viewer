@@ -8,6 +8,8 @@
 import { isConditionGroup } from './queryLogic.ts';
 import type { Condition, FieldCondition, FieldLayout, FilterOp } from './queryLogic.ts';
 import { formatBuildMs, formatCount } from './logic.ts';
+import { PanelCoordinator } from './panelCoordinator.ts';
+import type { ManagedPanel } from './panelCoordinator.ts';
 
 export interface ToolbarInfo {
   fileName: string;
@@ -347,6 +349,13 @@ export function createToolbar(
   let applyCondToFilterPanel: ((c: Condition | null) => void) | null = null;
   let panelFields: FieldOption[] = [];
 
+  /* ---------- 字段定制面板 ---------- */
+  let panelLayout: FieldLayout = { pinned: [], order: [], hidden: [], maxKeys: 4 };
+  let layoutPanel: FloatPanel<LayoutPanelState> | null = null;
+
+  /* ---------- 面板协调器（管理面板互斥和焦点） ---------- */
+  const panelCoordinator = new PanelCoordinator();
+
   const populateFieldSel = (fieldSel: HTMLSelectElement): void => {
     fieldSel.textContent = '';
     const none = document.createElement('option');
@@ -375,6 +384,7 @@ export function createToolbar(
   } => {
     const panel = document.createElement('div');
     panel.className = 'jlv-float-panel';
+    panel.style.display = 'none'; // 初始隐藏
     // 定位：锚定触发按钮下方（fixed + 显式 top/left，防视口默认位置）
     const rect = anchor.getBoundingClientRect();
     panel.style.top = `${Math.min(rect.bottom + 6, window.innerHeight - 40)}px`;
@@ -466,7 +476,7 @@ export function createToolbar(
   /** 条件行数上限：一层 AND/OR 的真实用法远用不到 8 个，设界防面板变成无底洞。 */
   const MAX_COND_ROWS = 8;
 
-  const buildFilterPanel = (): void => {
+  const buildFilterPanel = (): ManagedPanel => {
     const { panel, close, open, dispose } = panelShell('字段筛选', filterBtn, () =>
       filterBtn.classList.remove('active')
     );
@@ -673,39 +683,26 @@ export function createToolbar(
     const fp = panel as FloatPanel<FilterPanelState>;
     fp.__state = { rows, groupSel, applyCond };
     filterPanel = fp;
-    applyCondToFilterPanel = applyCond; // 面板重建后，外部的 setFilterCondition 仍可用
-    applyCond(panelFilterCond); // 打开前已知的条件先回填（否则用户看不到自己设过什么）
+    applyCondToFilterPanel = applyCond;
+    applyCond(panelFilterCond);
+    return fp as ManagedPanel;
   };
 
-  filterBtn.addEventListener('click', () => {
-    // 面板互斥：打开筛选时收起字段面板
-    if (layoutPanel && layoutPanel.style.display !== 'none') {
-      layoutPanel.style.display = 'none';
-      customizeBtn.classList.remove('active');
-    }
-    if (!filterPanel || !document.body.contains(filterPanel)) {
-      // 首次创建：直接显示（避免 display 状态误判导致需点两次）
-      buildFilterPanel();
-      filterPanel?.open();
-      filterBtn.classList.add('active');
-      return;
-    }
-    const visible = filterPanel.style.display !== 'none';
-    if (visible) filterPanel.close();
-    else filterPanel.open();
-    filterBtn.classList.toggle('active', !visible);
+  // 注册筛选面板到协调器
+  panelCoordinator.register('filter', buildFilterPanel, () => {
+    filterPanelDispose?.();
+    filterPanelDispose = null;
   });
 
-  /* ---------- 字段定制面板 ---------- */
-  let layoutPanelDispose: (() => void) | null = null;
-  let layoutPanel: FloatPanel<LayoutPanelState> | null = null;
-  let panelLayout: FieldLayout = { pinned: [], order: [], hidden: [], maxKeys: 4 };
+  filterBtn.addEventListener('click', () => {
+    panelCoordinator.toggle('filter');
+    filterBtn.classList.toggle('active');
+  });
 
-  const buildLayoutPanel = (): void => {
-    const { panel, close, open, dispose } = panelShell('字段定制', customizeBtn, () =>
+  const buildLayoutPanel = (): ManagedPanel => {
+    const { panel, close, open } = panelShell('字段定制', customizeBtn, () =>
       customizeBtn.classList.remove('active')
     );
-    layoutPanelDispose = dispose;
 
     const head = document.createElement('div');
     head.className = 'jlv-panel-head';
@@ -734,7 +731,15 @@ export function createToolbar(
     const lp = panel as FloatPanel<LayoutPanelState>;
     lp.__state = { emit, list, maxInput };
     layoutPanel = lp;
+
+    // 构建完成后立即填充字段行（如果 panelFields 已经被设置）
+    rebuildLayoutRows();
+
+    return lp as ManagedPanel;
   };
+
+  // 注册字段定制面板到协调器
+  panelCoordinator.register('layout', buildLayoutPanel);
 
   const readLayoutFromDom = (): FieldLayout => {
     const st = layoutPanel?.__state;
@@ -865,23 +870,8 @@ export function createToolbar(
   };
 
   customizeBtn.addEventListener('click', () => {
-    // 面板互斥：打开字段时收起筛选面板
-    if (filterPanel && filterPanel.style.display !== 'none') {
-      filterPanel.style.display = 'none';
-      filterBtn.classList.remove('active');
-    }
-    if (!layoutPanel || !document.body.contains(layoutPanel)) {
-      // 首次创建：直接显示
-      buildLayoutPanel();
-      rebuildLayoutRows();
-      layoutPanel?.open();
-      customizeBtn.classList.add('active');
-      return;
-    }
-    const visible = layoutPanel.style.display !== 'none';
-    if (visible) layoutPanel.close();
-    else layoutPanel.open();
-    customizeBtn.classList.toggle('active', !visible);
+    panelCoordinator.toggle('layout');
+    customizeBtn.classList.toggle('active');
   });
 
   /* ---------- update / els ---------- */
@@ -1008,10 +998,7 @@ export function createToolbar(
 
   /** 释放 document 级监听器（webview 关闭时调用）。防止内存泄漏。 */
   const destroy = (): void => {
-    filterPanelDispose?.();
-    filterPanelDispose = null;
-    layoutPanelDispose?.();
-    layoutPanelDispose = null;
+    panelCoordinator.destroy();
   };
 
   return {
