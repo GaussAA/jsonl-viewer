@@ -20,6 +20,17 @@
 import type { ByteReader } from '../parser/jsonParser.ts';
 import { INDEX_CHECKPOINT_INTERVAL, SCAN_CHUNK_SIZE, MAX_LINE_BYTES } from '../constants.ts';
 
+/**
+ * build 的字符串外字节分类表：1 = 需交给状态机 switch 处理的字节
+ * （'"' '{' '[' '}' ']' '\n' 以及空白 ' ' '\t' '\r'）；0 = 普通内容字节
+ * （数字、true/false/null、':'、','、'\\' 等），它们在 switch 中只会落入 default
+ * 并置 lineHasContent = true，故可整段跳过。
+ */
+const WCLS = new Uint8Array(256);
+for (const c of [0x22, 0x7b, 0x5b, 0x7d, 0x5d, 0x0a, 0x20, 0x09, 0x0d]) {
+  WCLS[c] = 1;
+}
+
 export interface LineIndexOpts {
   /** 逐块读取的字节上限，默认 1 MiB。 */
   chunkSize?: number;
@@ -279,6 +290,14 @@ export class LineIndex implements LineIndexStats {
             // 其余 <= 0x5c 的字节（含字符串内裸换行）不改变任何状态
           }
           continue;
+        }
+        // 字符串外普通内容字节整段跳过：它们在 switch 中只会置 lineHasContent
+        if (WCLS[buf[i]] === 0) {
+          lineHasContent = true;
+          do {
+            i++;
+          } while (i < n && WCLS[buf[i]] === 0);
+          if (i >= n) break;
         }
         const b = buf[i];
         switch (b) {
