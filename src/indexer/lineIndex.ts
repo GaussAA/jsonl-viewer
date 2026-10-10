@@ -242,14 +242,45 @@ export class LineIndex implements LineIndexStats {
       const buf: Buffer = typeof raw === 'string' ? Buffer.from(raw) : (raw as Buffer);
       const n = buf.length;
       const chunkBase = totalBytes; // 本 chunk 起始的绝对偏移
-      for (let i = 0; i < n; i++) {
-        const b = buf[i];
+      let i = 0;
+      while (i < n) {
         if (inString) {
-          if (escaped) escaped = false;
-          else if (b === 0x5c /* \ */) escaped = true;
-          else if (b === 0x22 /* " */) inString = false;
+          // 上一 chunk 以反斜杠结尾：本 chunk 首字节被转义，直接跳过
+          if (escaped) {
+            escaped = false;
+            i++;
+            continue;
+          }
+          // 字符串体快速跳过：> 0x5c 的字节既不是 '"'(0x22) 也不是 '\\'(0x5c)
+          for (;;) {
+            while (
+              i + 3 < n &&
+              buf[i] > 0x5c &&
+              buf[i + 1] > 0x5c &&
+              buf[i + 2] > 0x5c &&
+              buf[i + 3] > 0x5c
+            )
+              i += 4;
+            if (i >= n) break;
+            const sb = buf[i++];
+            if (sb > 0x5c) continue;
+            if (sb === 0x22 /* " */) {
+              inString = false;
+              break;
+            }
+            if (sb === 0x5c /* \ */) {
+              if (i < n) {
+                i++; // 跳过被转义字节
+              } else {
+                escaped = true; // 转义跨 chunk 边界
+                break;
+              }
+            }
+            // 其余 <= 0x5c 的字节（含字符串内裸换行）不改变任何状态
+          }
           continue;
         }
+        const b = buf[i];
         switch (b) {
           case 0x22: // "
             inString = true;
@@ -291,6 +322,7 @@ export class LineIndex implements LineIndexStats {
             if (b !== 0x20 && b !== 0x09 && b !== 0x0d) lineHasContent = true;
             break;
         }
+        i++;
       }
       totalBytes += n;
 
