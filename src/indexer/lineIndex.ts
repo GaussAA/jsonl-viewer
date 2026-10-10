@@ -31,6 +31,12 @@ for (const c of [0x22, 0x7b, 0x5b, 0x7d, 0x5d, 0x0a, 0x20, 0x09, 0x0d]) {
   WCLS[c] = 1;
 }
 
+/**
+ * 共享的零长 Uint32Array：chunk 内没有完整对齐字时使用，避免对 ArrayBuffer 末尾的
+ * 非池化短 Buffer 构造越界视图（aOff 可能 > buffer.byteLength）。
+ */
+const EMPTY_U32: Uint32Array = new Uint32Array(0);
+
 export interface LineIndexOpts {
   /** 逐块读取的字节上限，默认 1 MiB。 */
   chunkSize?: number;
@@ -253,6 +259,11 @@ export class LineIndex implements LineIndexStats {
       const buf: Buffer = typeof raw === 'string' ? Buffer.from(raw) : (raw as Buffer);
       const n = buf.length;
       const chunkBase = totalBytes; // 本 chunk 起始的绝对偏移
+      // 字符串体按 4 字节对齐字扫描用的视图：[aOff, aOff + 4*wN) ⊆ [base, base + n)
+      const base = buf.byteOffset;
+      const aOff = base + ((4 - (base & 3)) & 3); // 首个 >= base 的 4 字节边界
+      const wN = base + n > aOff ? (base + n - aOff) >>> 2 : 0; // 区间内完整字数
+      const u32: Uint32Array = wN > 0 ? new Uint32Array(buf.buffer, aOff, wN) : EMPTY_U32;
       let i = 0;
       while (i < n) {
         if (inString) {
@@ -262,16 +273,21 @@ export class LineIndex implements LineIndexStats {
             i++;
             continue;
           }
-          // 字符串体快速跳过：> 0x5c 的字节既不是 '"'(0x22) 也不是 '\\'(0x5c)
+          // 字符串体快速跳过：i 对齐时按 4 字节字跳过不含 '"'(0x22) / '\\'(0x5c) 的字
+          // （haszero 判定，误报只会把该字交给逐字节路径）；未对齐的头部、尾部和命中字
+          // 由下方逐字节路径处理 —— 其 1 字节步进会在 3 字节内重新对齐 i。
           for (;;) {
-            while (
-              i + 3 < n &&
-              buf[i] > 0x5c &&
-              buf[i + 1] > 0x5c &&
-              buf[i + 2] > 0x5c &&
-              buf[i + 3] > 0x5c
-            )
-              i += 4;
+            if (((base + i) & 3) === 0) {
+              let w = (base + i - aOff) >> 2;
+              while (w < wN) {
+                const x = u32[w];
+                const q = x ^ 0x22222222;
+                const s = x ^ 0x5c5c5c5c;
+                if (((((q - 0x01010101) & ~q) | ((s - 0x01010101) & ~s)) & 0x80808080) !== 0) break;
+                w++;
+              }
+              i = aOff - base + (w << 2);
+            }
             if (i >= n) break;
             const sb = buf[i++];
             if (sb > 0x5c) continue;
