@@ -54,6 +54,10 @@ export const CSS_TEXT = `
   --jlv-overlay-border: color-mix(in srgb, var(--jlv-fg) 8%, transparent);
   --jlv-overlay-active: color-mix(in srgb, var(--jlv-fg) 10%, transparent);
 
+  /* 遮罩层（背景虚化）*/
+  --jlv-backdrop: color-mix(in srgb, var(--jlv-bg) 85%, transparent);
+  --jlv-backdrop-heavy: color-mix(in srgb, var(--jlv-bg) 65%, transparent);
+
   /* 间距刻度 */
   --jlv-space-1: 4px;
   --jlv-space-2: 8px;
@@ -190,7 +194,7 @@ body {
   display: none;
   position: fixed; inset: 0;
   z-index: 35;
-  background: rgba(0,0,0,0.45);
+  background: var(--jlv-backdrop);
 }
 #app.list-open .jlv-drawer-backdrop { display: block; }
 
@@ -322,7 +326,7 @@ body {
 
 /* 搜索框（原型 .search） */
 .jlv-search {
-  background: rgba(0,0,0,0.35); border: 1px solid var(--jlv-overlay-subtle);
+  background: var(--jlv-backdrop-heavy); border: 1px solid var(--jlv-overlay-subtle);
   border-radius: 8px; padding: 8px 12px;
   display: flex; align-items: center; gap: 8px;
   transition: border-color .15s, box-shadow .15s;
@@ -377,7 +381,7 @@ body {
 }
 .jlv-replace-input {
   flex: 1; min-width: 0;
-  background: rgba(0,0,0,0.35); border: 1px solid var(--jlv-overlay-subtle);
+  background: var(--jlv-backdrop-heavy); border: 1px solid var(--jlv-overlay-subtle);
   border-radius: 8px; padding: 8px 12px;
   color: var(--jlv-fg); font-size: 11px; font-family: inherit;
   transition: border-color .15s, box-shadow .15s;
@@ -666,7 +670,7 @@ mark.jlv-hit {
 .jlv-pager-input-wrap { display: inline-flex; align-items: center; gap: 4px; font-size: 10px; color: var(--jlv-dim); white-space: nowrap; }
 .jlv-pager-input {
   width: 34px; height: 22px; padding: 0; text-align: center;
-  background: rgba(0,0,0,0.3);
+  background: color-mix(in srgb, var(--jlv-bg) 70%, transparent);
   border: 1px solid var(--jlv-overlay-subtle);
   border-radius: 4px; color: var(--jlv-fg);
   font-family: var(--jlv-mono); font-size: 11px;
@@ -701,7 +705,7 @@ mark.jlv-hit {
 
 /* 卡片头部（原型 .detail-header） */
 .jlv-detail-header {
-  background: rgba(0,0,0,0.28);
+  background: color-mix(in srgb, var(--jlv-bg) 72%, transparent);
   padding: 12px 16px;
   display: flex; align-items: center; justify-content: space-between;
   flex-shrink: 0; gap: 8px;
@@ -893,7 +897,7 @@ mark.jlv-hit {
 .jlv-float-panel label.jlv-field-item { flex-direction: row; align-items: center; gap: 10px; margin-bottom: 0; width: 100%; }
 .jlv-float-panel select, .jlv-float-panel input[type="text"], .jlv-float-panel input[type="number"] {
   width: 100%;
-  background: rgba(0,0,0,0.35); border: 1px solid var(--jlv-overlay-subtle);
+  background: var(--jlv-backdrop-heavy); border: 1px solid var(--jlv-overlay-subtle);
   border-radius: 6px; padding: 6px 10px; color: var(--jlv-fg); font-size: 12px; font-family: inherit;
   color-scheme: inherit;
   transition: border-color .12s, box-shadow .12s;
@@ -946,7 +950,7 @@ mark.jlv-hit {
   width: min(680px, 100%); max-height: 100%;
   padding: 16px;
   background: var(--jlv-panel-bg);
-  border: 1px solid rgba(255, 255, 255, .1);
+  border: 1px solid var(--jlv-overlay-active);
   border-radius: var(--jlv-radius-4);
   box-shadow: var(--jlv-shadow-2);
   color: var(--jlv-fg); font-size: var(--jlv-font-size-sm);
@@ -971,7 +975,7 @@ mark.jlv-hit {
   width: min(560px, 100%); max-height: 100%;
   padding: 16px;
   background: var(--jlv-panel-bg);
-  border: 1px solid rgba(255, 255, 255, .1);
+  border: 1px solid var(--jlv-overlay-active);
   border-radius: var(--jlv-radius-4);
   box-shadow: var(--jlv-shadow-2);
   color: var(--jlv-fg); font-size: var(--jlv-font-size-sm);
@@ -1086,7 +1090,7 @@ mark.jlv-hit {
   width: min(480px, 100%); max-height: 100%;
   padding: 16px;
   background: var(--jlv-panel-bg);
-  border: 1px solid rgba(255, 255, 255, .1);
+  border: 1px solid var(--jlv-overlay-active);
   border-radius: var(--jlv-radius-4);
   box-shadow: var(--jlv-shadow-2);
   color: var(--jlv-fg); font-size: var(--jlv-font-size-sm);
@@ -1150,7 +1154,7 @@ mark.jlv-hit {
 .jlv-tree-row:hover .jlv-field-edit { opacity: 1; }
 /* 键盘用户：聚焦即显形（按钮始终在 tab 序列中，故键盘可达） */
 .jlv-field-edit:focus-visible { opacity: 1; outline: 1px solid var(--jlv-focus); }
-.jlv-field-edit:hover { background: rgba(255, 255, 255, .08); color: var(--jlv-fg); }
+.jlv-field-edit:hover { background: var(--jlv-overlay-border); color: var(--jlv-fg); }
 
 .jlv-field-backdrop {
   position: fixed; inset: 0; z-index: 85;
@@ -1166,7 +1170,7 @@ mark.jlv-hit {
   width: min(460px, 100%); max-height: 100%;
   padding: 16px;
   background: var(--jlv-panel-bg);
-  border: 1px solid rgba(255, 255, 255, .1);
+  border: 1px solid var(--jlv-overlay-active);
   border-radius: var(--jlv-radius-4);
   box-shadow: var(--jlv-shadow-2);
   color: var(--jlv-fg); font-size: var(--jlv-font-size-sm);
@@ -1177,7 +1181,7 @@ mark.jlv-hit {
 /* 原值提示：确认「改的是哪个字段的什么值」，长值换行而非撑破面板 */
 .jlv-field-meta {
   padding: 6px 8px;
-  background: rgba(255, 255, 255, .04);
+  background: var(--jlv-overlay-base);
   border-radius: 6px;
   font-size: 10px; font-family: var(--jlv-mono);
   color: var(--jlv-dim);
@@ -1187,8 +1191,8 @@ mark.jlv-hit {
 .jlv-field-input {
   width: 100%; box-sizing: border-box;
   padding: 8px 10px;
-  background: rgba(0, 0, 0, .25);
-  border: 1px solid rgba(255, 255, 255, .12);
+  background: color-mix(in srgb, var(--jlv-bg) 75%, transparent);
+  border: 1px solid var(--jlv-overlay-active);
   border-radius: 6px;
   color: var(--jlv-fg);
   font-family: var(--jlv-mono); font-size: var(--jlv-font-size-sm);
@@ -1234,15 +1238,15 @@ mark.jlv-hit {
 .jlv-edit-close {
   margin-left: auto; width: 22px; height: 22px; border-radius: 5px;
   display: flex; align-items: center; justify-content: center;
-  background: rgba(255, 255, 255, .04); border: none; cursor: pointer;
+  background: var(--jlv-overlay-base); border: none; cursor: pointer;
   color: var(--jlv-dim); font-size: 14px;
 }
-.jlv-edit-close:hover { background: rgba(255, 255, 255, .1); color: var(--jlv-fg); }
+.jlv-edit-close:hover { background: var(--jlv-overlay-active); color: var(--jlv-fg); }
 
 .jlv-edit-hint {
   padding: 8px 10px; border-radius: var(--jlv-radius-2); line-height: 1.5;
-  background: rgba(255, 255, 255, .03);
-  border: 1px solid rgba(255, 255, 255, .07);
+  background: var(--jlv-overlay-hover);
+  border: 1px solid var(--jlv-overlay-border);
   color: var(--jlv-dim);
 }
 .jlv-edit-hint.warn {
@@ -1255,7 +1259,7 @@ mark.jlv-hit {
   flex: 1; min-height: 160px; resize: vertical;
   padding: 10px;
   background: rgba(0, 0, 0, .35);
-  border: 1px solid rgba(255, 255, 255, .1);
+  border: 1px solid var(--jlv-overlay-active);
   border-radius: var(--jlv-radius-2);
   color: var(--jlv-fg);
   font-family: var(--vscode-editor-font-family, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
@@ -1280,12 +1284,12 @@ mark.jlv-hit {
 .jlv-edit-spacer { flex: 1; }
 .jlv-edit-btn {
   padding: 7px 14px; border-radius: var(--jlv-radius-2);
-  border: 1px solid rgba(255, 255, 255, .1);
-  background: rgba(255, 255, 255, .04); color: var(--jlv-fg);
+  border: 1px solid var(--jlv-overlay-active);
+  background: var(--jlv-overlay-base); color: var(--jlv-fg);
   font-size: var(--jlv-font-size-sm); font-family: inherit; cursor: pointer;
   transition: background .12s, transform .12s var(--jlv-ease);
 }
-.jlv-edit-btn:hover:not(:disabled) { background: rgba(255, 255, 255, .08); }
+.jlv-edit-btn:hover:not(:disabled) { background: var(--jlv-overlay-border); }
 .jlv-edit-btn:active:not(:disabled) { transform: translateY(1px); }
 .jlv-edit-btn:disabled { opacity: .55; cursor: default; }
 .jlv-edit-btn.jlv-edit-primary {
