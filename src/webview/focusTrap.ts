@@ -26,7 +26,7 @@ export function setupFocusTrap(opts: FocusTrapOptions): { dispose: () => void } 
   /** 容器内所有可聚焦元素（排除 disabled） */
   const focusables = (): HTMLElement[] => [
     ...container.querySelectorAll<HTMLElement>(
-      'button:not([disabled]), input:not([type="hidden"]):not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"]):not([disabled])'
+      'button:not([disabled]):not([tabindex="-1"]), input:not([type="hidden"]):not([disabled]):not([tabindex="-1"]), select:not([disabled]):not([tabindex="-1"]), textarea:not([disabled]):not([tabindex="-1"]), [tabindex]:not([tabindex="-1"]):not([disabled])'
     ),
   ];
 
