@@ -1,0 +1,24 @@
+{
+  "extends": "stylelint-config-standard",
+  "rules": {
+    "selector-class-pattern": [
+      "^(jlv-[a-z0-9-]+|list-open)$",
+      {
+        "message": "Expected class selector to match BEM pattern"
+      }
+    ],
+    "custom-property-pattern": "^(jlv|vscode)(-[a-zA-Z0-9]+)+$",
+    "color-function-notation": "legacy",
+    "color-hex-length": null,
+    "alpha-value-notation": "number",
+    "no-descending-specificity": null,
+    "no-duplicate-selectors": null,
+    "comment-empty-line-before": null,
+    "comment-whitespace-inside": null,
+    "declaration-empty-line-before": null,
+    "declaration-block-single-line-max-declarations": null,
+    "declaration-block-no-redundant-longhand-properties": null,
+    "at-rule-empty-line-before": null,
+    "rule-empty-line-before": null
+  }
+}

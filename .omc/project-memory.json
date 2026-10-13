@@ -159,6 +159,12 @@
       "type": "file"
     },
     {
+      "path": "package.json",
+      "accessCount": 15,
+      "lastAccessed": 1791863250817,
+      "type": "file"
+    },
+    {
       "path": "src/indexer/lineIndex.ts",
       "accessCount": 14,
       "lastAccessed": 1791623193650,
@@ -186,12 +192,6 @@
       "path": "AGENTS.md",
       "accessCount": 8,
       "lastAccessed": 1791857356174,
-      "type": "file"
-    },
-    {
-      "path": "package.json",
-      "accessCount": 8,
-      "lastAccessed": 1791857356267,
       "type": "file"
     },
     {
