@@ -47,6 +47,13 @@ export const CSS_TEXT = `
   --jlv-surface-2: rgba(128, 128, 128, 0.06);
   --jlv-input-bg: transparent;
 
+  /* 半透明叠加层（自适应深浅主题）*/
+  --jlv-overlay-subtle: color-mix(in srgb, var(--jlv-fg) 2%, transparent);
+  --jlv-overlay-base: color-mix(in srgb, var(--jlv-fg) 4%, transparent);
+  --jlv-overlay-hover: color-mix(in srgb, var(--jlv-fg) 7%, transparent);
+  --jlv-overlay-border: color-mix(in srgb, var(--jlv-fg) 8%, transparent);
+  --jlv-overlay-active: color-mix(in srgb, var(--jlv-fg) 10%, transparent);
+
   /* 间距刻度 */
   --jlv-space-1: 4px;
   --jlv-space-2: 8px;
@@ -175,7 +182,7 @@ body {
   color: var(--jlv-dim); cursor: pointer;
   transition: background .12s, color .12s, border-color .12s;
 }
-.jlv-hamburger:hover { background: rgba(255,255,255,0.1); color: var(--jlv-fg); border-color: rgba(255,255,255,0.08); }
+.jlv-hamburger:hover { background: var(--jlv-overlay-active); color: var(--jlv-fg); border-color: var(--jlv-overlay-border); }
 .jlv-hamburger svg { flex: none; }
 
 /* 抽屉遮罩：打开时铺在详情之上、抽屉之下，点击可关闭 */
@@ -239,8 +246,8 @@ body {
   width: 16px; height: 28px;
   padding: 0;
   border-radius: 6px;
-  border: 1px solid rgba(255,255,255,0.07);
-  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--jlv-overlay-border);
+  background: var(--jlv-overlay-base);
   color: var(--jlv-dim);
   display: inline-flex; align-items: center; justify-content: center;
   cursor: pointer;
@@ -250,7 +257,7 @@ body {
 }
 .jlv-resizer:hover .jlv-resizer__toggle,
 .jlv-resizer.active .jlv-resizer__toggle { opacity: 1; }
-.jlv-resizer__toggle:hover { background: rgba(255,255,255,0.1); color: var(--jlv-fg); border-color: rgba(255,255,255,0.12); }
+.jlv-resizer__toggle:hover { background: var(--jlv-overlay-active); color: var(--jlv-fg); border-color: var(--jlv-overlay-border); }
 .jlv-resizer__toggle svg { flex: none; }
 
 /* 左栏折叠态 */
@@ -275,22 +282,22 @@ body {
   width: 22px; height: 48px;
   padding: 0;
   border-radius: 0 8px 8px 0;
-  border: 1px solid rgba(255,255,255,0.07);
+  border: 1px solid var(--jlv-overlay-subtle);
   border-left: none;
-  background: rgba(255,255,255,0.04);
+  background: var(--jlv-overlay-subtle);
   color: var(--jlv-dim);
   display: inline-flex; align-items: center; justify-content: center;
   cursor: pointer;
   z-index: 10;
   transition: background var(--jlv-transition), color var(--jlv-transition), border-color var(--jlv-transition);
 }
-.jlv-col-list__expand:hover { background: rgba(255,255,255,0.1); color: var(--jlv-fg); border-color: rgba(255,255,255,0.12); }
+.jlv-col-list__expand:hover { background: var(--jlv-overlay-active); color: var(--jlv-fg); border-color: var(--jlv-overlay-border); }
 .jlv-col-list__expand svg { flex: none; }
 
 /* ---------------- 工具栏浮卡（原型 .toolbar） ---------------- */
 .jlv-toolbar {
-  background: linear-gradient(180deg, rgba(255,255,255,0.035), rgba(255,255,255,0.01));
-  border: 1px solid rgba(255,255,255,0.07);
+  background: linear-gradient(180deg, var(--jlv-overlay-base), var(--jlv-overlay-subtle));
+  border: 1px solid var(--jlv-overlay-border);
   border-radius: var(--jlv-radius-4);
   padding: 14px;
   flex-shrink: 0;
@@ -315,7 +322,7 @@ body {
 
 /* 搜索框（原型 .search） */
 .jlv-search {
-  background: rgba(0,0,0,0.35); border: 1px solid rgba(255,255,255,0.08);
+  background: rgba(0,0,0,0.35); border: 1px solid var(--jlv-overlay-subtle);
   border-radius: 8px; padding: 8px 12px;
   display: flex; align-items: center; gap: 8px;
   transition: border-color .15s, box-shadow .15s;
@@ -354,11 +361,11 @@ body {
 .jlv-nav-btn {
   flex: none; width: 22px; height: 22px;
   display: inline-flex; align-items: center; justify-content: center;
-  border: none; border-radius: 6px; background: rgba(255,255,255,0.04);
+  border: none; border-radius: 6px; background: var(--jlv-overlay-base);
   color: var(--jlv-dim); font-family: inherit; font-size: 11px; cursor: pointer;
   transition: background var(--jlv-transition), color var(--jlv-transition);
 }
-.jlv-nav-btn:hover:not(:disabled) { background: rgba(255,255,255,0.08); color: var(--jlv-fg); }
+.jlv-nav-btn:hover:not(:disabled) { background: var(--jlv-overlay-border); color: var(--jlv-fg); }
 .jlv-nav-btn:disabled { opacity: .3; cursor: default; }
 .jlv-replace-toggle.active { background: color-mix(in srgb, var(--jlv-focus) 22%, transparent); color: var(--jlv-info); }
 .jlv-follow-toggle.active { background: color-mix(in srgb, var(--jlv-focus) 22%, transparent); color: var(--jlv-info); }
@@ -370,7 +377,7 @@ body {
 }
 .jlv-replace-input {
   flex: 1; min-width: 0;
-  background: rgba(0,0,0,0.35); border: 1px solid rgba(255,255,255,0.08);
+  background: rgba(0,0,0,0.35); border: 1px solid var(--jlv-overlay-subtle);
   border-radius: 8px; padding: 8px 12px;
   color: var(--jlv-fg); font-size: 11px; font-family: inherit;
   transition: border-color .15s, box-shadow .15s;
@@ -437,13 +444,13 @@ body {
 .jlv-btn {
   display: inline-flex; align-items: center; gap: 5px;
   font-size: 11px; color: var(--jlv-dim); padding: 5px 12px;
-  background: rgba(255,255,255,0.04);
-  border: 1px solid rgba(255,255,255,0.07);
+  background: var(--jlv-overlay-base);
+  border: 1px solid var(--jlv-overlay-border);
   border-radius: 6px; cursor: pointer; font-family: inherit;
   width: auto; flex: none;
   transition: background .12s, border-color .12s, color .12s, transform .12s var(--jlv-ease);
 }
-.jlv-btn:hover { background: rgba(255,255,255,0.07); color: var(--jlv-fg); }
+.jlv-btn:hover { background: var(--jlv-overlay-hover); color: var(--jlv-fg); }
 .jlv-btn:active { transform: translateY(1px); }
 .jlv-btn.active {
   background: color-mix(in srgb, var(--jlv-focus) 20%, transparent);
@@ -467,8 +474,8 @@ body {
 
 /* 记录卡片（原型 .record-card） */
 .jlv-record-card {
-  background: rgba(255,255,255,0.018);
-  border: 1px solid rgba(255,255,255,0.05);
+  background: var(--jlv-overlay-subtle);
+  border: 1px solid var(--jlv-overlay-border);
   border-left: 3px solid transparent;
   border-radius: 10px;
   padding: 10px 12px;
@@ -482,7 +489,7 @@ body {
   opacity: 0;
   transition: transform .16s var(--jlv-ease), opacity .16s var(--jlv-ease);
 }
-.jlv-record-card:hover { background: rgba(255,255,255,0.032); border-color: rgba(255,255,255,0.09); }
+.jlv-record-card:hover { background: var(--jlv-overlay-hover); border-color: var(--jlv-overlay-border); }
 /* 选中：背景提亮 + 左高亮条 + 细边框（不用外发光，避免溢出被裁） */
 .jlv-record-card.selected {
   background: color-mix(in srgb, var(--jlv-info) 26%, var(--jlv-panel-bg));
@@ -632,21 +639,21 @@ mark.jlv-hit {
   display: flex; flex-direction: column; gap: 6px;
   padding: 8px; margin-left: 6px;
   font-size: 10px; color: var(--jlv-dim); flex-shrink: 0;
-  background: rgba(255,255,255,0.018);
-  border: 1px solid rgba(255,255,255,0.05);
+  background: var(--jlv-overlay-subtle);
+  border: 1px solid var(--jlv-overlay-border);
   border-radius: 10px;
 }
 .jlv-pager-nav { display: flex; align-items: center; gap: 1px; flex-wrap: wrap; }
 .jlv-pager-btn {
   width: 26px; height: 22px; padding: 0;
-  background: rgba(255,255,255,0.04); border: none; border-radius: 5px; cursor: pointer;
+  background: var(--jlv-overlay-subtle); border: none; border-radius: 5px; cursor: pointer;
   color: var(--jlv-dim); font-family: inherit; font-size: 11px; font-weight: 500;
   display: inline-flex; align-items: center; justify-content: center;
   transition: background .1s, color .1s, border-color .1s;
   flex-shrink: 0;
 }
-.jlv-pager-btn:hover:not(:disabled):not(.active) { background: rgba(255,255,255,0.09); color: var(--jlv-fg); }
-.jlv-pager-btn:active:not(:disabled):not(.active) { background: rgba(255,255,255,0.13); }
+.jlv-pager-btn:hover:not(:disabled):not(.active) { background: var(--jlv-overlay-subtle); color: var(--jlv-fg); }
+.jlv-pager-btn:active:not(:disabled):not(.active) { background: var(--jlv-overlay-subtle); }
 .jlv-pager-btn:disabled { opacity: .25; cursor: default; }
 .jlv-pager-btn.active {
   background: color-mix(in srgb, var(--jlv-focus) 25%, transparent);
@@ -660,7 +667,7 @@ mark.jlv-hit {
 .jlv-pager-input {
   width: 34px; height: 22px; padding: 0; text-align: center;
   background: rgba(0,0,0,0.3);
-  border: 1px solid rgba(255,255,255,0.08);
+  border: 1px solid var(--jlv-overlay-subtle);
   border-radius: 4px; color: var(--jlv-fg);
   font-family: var(--jlv-mono); font-size: 11px;
   -moz-appearance: textfield;
@@ -687,7 +694,7 @@ mark.jlv-hit {
 .jlv-detail-card {
   flex: 1; min-height: 0; min-width: 0;
   max-width: 100%;
-  background: rgba(255,255,255,0.022); border: 1px solid rgba(255,255,255,0.05);
+  background: var(--jlv-overlay-subtle); border: 1px solid var(--jlv-overlay-subtle);
   border-radius: var(--jlv-radius-4); overflow: hidden;
   display: flex; flex-direction: column;
 }
@@ -719,18 +726,18 @@ mark.jlv-hit {
   border: none; background: transparent; font-family: inherit; font-size: 11px;
   transition: background .12s;
 }
-.jlv-crumb-seg:hover { background: rgba(255,255,255,0.06); }
+.jlv-crumb-seg:hover { background: var(--jlv-overlay-subtle); }
 .jlv-crumb-seg.current { color: var(--jlv-info); background: color-mix(in srgb, var(--jlv-info) 15%, transparent); }
 .jlv-crumb-sep { opacity: .35; color: var(--jlv-dim); }
 .jlv-dh-tools { display: flex; gap: 4px; flex-shrink: 0; }
 .jlv-dh-tool {
   width: 28px; height: 28px;
-  background: rgba(255,255,255,0.05); border: 1px solid transparent; border-radius: 6px;
+  background: var(--jlv-overlay-subtle); border: 1px solid transparent; border-radius: 6px;
   display: flex; align-items: center; justify-content: center; cursor: pointer;
   color: var(--jlv-dim); font-size: 11px; font-family: inherit; padding: 0;
   transition: background .12s, color .12s, border-color .12s, transform .12s var(--jlv-ease);
 }
-.jlv-dh-tool:hover { background: rgba(255,255,255,0.1); color: var(--jlv-fg); border-color: rgba(255,255,255,0.08); }
+.jlv-dh-tool:hover { background: var(--jlv-overlay-subtle); color: var(--jlv-fg); border-color: var(--jlv-overlay-subtle); }
 .jlv-dh-tool:active { transform: scale(.95); }
 .jlv-dh-tool.copy-pulse { animation: jlv-copy-pulse var(--jlv-dur-base) var(--jlv-ease); }
 /* 展开/折叠切换按钮的高亮态（展开中） */
@@ -762,7 +769,7 @@ mark.jlv-hit {
   cursor: pointer; min-width: 0; width: 100%; box-sizing: border-box;
   transition: background .1s;
 }
-.jlv-tree-row:hover { background: rgba(255,255,255,0.04); }
+.jlv-tree-row:hover { background: var(--jlv-overlay-subtle); }
 .jlv-tree-row.selected { background: color-mix(in srgb, var(--jlv-focus) 10%, transparent); }
 /* Toggler：SVG chevron 旋转 */
 .jlv-tree-row .toggler {
@@ -803,7 +810,7 @@ mark.jlv-hit {
   min-width: 0; max-width: 100%; box-sizing: border-box;
   margin-left: 14px;
   padding-left: 10px;
-  border-left: 1px solid rgba(255,255,255,0.06);
+  border-left: 1px solid var(--jlv-overlay-subtle);
   overflow: hidden;
 }
 .jlv-load-more {
@@ -834,7 +841,7 @@ mark.jlv-hit {
  * ============================================================ */
 .jlv-float-panel {
   position: fixed; z-index: 50;
-  background: var(--jlv-panel-bg); border: 1px solid rgba(255,255,255,0.1);
+  background: var(--jlv-panel-bg); border: 1px solid var(--jlv-overlay-subtle);
   border-radius: var(--jlv-radius-4);
   box-shadow: var(--jlv-shadow-2);
   padding: 16px; min-width: 280px; max-width: 360px;
@@ -876,17 +883,17 @@ mark.jlv-hit {
 }
 .jlv-float-panel h3 .jlv-panel-close {
   margin-left: auto; width: 22px; height: 22px; border-radius: 5px;
-  background: rgba(255,255,255,0.04); border: none; cursor: pointer;
+  background: var(--jlv-overlay-subtle); border: none; cursor: pointer;
   color: var(--jlv-dim); font-size: 14px; display: flex; align-items: center; justify-content: center;
 }
-.jlv-float-panel h3 .jlv-panel-close:hover { background: rgba(255,255,255,0.1); color: var(--jlv-fg); }
+.jlv-float-panel h3 .jlv-panel-close:hover { background: var(--jlv-overlay-subtle); color: var(--jlv-fg); }
 .jlv-float-panel label { display: flex; flex-direction: column; gap: 4px; font-size: 11px; color: var(--jlv-dim); margin-bottom: 10px; width: 100%; }
 /* 字段面板头部的横向标签（"展示字段数 [输入]"）不受纵向规则影响 */
 .jlv-float-panel label.jlv-ctrl-label { flex-direction: row; align-items: center; gap: 8px; width: auto; margin-bottom: 0; }
 .jlv-float-panel label.jlv-field-item { flex-direction: row; align-items: center; gap: 10px; margin-bottom: 0; width: 100%; }
 .jlv-float-panel select, .jlv-float-panel input[type="text"], .jlv-float-panel input[type="number"] {
   width: 100%;
-  background: rgba(0,0,0,0.35); border: 1px solid rgba(255,255,255,0.1);
+  background: rgba(0,0,0,0.35); border: 1px solid var(--jlv-overlay-subtle);
   border-radius: 6px; padding: 6px 10px; color: var(--jlv-fg); font-size: 12px; font-family: inherit;
   color-scheme: inherit;
   transition: border-color .12s, box-shadow .12s;
@@ -908,12 +915,12 @@ mark.jlv-hit {
 .jlv-panel-actions { display: flex; gap: 6px; margin-top: 14px; }
 .jlv-btn-panel {
   flex: 1; padding: 7px 12px; font-size: 12px; border-radius: 6px;
-  border: 1px solid rgba(255,255,255,0.1);
-  background: rgba(255,255,255,0.04); color: var(--jlv-fg);
+  border: 1px solid var(--jlv-overlay-subtle);
+  background: var(--jlv-overlay-subtle); color: var(--jlv-fg);
   cursor: pointer; font-family: inherit;
   transition: background .12s;
 }
-.jlv-btn-panel:hover { background: rgba(255,255,255,0.08); }
+.jlv-btn-panel:hover { background: var(--jlv-overlay-subtle); }
 .jlv-btn-panel.primary {
   background: color-mix(in srgb, var(--jlv-focus) 20%, transparent);
   border-color: color-mix(in srgb, var(--jlv-focus) 35%, transparent);
