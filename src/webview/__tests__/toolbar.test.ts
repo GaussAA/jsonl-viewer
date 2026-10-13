@@ -311,7 +311,7 @@ describe('createToolbar（视图层覆盖率补强）', () => {
     filterBtn.click();
 
     // 等待面板完全打开和焦点设置（PanelCoordinator 的时序）
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await wait(10);
 
     const panel = doc.querySelector<HTMLElement>('.jlv-float-panel');
     assert.ok(panel, '浮层已挂载');
@@ -347,7 +347,7 @@ describe('createToolbar（视图层覆盖率补强）', () => {
     );
 
     // 等待关闭动画完成（120ms）
-    await new Promise((resolve) => setTimeout(resolve, 150));
+    await wait(150);
 
     // 验证关闭逻辑被触发（面板被隐藏）
     assert.strictEqual(panel.style.display, 'none', '按 Esc 后面板应关闭');
