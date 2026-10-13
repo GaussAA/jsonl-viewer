@@ -1,0 +1,23 @@
+{
+  "executor_id": "executor_2",
+  "plan_id": "round_2_planner_b",
+  "benchmark_score": 0.869,
+  "benchmark_raw": "[benchmark] 正确性闸门通过 (306 组差分比对)\n[benchmark] fixture=16.0MB lines=87725 ratios=0.85,0.81,0.83,1.08,0.84,0.78,0.91,0.84,0.88,0.89,0.89,0.85,1.01,0.90,0.86,0.82,0.87,0.90,0.87,0.81,0.88,0.85,0.96,0.92,0.94,0.88,1.01,0.93,0.90,0.97,0.85,0.83,0.87,0.75,0.87,1.00,0.92,0.80,0.84,0.85,0.94,0.85,0.92,0.95,0.74,0.76,0.82,0.83,0.82,0.87,0.80,0.87,0.91,0.81,1.05,0.92,0.81,0.79,0.84,0.91\n{\"primary\":0.869,\"sub_scores\":{\"correctness\":1,\"cur_median_mb_s\":481.84,\"ref_median_mb_s\":555.39,\"min_ratio\":0.738,\"max_ratio\":1.084}}",
+  "all_runs_primary": [0.878, 0.869, 0.675],
+  "status": "regression",
+  "sub_scores": {
+    "correctness": 1,
+    "cur_median_mb_s": 481.84,
+    "ref_median_mb_s": 555.39,
+    "min_ratio": 0.738,
+    "max_ratio": 1.084
+  },
+  "failure_analysis": {
+    "what": "Median primary 0.869 (runs 0.878, 0.869, 0.675) vs baseline 0.898; correctness 1 in all runs. cur_median_mb_s 496.93 / 481.84 / 374.28 vs ref ~555-569.",
+    "why": "The skip loop only touches the ~25% of bytes outside strings, and many of those are structural (\" { } [ ] \\n) or on content-free line prefixes, so few bytes are actually skipped while every outside-string byte now pays an extra lineHasContent + OCLS table check before the switch. Net effect is neutral-to-slightly-negative, consistent with the plan's own estimate (~0%). Run 3 is likely contaminated by machine contention: its first ~43 ratios cluster at ~0.62-0.70 and then jump to ~0.85-0.93, a bimodal pattern typical of external load rather than the code change. Excluding it, runs 1-2 (0.878, 0.869) are still ~2-3% under baseline, inside the ~4% noise band but on the low side.",
+    "category": "neutral_change_within_noise",
+    "lesson": "An outside-string skip alone does not pay for its extra per-byte guard when 75% of bytes are inside strings; it should only be tried stacked with a faster string-scanning loop, where the outer path becomes a larger share of cost. Benchmark runs with bimodal ratio distributions should be treated as contention-affected."
+  },
+  "commit": "b4f98ce",
+  "timestamp": "2026-10-10T04:13:00Z"
+}

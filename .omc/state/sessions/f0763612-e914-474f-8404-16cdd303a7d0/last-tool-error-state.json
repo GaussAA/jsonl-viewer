@@ -1,7 +1,0 @@
-{
-  "tool_name": "Bash",
-  "tool_input_preview": "{\"command\":\"git add -A && git commit -m \\\"refactor(host): 阶段 1 - 扩展 EditHistory 为 EditSession 风格接口\\n\\n新增方法（向后兼容）：\\n- execute(entry) - 统一入口，自动清理 redo 栈\\n- undo() / redo() - 返回命令（不执行 IO），自动移动游标\\n- getSt...",
-  "error": "Exit code 1\nChecking formatting...\n[\u001b[33mwarn\u001b[39m] src/host/__tests__/editHistory.test.ts\n[\u001b[33mwarn\u001b[39m] src/host/editHistory.ts\n[\u001b[33mwarn\u001b[39m] Code style issues found in 2 files. Run Prettier with --write to fix.\nhusky - pre-commit script failed (code 1)",
-  "timestamp": "2026-10-09T07:05:43.494Z",
-  "retry_count": 1
-}

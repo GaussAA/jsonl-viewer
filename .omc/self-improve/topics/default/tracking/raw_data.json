@@ -1,0 +1,125 @@
+[
+  {
+    "iteration": 1,
+    "plan_id": "round_1_planner_b",
+    "benchmark_score": 0.897,
+    "is_winner": false,
+    "approach_family": "infrastructure",
+    "sub_scores": {
+      "correctness": 1
+    }
+  },
+  {
+    "iteration": 2,
+    "plan_id": "round_2_planner_a",
+    "benchmark_score": 1.482,
+    "is_winner": true,
+    "approach_family": "optimization",
+    "sub_scores": {
+      "correctness": 1,
+      "cur_median_mb_s": 838.97,
+      "ref_median_mb_s": 567.85,
+      "min_ratio": 1.205,
+      "max_ratio": 2.182
+    }
+  },
+  {
+    "iteration": 2,
+    "plan_id": "round_2_planner_b",
+    "benchmark_score": 0.869,
+    "is_winner": false,
+    "approach_family": "architecture",
+    "sub_scores": {
+      "correctness": 1,
+      "cur_median_mb_s": 481.84,
+      "ref_median_mb_s": 555.39,
+      "min_ratio": 0.738,
+      "max_ratio": 1.084
+    }
+  },
+  {
+    "iteration": 2,
+    "plan_id": "round_2_planner_c",
+    "benchmark_score": 0.882,
+    "is_winner": false,
+    "approach_family": "infrastructure",
+    "sub_scores": {
+      "correctness": 1,
+      "cur_median_mb_s": 515.68,
+      "ref_median_mb_s": 581.51,
+      "min_ratio": 0.767,
+      "max_ratio": 1.128
+    }
+  },
+  {
+    "iteration": 3,
+    "plan_id": "round_3_planner_a",
+    "benchmark_score": 1.616,
+    "is_winner": true,
+    "approach_family": "architecture",
+    "sub_scores": {
+      "correctness": 1,
+      "cur_median_mb_s": 936.19,
+      "ref_median_mb_s": 577.13,
+      "min_ratio": 0.876,
+      "max_ratio": 2.842,
+      "sub_scores_note": "mb_s values taken from uncontended run 3 (median-score run 1 had depressed absolute throughput); min/max ratio are extremes across all 5 runs"
+    }
+  },
+  {
+    "iteration": 3,
+    "plan_id": "round_3_planner_b",
+    "benchmark_score": 1.587,
+    "is_winner": false,
+    "approach_family": "optimization",
+    "sub_scores": {
+      "correctness": 1,
+      "cur_median_mb_s": 728.76,
+      "ref_median_mb_s": 455.31,
+      "min_ratio": 1.016,
+      "max_ratio": 3.604
+    }
+  },
+  {
+    "iteration": 4,
+    "plan_id": "round_4_planner_a",
+    "benchmark_score": 1.59,
+    "is_winner": false,
+    "approach_family": "optimization",
+    "sub_scores": {
+      "correctness": 1,
+      "cur_median_mb_s": 934.17,
+      "ref_median_mb_s": 583.63,
+      "min_ratio": 0.98,
+      "max_ratio": 1.935
+    }
+  },
+  {
+    "iteration": 5,
+    "plan_id": "round_5_planner_a",
+    "benchmark_score": 1.82,
+    "is_winner": true,
+    "approach_family": "optimization",
+    "sub_scores": {
+      "correctness": 1,
+      "cur_median_mb_s": 602.24,
+      "ref_median_mb_s": 339.43,
+      "min_ratio": 1.192,
+      "max_ratio": 3.103
+    }
+  },
+  {
+    "iteration": 5,
+    "plan_id": "round_5_planner_b",
+    "benchmark_score": 1.764,
+    "is_winner": false,
+    "approach_family": "architecture",
+    "sub_scores": {
+      "correctness": 1,
+      "cur_median_mb_s": 933.71,
+      "ref_median_mb_s": 531.07,
+      "min_ratio": 0.869,
+      "max_ratio": 2.137
+    }
+  }
+]

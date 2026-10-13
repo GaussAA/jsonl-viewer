@@ -1,0 +1,6 @@
+{
+  "baseline_score": 0.898,
+  "metric": "speedup_vs_reference_bytewise_state_machine",
+  "recorded_at": "2026-10-09T00:00:00Z",
+  "notes": "Mean of 4 paired runs (0.894, 0.919, 0.883, 0.896); spread ~4%. 1.0 = original byte-by-byte build. Target 1.8 = 2x baseline."
+}

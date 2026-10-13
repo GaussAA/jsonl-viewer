@@ -1,0 +1,22 @@
+{
+  "executor_id": "executor_3",
+  "plan_id": "round_2_planner_c",
+  "benchmark_score": 0.882,
+  "benchmark_raw": "[benchmark] 正确性闸门通过 (306 组差分比对)\n[benchmark] fixture=16.0MB lines=87725 ratios=0.88,1.13,0.88,0.92,0.88,0.95,0.88,0.83,0.77,0.90,0.91,0.90,0.86,0.88,0.88,1.00,0.89,0.90,0.86,0.87,0.86,0.87,0.82,0.87,0.90,0.87,0.88,0.86,0.88,0.99,0.88,0.81,0.91,0.86,0.92,0.93,0.79,0.91,0.87,0.89,0.91,0.91,0.89,1.09,0.87,0.91,0.88,0.85,0.88,0.93,0.79,0.92,0.90,0.86,0.90,0.87,0.91,1.00,0.89,0.83\n{\"primary\":0.882,\"sub_scores\":{\"correctness\":1,\"cur_median_mb_s\":515.68,\"ref_median_mb_s\":581.51,\"min_ratio\":0.767,\"max_ratio\":1.128}}",
+  "status": "regression",
+  "sub_scores": {
+    "correctness": 1,
+    "cur_median_mb_s": 515.68,
+    "ref_median_mb_s": 581.51,
+    "min_ratio": 0.767,
+    "max_ratio": 1.128
+  },
+  "all_runs_primary": [0.88, 0.887, 0.882],
+  "failure_analysis": {
+    "what": "Replacing `for await` with an index-based `for` loop for Array inputs in LineIndex.build gave primary scores 0.880 / 0.887 / 0.882 (median 0.882) vs baseline 0.898. Correctness stayed 1 in all three runs. cur_median_mb_s was 493.68 / 514.32 / 515.68 against ref 563.00 / 577.03 / 581.51.",
+    "why": "The benchmark feeds about 16 chunks per 16 MB build, so the async-from-sync iterator wrapper and microtask hop cost a few microseconds per chunk against a build of roughly 30 ms. The per-byte scan loop dominates, with most bytes inside strings. The -0.016 gap to baseline is smaller than the ~4% run-to-run spread, so this is a null result, not a real slowdown. It matches the plan's own estimate of 0.85-0.95.",
+    "category": "no_effect",
+    "lesson": "Chunk iteration shape (for-await vs sync index loop) does not affect this benchmark. Round 1's sync scanChunk kernel (0.897) and the research brief's d1/d2 scratch runs showed the same thing. Future rounds should target per-byte work in the inner scan loop, mainly the in-string fast path, not per-chunk overhead."
+  },
+  "timestamp": "2025-01-01T00:00:00Z"
+}

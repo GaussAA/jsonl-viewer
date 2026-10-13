@@ -896,22 +896,86 @@ export function createDetailTree(
     refreshFindState();
   }
 
-  /* 键盘可达：Enter/Space 在树行上触发展开/折叠，在「加载更多」上加载。 */
+  /* 键盘导航：Enter/Space 展开折叠，方向键移动焦点（ARIA tree pattern）*/
   body.addEventListener('keydown', (e) => {
-    if (e.key !== 'Enter' && e.key !== ' ') return;
     const target = e.target as HTMLElement;
-    if (target.closest('button')) return; // button 自身处理 Enter/Space
-    const more = target.closest<HTMLElement>('.jlv-load-more');
-    if (more) {
+
+    // Enter/Space 在树行上触发展开/折叠，在「加载更多」上加载
+    if (e.key === 'Enter' || e.key === ' ') {
+      if (target.closest('button')) return; // button 自身处理 Enter/Space
+      const more = target.closest<HTMLElement>('.jlv-load-more');
+      if (more) {
+        e.preventDefault();
+        more.click();
+        return;
+      }
+      const row = target.closest<HTMLElement>('.jlv-tree-row');
+      if (!row) return;
       e.preventDefault();
-      more.click(); // 合成 click 冒泡到下方 click handler
+      row.click();
       return;
     }
-    const row = target.closest<HTMLElement>('.jlv-tree-row');
-    if (!row) return;
-    e.preventDefault();
-    row.click(); // 复用点击逻辑（容器 toggle / 标量选中）
+
+    // 方向键导航（ARIA tree pattern）
+    if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) {
+      handleArrowKey(e);
+    }
   });
+
+  /** 处理方向键导航（ARIA tree 标准）*/
+  function handleArrowKey(e: KeyboardEvent): void {
+    const rows = Array.from(body.querySelectorAll<HTMLElement>('.jlv-tree-row[tabindex="0"]'));
+    if (rows.length === 0) return;
+
+    const current = document.activeElement as HTMLElement;
+    const currentIndex = rows.indexOf(current);
+
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      const next = rows[currentIndex + 1] || rows[0];
+      next.focus();
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      const prev = rows[currentIndex - 1] || rows[rows.length - 1];
+      prev.focus();
+    } else if (e.key === 'ArrowRight') {
+      // 容器行：展开；标量行：不处理
+      if (currentIndex === -1) return;
+      const row = rows[currentIndex];
+      const container = row.dataset.container === '1';
+      if (!container) return;
+      const segs = parseSegsFromNode(row);
+      const depth = Number(row.dataset.depth);
+      if (state.isExpanded(segs, depth)) return; // 已展开，不处理
+      e.preventDefault();
+      const node = row.closest<HTMLElement>('.jlv-tree-node');
+      if (!node) return;
+      state.toggle(segs, depth);
+      expandNodeLocal(row, node);
+      renderBreadcrumb();
+    } else if (e.key === 'ArrowLeft') {
+      // 容器行：折叠；标量行：不处理
+      if (currentIndex === -1) return;
+      const row = rows[currentIndex];
+      const container = row.dataset.container === '1';
+      if (!container) return;
+      const segs = parseSegsFromNode(row);
+      const depth = Number(row.dataset.depth);
+      if (!state.isExpanded(segs, depth)) return; // 已折叠，不处理
+      e.preventDefault();
+      const node = row.closest<HTMLElement>('.jlv-tree-node');
+      if (!node) return;
+      state.toggle(segs, depth);
+      void collapseNodeLocal(row, node);
+      renderBreadcrumb();
+    } else if (e.key === 'Home') {
+      e.preventDefault();
+      rows[0]?.focus();
+    } else if (e.key === 'End') {
+      e.preventDefault();
+      rows[rows.length - 1]?.focus();
+    }
+  }
 
   body.addEventListener('click', async (e) => {
     const target = e.target as HTMLElement;

@@ -1,0 +1,60 @@
+{
+  "plan_id": "round_2_planner_b",
+  "planner_id": "planner_b",
+  "round": 2,
+  "hypothesis": "Adding an outer non-structural skip loop to LineIndex.build (outside strings, once lineHasContent is true, advance i over every byte whose Uint8Array(256) class entry is 0, i.e. anything except '\"' '{' '[' '}' ']' '\\n', before the switch) removes per-byte switch dispatch for the ~25% of bytes that sit outside strings, with identical output. Single change: only the outside-string path of the existing for-loop gains the skip; the string branch, checkpoint logic, record pushes, for-await loop and all state locals are unchanged.",
+  "approach_family": "architecture",
+  "critic_approved": true,
+  "target_files": ["src/indexer/lineIndex.ts"],
+  "steps": [
+    {
+      "step": 1,
+      "file": "src/indexer/lineIndex.ts",
+      "change": "Add a module-scope class table immediately above the class declaration that contains `static async build` (after imports and existing top-level constants). Exact code:\n/** Bytes that change scan state outside strings: \" { [ } ] \\n. Everything else only sets lineHasContent. */\nconst OCLS = new Uint8Array(256);\nOCLS[0x22] = 1; OCLS[0x7b] = 1; OCLS[0x5b] = 1; OCLS[0x7d] = 1; OCLS[0x5d] = 1; OCLS[0x0a] = 1;\nDo not export it. Do not add 0x5c, 0x0d, 0x20, 0x09 or any other byte."
+    },
+    {
+      "step": 2,
+      "file": "src/indexer/lineIndex.ts",
+      "change": "In build, line 246, change `const b = buf[i];` to `let b = buf[i];`. Leave the `for (let i = 0; i < n; i++)` header (L245) and the inString block (L247-251: escaped / 0x5c / 0x22 handling and `continue`) byte-for-byte unchanged."
+    },
+    {
+      "step": 3,
+      "file": "src/indexer/lineIndex.ts",
+      "change": "Insert the skip between the end of the inString block (the `}` closing `if (inString) { ... continue; }` at L252) and `switch (b) {` (L253). Exact code:\n        // Outside a string with content already seen: bytes not in OCLS can only set lineHasContent (already true), so skip them.\n        if (lineHasContent && OCLS[b] === 0) {\n          i++;\n          while (i < n && OCLS[buf[i]] === 0) i++;\n          if (i >= n) break; // rest of chunk is non-structural; state carries to next chunk unchanged\n          b = buf[i];\n        }\nAfter this block, b is a structural byte (OCLS[b] === 1) and i is its index, so the existing switch runs on it and the for-header `i++` advances past it. The newline case keeps using `chunkBase + i + 1` and `startOff = chunkBase + i + 1` with i pointing at the newline, exactly as before. Do not modify any switch case, the `line % interval` checkpoint (L271, L306), the record pushes (L275-276, L309-310, L317-318), `totalBytes += n`, onProgress, or the EOF block."
+    },
+    {
+      "step": 4,
+      "file": "src/indexer/lineIndex.ts",
+      "change": "Semantics review (no code change; executor must confirm each before benchmarking): (a) lineHasContent: skip only runs when it is already true, so whitespace-only and empty lines still go byte-by-byte through the default branch, and the first non-whitespace byte still sets it; '\\n' is in OCLS so it is never skipped and still resets lineHasContent=false. (b) CRLF: 0x0d is skipped only when lineHasContent is true (default branch would ignore it anyway); on a content-free line it still reaches default and is ignored; the following 0x0a is structural. (c) Depth clamp: '}' and ']' are in OCLS, so `if (depth > 0) depth--` runs for every closer. (d) Strings: '\"' is in OCLS so string entry always goes through case 0x22; a backslash outside a string is non-structural (default branch only sets lineHasContent) and may be skipped. (e) Chunk-boundary resume: `break` exits only the per-chunk for-loop when the skip hits n; inString/escaped/depth/lineHasContent/line/startOff are untouched by skipped bytes, and the next chunk restarts at i=0. (f) Dangling EOF structures: EOF block reads the same depth/inString/lineHasContent/startOff values as before, so dangling-object, dangling-string and trailing-newline-after-dangling cases are unchanged. (g) Non-ASCII bytes (>=0x80) and string chunks via Buffer.from are skipped/handled identically to the default branch."
+    },
+    {
+      "step": 5,
+      "file": "src/indexer/lineIndex.ts",
+      "change": "Verify: run the project's typecheck/build and test scripts from package.json (must pass with zero new errors), then run `node scripts/benchmark-index-build.mjs` at least 3 times and report the primary score (speedup vs reference) and the correctness sub-score for each run. Correctness must be 1. Do not edit the benchmark or any file other than src/indexer/lineIndex.ts."
+    }
+  ],
+  "expected_outcome": {
+    "metric": "primary",
+    "estimated_impact": "~0% standalone (expected score ~0.88-0.94 vs baseline 0.898, within the ±0.05-0.08 noise band). Value is as a stack partner: research measured +10-20% when combined with an unrolled/SWAR string loop (rej8 1.25 -> 1.50; swar 1.35 -> 1.54/1.68).",
+    "rationale": "75% of fixture bytes are inside strings and this plan deliberately leaves the string branch untouched, so at most ~25% of bytes can benefit, and many outside-string bytes are already structural or on content-free prefixes. Scratch measurement of this exact change on the current per-byte string code was 0.916 and 0.903 (neutral vs mirror 0.79-0.91). It is submitted honestly as a neutral-alone architecture change so H003 is satisfied this round and so it can be stacked on the optimization-family string loop in round 3, where the outer switch becomes a larger share of the remaining cost.",
+    "sub_score_expectations": {
+      "correctness": 1,
+      "cur_median_mb_s": "roughly unchanged vs round-1 (~505-530 MB/s)",
+      "ref_median_mb_s": "unchanged (~569 MB/s, reference is not modified)"
+    }
+  },
+  "history_reference": {
+    "builds_on": "Research brief round_2 idea 'Outer non-structural skip loop' (architecture family); round_1 lesson to keep all scan state in the existing build locals and change only the loop body.",
+    "avoids": "Round-1 H001 rejections (bundled changes): no nextCp, no string-scanner change, no record-storage change in this plan. Round-1 plan B approach (scanChunk kernel / ScanState object / any extraction). Brief DO NOT items: lazy record storage, hasFirst default-branch guard, Uint8Array table inside strings, 8x unroll, Buffer#indexOf quote/newline skipping."
+  },
+  "critic_review": {
+    "h001_hypothesis_count": "pass",
+    "h002_family_streak": "pass",
+    "h003_intra_round_diversity": "pass",
+    "schema_valid": "pass",
+    "history_aware": "pass",
+    "verdict": "approved",
+    "rejection_reason": null
+  },
+  "architect_review": {}
+}

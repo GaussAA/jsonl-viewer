@@ -1,0 +1,63 @@
+{
+  "plan_id": "round_5_planner_b",
+  "planner_id": "planner_b",
+  "round": 5,
+  "hypothesis": "Moving the string-body scan of LineIndex.build (src/indexer/lineIndex.ts on 1d2377e) from the top-of-loop `if (inString) { ... continue; }` branch (L258-293) into the `case 0x22:` arm of the outer switch (L304-307), so that an opening quote scans its string body in place (same 4x `> 0x5c` byte reject + same byte tail) and resumes the outer loop right after the closing quote, with a one-time pre-loop carry block that finishes a string straddling the chunk start (consuming the cross-chunk `escaped` byte), will raise the primary speedup from 1.623 to ~1.75-1.80 (~1.10-1.16x relative), because every string currently costs an extra outer-loop round trip (set inString, break, i++, re-test `while (i < n)`, re-test `if (inString)`, re-test `if (escaped)`) and every outside-string byte pays the `if (inString)` test; after the change the outer loop runs only outside strings, so that test disappears from the hot path. This is a control-flow (architecture) change only: the 4x byte reject and the byte tail are kept exactly as they are (no SWAR / Uint32Array word loop, which is planner_a's change), and the WCLS skip, the other switch cases, checkpoint modulo, record pushes, for-await loop, Buffer.from conversion and EOF handling are untouched.",
+  "approach_family": "architecture",
+  "critic_approved": true,
+  "target_files": [
+    "src/indexer/lineIndex.ts"
+  ],
+  "steps": [
+    {
+      "step": 1,
+      "file": "src/indexer/lineIndex.ts",
+      "change": "Add a one-time chunk-start carry block between `let i = 0;` (L256) and `while (i < n) {` (L257). It runs only when the previous chunk ended inside a string, and reuses the existing loop body verbatim except that the escaped-carry is consumed once up front: `if (inString && n > 0) { if (escaped) { escaped = false; i = 1; /* first byte of this chunk is the escaped byte */ } for (;;) { while (i + 3 < n && buf[i] > 0x5c && buf[i + 1] > 0x5c && buf[i + 2] > 0x5c && buf[i + 3] > 0x5c) i += 4; if (i >= n) break; /* string spans the whole chunk: inString stays true */ const sb = buf[i++]; if (sb > 0x5c) continue; if (sb === 0x22) { inString = false; break; } if (sb === 0x5c) { if (i < n) { i++; } else { escaped = true; break; } } } }`. The `n > 0` guard keeps an empty chunk from consuming `escaped` (the old `while (i < n)` also did nothing for n === 0). For n === 1 with escaped set, i becomes 1, the for(;;) breaks at `i >= n`, escaped is false and inString stays true, which matches the old `escaped = false; i++; continue;` path. When the string closes mid-chunk, the outer while starts at the byte after the closing quote with inString === false, the same state the old `continue` produced."
+    },
+    {
+      "step": 2,
+      "file": "src/indexer/lineIndex.ts",
+      "change": "Delete the whole `if (inString) { ... continue; }` branch at the top of `while (i < n) {` (L258-293: the `if (escaped) { escaped = false; i++; continue; }` block, the `for (;;) { while (i + 3 < n && buf[i] > 0x5c && ... ) i += 4; if (i >= n) break; const sb = buf[i++]; if (sb > 0x5c) continue; if (sb === 0x22 /* \" */) { inString = false; break; } if (sb === 0x5c) { if (i < n) { i++; } else { escaped = true; break; } } }` loop and the trailing `continue;`). The while body then starts directly with the existing WCLS skip `if (WCLS[buf[i]] === 0) { lineHasContent = true; do { i++; } while (i < n && WCLS[buf[i]] === 0); if (i >= n) break; }`. Invariant after steps 1-3: inside `while (i < n)` inString is always false, because the carry block either closes the string or leaves i >= n, and case 0x22 either closes the string or sets inString = true only with i >= n."
+    },
+    {
+      "step": 3,
+      "file": "src/indexer/lineIndex.ts",
+      "change": "Replace `case 0x22: // \"  inString = true; lineHasContent = true; break;` (L304-307) with an in-place scanner that ends in `continue` so the switch-trailing `i++` (L344) is skipped: `case 0x22: { lineHasContent = true; i++; /* step over the opening quote */ for (;;) { while (i + 3 < n && buf[i] > 0x5c && buf[i + 1] > 0x5c && buf[i + 2] > 0x5c && buf[i + 3] > 0x5c) i += 4; if (i >= n) { inString = true; /* string still open at chunk end */ break; } const sb = buf[i++]; if (sb > 0x5c) continue; if (sb === 0x22) break; /* closing quote; i is already past it */ if (sb === 0x5c) { if (i < n) { i++; /* skip escaped byte */ } else { inString = true; escaped = true; /* escape straddles the chunk boundary */ break; } } /* other bytes <= 0x5c, including raw newlines inside strings, change no state */ } continue; }`. The braces scope `const sb` (no-case-declarations). A quote as the last byte of a chunk gives i === n, sets inString = true, and the carry block in the next chunk takes over. A backslash as the last byte sets inString = true and escaped = true with i === n, exactly the state the old code left. Raw newlines in strings are still skipped without counting a line, as before."
+    },
+    {
+      "step": 4,
+      "file": "src/indexer/lineIndex.ts",
+      "change": "Leave everything else byte-for-byte unchanged: the module-level WCLS table, the WCLS skip, cases 0x7b/0x5b/0x7d/0x5d, case 0x0a (including its `if (depth === 0 && !inString)` test, which is now always true for inString but stays as is to keep the change minimal), the default case, `i++` after the switch, `totalBytes += n;`, onProgress, the EOF block (`if (startOff < totalBytes) { ... if (depth > 0 || inString) sawMultiline = true; ... } else if (depth > 0 || inString) { ... }`), and the records/endsWithNewline construction. Do NOT add a Uint32Array view, SWAR haszero word loop, alignment gate, indexOf skipping or class table inside strings, and do NOT change the 4x reject. Run `npx prettier --write src/indexer/lineIndex.ts` so formatting matches the repo style. Confirm with `git diff --stat` that only src/indexer/lineIndex.ts changed and `git diff --quiet -- scripts/benchmark-index-build.mjs` exits 0."
+    },
+    {
+      "step": 5,
+      "file": "src/indexer/lineIndex.ts",
+      "change": "Verification (no repo files besides lineIndex.ts may change; put scratch files under %TEMP%, delete them afterwards). (a) `npx tsc --noEmit`, `npx oxlint src scripts build.mjs --deny-warnings`, `npx prettier --check .` all clean. (b) `node --experimental-transform-types --test \"src/indexer/**/*.test.ts\" \"src/perf/**/*.test.ts\"` all pass. (c) Differential check vs 1d2377e: `git show 1d2377e:src/indexer/lineIndex.ts > $TEMP/li-ref/src/indexer/lineIndex.ts` and copy src/constants.ts to $TEMP/li-ref/src/constants.ts (the jsonParser import is type-only). A scratch .mjs run with --experimental-transform-types builds both implementations on identical inputs and deep-compares checkpoints, totalLines, totalBytes, totalRecords, recordEndLines, recordEndOffsets, multiline and endsWithNewline. Fixtures: compact JSONL with long ASCII/CJK/emoji strings, pretty-printed multiline records, CRLF, empty and whitespace-only lines, escaped quotes and runs of backslashes (`\\\\\\\"`), strings ending in an escaped backslash, raw newline inside a string, unterminated final line, trailing backslash at EOF inside a string, string open at EOF (with and without a final newline), unbalanced brackets at EOF, a quote as the last byte of a chunk, and a ~2 MB generated mixed fixture. Splits: whole, 1, 2, 3, 7, 64, 1000 bytes. Intervals: 1, 3, 1024. Delivery: sync Buffer array, async generator, string chunks (string-level split), unpooled Buffer.allocUnsafeSlow copies, and subarrays at odd byteOffsets. Include zero-length chunks between splits to exercise the `n > 0` guard. Every case must match. (d) Run `node scripts/benchmark-index-build.mjs` at least 5 times serially (no parallel load) and report the median score, each run's score and the sub-scores; correctness must be 1 in every run."
+    }
+  ],
+  "expected_outcome": {
+    "metric": "sealed_speedup",
+    "estimated_impact": "+8-10% relative (sealed ~1.75-1.80 from best 1.623; today's base measures 1.60-1.68 on this machine)",
+    "rationale": "Round-5 scratch isolation of exactly this shape (r5/src/indexer/quoteInline.ts, generated from base.ts = 1d2377e) measured in-process paired rel median 1.159 (q1 0.994, q3 1.319) and sealed-benchmark copies at 1.787/1.790 against base 1.605/1.640 in the same sweep, and it passed all 576 differential cases, including chunk-straddling strings and a trailing backslash at a chunk end. The gain comes from control flow, not per-byte work: about 75% of fixture bytes sit in strings of ~26 B, so the per-string round trip through the outer loop (inString/escaped re-tests, extra i++ and loop-condition checks) and the per-outside-byte `if (inString)` test are a real share of cost after the round-2 string loop and round-3 WCLS skip. It differs from round-1 quoteFirst/quoteDirect peeling (neutral), which only reordered the switch dispatch while keeping the top-of-loop inString branch, and from strHoist (neutral, rel 1.033), which only moved the `if (escaped)` test. Honest outlook: it will probably land just under the 1.8 target on its own. It is the second-family plan, orthogonal to planner_a's swarRG word loop, and could stack with it in a later round.",
+    "sub_score_expectations": {
+      "correctness": 1,
+      "cur_median_mb_s": "~1000-1030 (sealed ~1.75-1.80 x ref ~570-580)",
+      "min_ratio": "~1.0-1.1",
+      "max_ratio": "~2.9 (upper bound from prior sealed runs)"
+    }
+  },
+  "history_reference": {
+    "builds_on": "round_2_planner_a (string-skip loop with the 4x `> 0x5c` byte reject, winner 1.499) and round_3_planner_a (WCLS outer skip, winner 1.623, family architecture). Both are kept unchanged; only where the string loop is entered changes. Round-5 brief idea 'quoteInline' (architecture, rel 1.159, sealed 1.787/1.790).",
+    "avoids": "planner_a's round-5 swarRG word loop and any SWAR/Uint32Array change (kept out to satisfy H001/H003). The round-4 360a642 shape (word loop in front of a kept 4x reject, 1.590). The round-1 sync scanChunk kernel / ScanState marshaling (0.897) and index-based array iteration (0.882). Buffer#indexOf quote/newline skipping (slower on short strings, wrong for raw newlines in strings). Class table inside strings. nextCp counter, lazy recordEndLines and Float64Array offsets (neutral/negative). quoteFirst/quoteDirect peeling, viewU8, skipDef, rej4n3 (neutral). DataView or 2-word SWAR (negative). strHoist (neutral). Stacking quoteInline with swarRG is left to a later round (two changes)."
+  },
+  "critic_review": {
+    "h001_hypothesis_count": "pass",
+    "h002_family_streak": "pass",
+    "h003_intra_round_diversity": "pass",
+    "schema_valid": "pass",
+    "history_aware": "pass",
+    "verdict": "approved",
+    "rejection_reason": null
+  },
+  "architect_review": {}
+}

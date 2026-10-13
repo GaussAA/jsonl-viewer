@@ -1,6 +1,6 @@
 {
   "version": "1.0.0",
-  "lastScanned": 1791516829472,
+  "lastScanned": 1791771059872,
   "projectRoot": "c:\\WorkSpace\\jsonl-viewer",
   "techStack": {
     "languages": [
@@ -79,22 +79,23 @@
     "docs": {
       "path": "docs",
       "purpose": "Documentation",
-      "fileCount": 10,
-      "lastAccessed": 1791516829381,
+      "fileCount": 11,
+      "lastAccessed": 1791771059738,
       "keyFiles": [
+        "AGENTS.md",
         "ARCHITECTURE_REVIEW.md",
         "CODE_REVIEW.md",
         "CODE_WIKI.md",
-        "DESIGN_SYSTEM.md",
-        "EDIT_FEATURE_PLAN.md"
+        "DESIGN_SYSTEM.md"
       ]
     },
     "media": {
       "path": "media",
       "purpose": null,
-      "fileCount": 2,
-      "lastAccessed": 1791516829421,
+      "fileCount": 3,
+      "lastAccessed": 1791771059739,
       "keyFiles": [
+        "AGENTS.md",
         "icon.png",
         "icon.svg"
       ]
@@ -102,8 +103,8 @@
     "samples": {
       "path": "samples",
       "purpose": null,
-      "fileCount": 9,
-      "lastAccessed": 1791516829423,
+      "fileCount": 10,
+      "lastAccessed": 1791771059784,
       "keyFiles": [
         "01_basic.jsonl",
         "02_varied_types.jsonl",
@@ -115,25 +116,33 @@
     "scripts": {
       "path": "scripts",
       "purpose": "Build/utility scripts",
-      "fileCount": 6,
-      "lastAccessed": 1791516829424,
+      "fileCount": 8,
+      "lastAccessed": 1791771059786,
       "keyFiles": [
+        "AGENTS.md",
         "audit-stability.ts",
+        "benchmark-index-build.mjs",
         "install.cmd",
-        "integration-runner.mjs",
-        "release.mjs",
-        "test-integration.mjs"
+        "integration-runner.mjs"
       ]
     },
     "src": {
       "path": "src",
       "purpose": "Source code",
-      "fileCount": 2,
-      "lastAccessed": 1791516829425,
+      "fileCount": 3,
+      "lastAccessed": 1791771059786,
       "keyFiles": [
+        "AGENTS.md",
         "constants.ts",
         "extension.ts"
       ]
+    },
+    "worktrees": {
+      "path": "worktrees",
+      "purpose": null,
+      "fileCount": 0,
+      "lastAccessed": 1791771059787,
+      "keyFiles": []
     }
   },
   "hotPaths": [
@@ -150,21 +159,45 @@
       "type": "file"
     },
     {
+      "path": "src/indexer/lineIndex.ts",
+      "accessCount": 14,
+      "lastAccessed": 1791623193650,
+      "type": "file"
+    },
+    {
       "path": "src/parser/jsonParser.ts",
       "accessCount": 10,
       "lastAccessed": 1791526550698,
       "type": "file"
     },
     {
-      "path": "docs/DESIGN_SYSTEM.md",
-      "accessCount": 7,
-      "lastAccessed": 1791526709299,
-      "type": "file"
+      "path": "src",
+      "accessCount": 10,
+      "lastAccessed": 1791858583661,
+      "type": "directory"
+    },
+    {
+      "path": "",
+      "accessCount": 8,
+      "lastAccessed": 1791597819591,
+      "type": "directory"
     },
     {
       "path": "AGENTS.md",
-      "accessCount": 7,
-      "lastAccessed": 1791527812367,
+      "accessCount": 8,
+      "lastAccessed": 1791857356174,
+      "type": "file"
+    },
+    {
+      "path": "package.json",
+      "accessCount": 8,
+      "lastAccessed": 1791857356267,
+      "type": "file"
+    },
+    {
+      "path": "docs/DESIGN_SYSTEM.md",
+      "accessCount": 8,
+      "lastAccessed": 1791857362215,
       "type": "file"
     },
     {
@@ -174,12 +207,6 @@
       "type": "file"
     },
     {
-      "path": "",
-      "accessCount": 6,
-      "lastAccessed": 1791525977163,
-      "type": "directory"
-    },
-    {
       "path": "src/core/query.ts",
       "accessCount": 6,
       "lastAccessed": 1791526773664,
@@ -187,8 +214,8 @@
     },
     {
       "path": "src/constants.ts",
-      "accessCount": 5,
-      "lastAccessed": 1791526458086,
+      "accessCount": 6,
+      "lastAccessed": 1791538617610,
       "type": "file"
     },
     {
@@ -204,10 +231,10 @@
       "type": "file"
     },
     {
-      "path": "src",
-      "accessCount": 3,
-      "lastAccessed": 1791525444535,
-      "type": "directory"
+      "path": "src/perf/__tests__/bigFilePerf.test.ts",
+      "accessCount": 4,
+      "lastAccessed": 1791539173975,
+      "type": "file"
     },
     {
       "path": "src/host/searchEngine.ts",
@@ -231,18 +258,6 @@
       "path": "src/host/recordSummary.ts",
       "accessCount": 2,
       "lastAccessed": 1791525220730,
-      "type": "file"
-    },
-    {
-      "path": "src/perf/__tests__/bigFilePerf.test.ts",
-      "accessCount": 2,
-      "lastAccessed": 1791525222985,
-      "type": "file"
-    },
-    {
-      "path": "package.json",
-      "accessCount": 2,
-      "lastAccessed": 1791525231725,
       "type": "file"
     },
     {
@@ -276,27 +291,27 @@
       "type": "file"
     },
     {
-      "path": "README.md",
-      "accessCount": 1,
-      "lastAccessed": 1791524956749,
+      "path": "tsconfig.json",
+      "accessCount": 2,
+      "lastAccessed": 1791538636608,
       "type": "file"
     },
     {
-      "path": "tsconfig.json",
-      "accessCount": 1,
-      "lastAccessed": 1791524957147,
+      "path": "src/indexer/__tests__/lineIndex.test.ts",
+      "accessCount": 2,
+      "lastAccessed": 1791597993182,
+      "type": "file"
+    },
+    {
+      "path": "README.md",
+      "accessCount": 2,
+      "lastAccessed": 1791857356113,
       "type": "file"
     },
     {
       "path": "src/core/jsonSpan.ts",
       "accessCount": 1,
       "lastAccessed": 1791525183072,
-      "type": "file"
-    },
-    {
-      "path": "src/indexer/lineIndex.ts",
-      "accessCount": 1,
-      "lastAccessed": 1791525184189,
       "type": "file"
     },
     {
@@ -321,12 +336,6 @@
       "path": "src/core/__tests__/replaceLogic.test.ts",
       "accessCount": 1,
       "lastAccessed": 1791525193636,
-      "type": "file"
-    },
-    {
-      "path": "src/indexer/__tests__/lineIndex.test.ts",
-      "accessCount": 1,
-      "lastAccessed": 1791525194002,
       "type": "file"
     },
     {

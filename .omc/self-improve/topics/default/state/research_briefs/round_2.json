@@ -1,0 +1,63 @@
+{
+  "iteration": 2,
+  "researcher_id": "researcher",
+  "repo_analysis_summary": "build (src/indexer/lineIndex.ts L215-343) is unchanged since round 1: async for-await over chunks, byte-wise state machine inline (string bytes handled per outer iteration at L247-251, switch at L253-293, modulo checkpoint at L271/L306, two record pushes per line at L275-276). The fixture is 16 MB, 87,725 lines, 75% of bytes inside strings (mostly 'x'/'y'/'z' padding, all > 0x5c). Round-2 scratch harness: C:/Users/chaowu21/AppData/Local/Temp/li-exp/exp3.mjs (generator) + exp3run.mjs (runner). Each candidate is the CURRENT async build with exactly one change (or an explicitly labelled stack), run in its own Node v24.21 process, 31 paired runs vs the sealed reference (alternating order, median ratio), after a differential check against the reference on all sealed edge fixtures plus extras (trailing backslash at EOF, unicode, leading empty lines), splits 1/2/7/64/1000 bytes, intervals 1024/1/3, async-iterable input and string chunks. Every candidate listed passed. Calibration: the scratch mirror of the current code scored 0.79-0.91 and the real LineIndex.build 0.78-0.92 in the same processes, matching the sealed baseline 0.898, so scratch ratios should transfer roughly 1:1. Run-to-run noise is about +/-0.08. Key result: only the string-body loop moves the score. Tight loop alone 1.18-1.34; tight loop with a 4x-unrolled 'b > 0x5c' fast reject 1.37-1.59 (median of 5 processes ~1.50). nextCp, sync-over-array (state in locals), array index loop, lazy record storage and the hasFirst default-branch tweak are all neutral or negative alone, and stacking nextCp + sync + lazyLines on top of rej4 gives 1.39-1.59, i.e. no gain over rej4 alone. The best measured stack is SWAR (DataView getUint32, haszero for 0x22/0x5c) string skip plus an outer non-structural skip loop: 1.54 and 1.68. 1.8 has not been reached in scratch. Only optimization-family changes showed a real gain, so to satisfy H003 the other two planners must pick changes that are expected to be neutral alone (flagged below).",
+  "ideas": [
+    {
+      "title": "Replace per-byte string handling (L247-251) with a dedicated string-skip loop whose body is a 4x-unrolled 'b > 0x5c' fast reject (single change: the string scanner)",
+      "source": "Scratch exp3run.mjs candidate '(e3) tight+rej4'; isolated on top of the current async build",
+      "evidence": "Measured 1.374, 1.383, 1.530, 1.590, 1.499 in five separate processes (current mirror 0.79-0.91, real build 0.78-0.92 in the same processes). This is ONE hypothesis: only the inString branch changes. The loop shape is `let i = 0; while (i < n) { if (inString) { if (escaped) { escaped = false; i++; continue; } for (;;) { while (i + 3 < n && buf[i] > 0x5c && buf[i+1] > 0x5c && buf[i+2] > 0x5c && buf[i+3] > 0x5c) i += 4; if (i >= n) break; const b = buf[i++]; if (b > 0x5c) continue; if (b === 0x22) { inString = false; break; } if (b === 0x5c) { if (i < n) i++; else { escaped = true; break; } } } continue; } const b = buf[i]; switch (b) { ...unchanged cases... } i++; }`. The outer for loop becomes a while loop with i++ after the switch; the newline case still uses chunkBase + i + 1 (i not yet incremented). Keep line % interval, the record pushes and the for-await loop exactly as they are. The `escaped` carry at chunk start is what makes 1-byte splits pass. Fallback if the planner wants the minimal form: plain tight loop without the reject, measured 1.177/1.315/1.291/1.302/1.338.",
+      "approach_family": "optimization",
+      "confidence": "high",
+      "estimated_impact": "+55-75% (score ~1.40-1.59 expected vs 0.898)"
+    },
+    {
+      "title": "nextCp counter instead of line % interval (L271, L306)",
+      "source": "Scratch candidate '(b) nextCp'; stack 'rej8+skip+b'",
+      "evidence": "Alone: 0.792, 0.899, 0.898 vs mirror 0.818/0.908/0.793 (neutral). On top of rej8+skip: 1.517/1.479/1.525/1.415 vs 1.508/1.501 without it (neutral). Newlines are ~0.5% of bytes, so the modulo is not measurable. Correct for intervals 1/3/1024 including the EOF checkpoint (`if (line === nextCp)` at L306). Low priority; only useful as a cleanup.",
+      "approach_family": "optimization",
+      "confidence": "high",
+      "estimated_impact": "~0%"
+    },
+    {
+      "title": "DO NOT: lazy record-end storage (offsets only / Float64Array, materialize recordEndLines on first multiline)",
+      "source": "Scratch candidates '(c1) lazyLines' and '(c2) lazyTA'",
+      "evidence": "Both are correct but slower. lazyLines (keep recordEndOffsets.push, skip recordEndLines.push while compact): 0.706, 0.833, 0.832 vs mirror 0.818/0.908/0.793 (about -5 to -10%). lazyTA (growable Float64Array + Array.from at the end): 0.655, 0.750, 0.737 (about -15 to -20%). The extra sawMultiline branch and typed-array stores cost more than the saved push. Round 1's +6% 'no records' upper bound was for removing both arrays outright, which is not a correct option.",
+      "approach_family": "data",
+      "confidence": "high",
+      "estimated_impact": "negative (-5% to -20%)"
+    },
+    {
+      "title": "DO NOT: state-object marshaling into a scanChunk kernel, hasFirst default-branch guard, Uint8Array table inside strings, 8x unroll",
+      "source": "Round-1 result_executor_1.json (0.897); scratch '(f) hasFirst default', '(e2) tight+tbl', '(g) tight+rej8'",
+      "evidence": "Round-1 plan B (sync scanChunk with a ScanState object) scored 0.897 vs 0.898: neutral, and this round's locals-only sync duplicate is neutral too, so extraction of any kind should not be retried. hasFirst (`if (!lineHasContent && ...)` in the default branch): 0.799/0.897/0.802 alone and harmful in a stack (e3+d1+b+c1+f 1.263/1.313/1.398/1.267/1.401 vs 1.434/1.573/1.491/1.391/1.591 without it). String-class table lookup `SCLS[b] === 0`: 1.151 vs 1.247-1.393 for the plain `b > 0x5c` compare. 8x unroll: 1.257/1.249, worse than 4x (~1.50). Buffer#indexOf quote/newline skipping stays rejected from round 1 (slower on 26-byte strings; newline jumping is semantically wrong for raw newlines in strings).",
+      "approach_family": "other",
+      "confidence": "high",
+      "estimated_impact": "negative or neutral"
+    },
+    {
+      "title": "Outer non-structural skip loop: once lineHasContent is true, advance i over bytes that are not '\"' '{' '[' '}' ']' or newline via a Uint8Array(256) class table before the switch",
+      "source": "Scratch candidates '(i) outer-skip alone', '(j) tight+outer-skip', 'stack rej8+skip', 'stack swar+skip'",
+      "evidence": "Alone on the current per-byte string code: 0.916 and 0.903 (neutral vs mirror 0.79-0.91). It does NOT pay with the plain tight loop (1.248 twice vs 1.30 for tight alone) but it stacks with unrolled/SWAR string loops: rej8 1.25 -> rej8+skip 1.50/1.51; swar 1.35 -> swar+skip 1.54/1.68 (best measured). Code: module-level `const OCLS = new Uint8Array(256); for (const c of [0x22,0x7b,0x5b,0x7d,0x5d,0x0a]) OCLS[c] = 1;` and, at the top of the outside-string path, `if (lineHasContent) { while (i < n && OCLS[buf[i]] === 0) i++; if (i >= n) break; }`. Correct because the default branch only ever sets lineHasContent, which is already true. Needs the while-loop shape from idea 1 (or its own for->while conversion). Distinct family so it can run this round under H003, but expect neutral alone; its value is as a stack partner in iteration 3.",
+      "approach_family": "architecture",
+      "confidence": "medium",
+      "estimated_impact": "~0% alone (within noise); +10-20% when stacked on an unrolled/SWAR string loop"
+    },
+    {
+      "title": "SWAR 4-byte string skip (DataView.getUint32 + haszero test for 0x22 and 0x5c), replacing the 4x unrolled compare in idea 1",
+      "source": "Scratch candidates '(h) tight+swar' and 'stack swar+skip'",
+      "evidence": "Alone with tight loop: 1.354 and 1.346 (below rej4's ~1.50). With the outer skip loop: 1.542 and 1.682, the highest measured result this round. Kernel: per chunk `const dv = new DataView(buf.buffer, buf.byteOffset, n)`; in the string loop `while (i + 3 < n) { const x = dv.getUint32(i, true); const a = x ^ 0x22222222, c = x ^ 0x5c5c5c5c; if (((((a - 0x01010101) & ~a) | ((c - 0x01010101) & ~c)) & 0x80808080) !== 0) break; i += 4; }` then the byte-wise tail. Passed all differential checks including unaligned subarrays and string chunks (DataView tolerates unaligned offsets; a hit only drops to the byte path, so false positives are harmless). Same family as idea 1, so do not plan it in the same round; it is the iteration-3 follow-up after idea 1 or 2 lands.",
+      "approach_family": "optimization",
+      "confidence": "medium",
+      "estimated_impact": "+5-15% over idea 1 when combined with idea 2; alone it is slower than idea 1"
+    },
+    {
+      "title": "Index-based loop for Array inputs inside the existing async build (no function extraction, state stays in the same locals)",
+      "source": "Scratch candidate '(d2) asyncArr index loop'; round-1 executor result for plan B",
+      "evidence": "Measured 0.882, 0.804, 0.923 vs mirror 0.818/0.908/0.793: neutral. The full sync duplicate (d1 'syncArr dup', a separate plain function with locals) was also neutral: 0.791, 0.793, 0.892, and on top of rej4 it added nothing (rej4 ~1.50 vs e3+d1 1.349). Conclusion: the async/for-await frame is not the bottleneck on V8 v24; the per-byte loop body is. Listed only as the infrastructure-family option for H003; expect a null result.",
+      "approach_family": "infrastructure",
+      "confidence": "medium",
+      "estimated_impact": "~0% (within +/-4% noise)"
+    }
+  ]
+}

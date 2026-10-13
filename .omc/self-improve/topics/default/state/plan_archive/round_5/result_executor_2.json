@@ -1,0 +1,56 @@
+{
+  "executor_id": "executor_2",
+  "plan_id": "round_5_planner_b",
+  "commit_hash": "9fcb94d1153ceb70a534a47b5fe97ca8a43f7e74",
+  "benchmark_score": 1.764,
+  "benchmark_raw": "{\"primary\":1.764,\"sub_scores\":{\"correctness\":1,\"cur_median_mb_s\":933.71,\"ref_median_mb_s\":531.07,\"min_ratio\":0.869,\"max_ratio\":2.137}}",
+  "status": "success",
+  "sub_scores": {
+    "correctness": 1,
+    "cur_median_mb_s": 933.71,
+    "ref_median_mb_s": 531.07,
+    "min_ratio": 0.869,
+    "max_ratio": 2.137
+  },
+  "all_runs": [
+    {
+      "run": 1,
+      "primary": 1.761,
+      "sub_scores": { "correctness": 1, "cur_median_mb_s": 716.77, "ref_median_mb_s": 419.19, "min_ratio": 1.242, "max_ratio": 2.03 },
+      "note": "absolute throughput ~20% lower than runs 2-4 (cur and ref both low); possibly load-affected, ratio consistent with other runs"
+    },
+    {
+      "run": 2,
+      "primary": 1.765,
+      "sub_scores": { "correctness": 1, "cur_median_mb_s": 930.29, "ref_median_mb_s": 528.35, "min_ratio": 1.394, "max_ratio": 2.419 }
+    },
+    {
+      "run": 3,
+      "primary": 1.783,
+      "sub_scores": { "correctness": 1, "cur_median_mb_s": 949.45, "ref_median_mb_s": 533.01, "min_ratio": 1.41, "max_ratio": 2.255 }
+    },
+    {
+      "run": 4,
+      "primary": 1.764,
+      "sub_scores": { "correctness": 1, "cur_median_mb_s": 933.71, "ref_median_mb_s": 531.07, "min_ratio": 0.869, "max_ratio": 2.137 },
+      "note": "single outlier sample ratio 0.87; median unaffected"
+    },
+    {
+      "run": 5,
+      "primary": 1.76,
+      "sub_scores": { "correctness": 1, "cur_median_mb_s": 850.96, "ref_median_mb_s": 484.42, "min_ratio": 1.314, "max_ratio": 3.246 },
+      "note": "absolute throughput somewhat lower; possibly mild load, ratio consistent"
+    }
+  ],
+  "verification": {
+    "tsc_noEmit": "pass",
+    "oxlint_lineIndex": "pass (0 warnings); repo-wide --deny-warnings has 1 base warning in untouched src/host/dataService.ts:2118 (no-shadow)",
+    "prettier_check_lineIndex": "pass",
+    "tests_indexer_perf": "55/55 pass",
+    "differential_vs_1d2377e": "6810 cases, 0 failures (splits whole/1/2/3/7/64/1000, intervals 1/3/1024, Buffer/string/async delivery, zero-length chunks, chunk-boundary quote/backslash, EOF edge cases, sealed edge fixtures); scratch dir deleted",
+    "sealed_benchmark_unchanged": true,
+    "files_changed": ["src/indexer/lineIndex.ts"]
+  },
+  "failure_analysis": null,
+  "timestamp": "2026-10-10T09:29:24Z"
+}

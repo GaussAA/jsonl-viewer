@@ -1,0 +1,40 @@
+{
+  "iteration": 4,
+  "baseline_score": 1.623,
+  "winner": null,
+  "losers": [
+    {
+      "plan_id": "round_4_planner_a",
+      "score": 1.59,
+      "approach_family": "optimization",
+      "hypothesis": "Replacing the 4x-unrolled byte reject inside the string-skip loop of LineIndex.build (src/indexer/lineIndex.ts L256-282 on 1d2377e) with an aligned Uint32Array SWAR word loop that tests each 4-byte word for a 0x22 or 0x5c lane via the haszero trick ((v - 0x01010101) & ~v & 0x80808080 on v = x ^ 0x22222222 and v = x ^ 0x5c5c5c5c), with the existing byte path kept as the unaligned head/tail and hit-word fallback, will raise the primary speedup from 1.623 to ~1.83 (~1.13x relative), because it checks 4 string bytes per typed-array load with one combined branch instead of 4 loads and 4 compares, and it never stops on in-string bytes <= 0x5c other than quote/backslash. This stacks on the merged round-2 string loop and round-3 WCLS outer skip. This is the only change: the escaped-carry branch, the outside-string switch, checkpoint modulo, record pushes, for-await loop, Buffer.from conversion and EOF handling are untouched.",
+      "sub_scores": {
+        "correctness": 1,
+        "cur_median_mb_s": 934.17,
+        "ref_median_mb_s": 583.63,
+        "min_ratio": 0.98,
+        "max_ratio": 1.935
+      },
+      "failure_analysis": {
+        "what": "Aligned Uint32Array SWAR string skip scored median 1.590 vs best 1.623 (5 runs 1.571-1.599, correctness 1). Brief predicted ~1.83.",
+        "why": "Executor attributes it to per-iteration alignment checks and word-index arithmetic outweighing the word loop. Unverified. Note the round-3 plan-B result (1.587 alone, before skipCls) already hinted the gain over the 4x byte reject is small; scratch estimates of +13% did not transfer to the sealed benchmark.",
+        "category": "regression",
+        "lesson": "u32 string scanning stacked on the rej4 loop did not reproduce scratch gains in the sealed benchmark (two data points: 1.587 on 2fb4bdc, 1.590 on 1d2377e). If retried, align once at string entry instead of testing alignment each iteration; otherwise look elsewhere (record pushes, per-newline path)."
+      }
+    },
+    {
+      "plan_id": "round_4_planner_b",
+      "score": null,
+      "approach_family": "optimization",
+      "hypothesis": "H001: Replacing the 4x-unrolled byte reject inside the string-skip loop of LineIndex.build (src/indexer/lineIndex.ts L256-282 on improve/lineindex_build_throughput 1d2377e) with an aligned Uint32Array word-wise reject loop that tests each byte lane > 0x5c (via ((x & 0xff) <= 0x5c) || ((x >>> 8 & 0xff) <= 0x5c) || ((x >>> 16 & 0xff) <= 0x5c) || ((x >>> 24) <= 0x5c)) will raise the sealed speedup from 1.623 to ~1.75 (~1.08x relative), because it checks 4 string bytes per typed-array load with one combined branch instead of 4 loads and 4 compares, while preserving the exact '> 0x5c' semantics of the merged code so the byte tail is unchanged. This is the lower-variance alternative to swarU32 (idea 1): same u32 structure and alignment guard but simpler lane-wise test instead of haszero, confirmed at median ~1.08x relative (1.077/1.080/1.060/1.114 across 4 passes) with lower variance (1.06-1.11 vs swarU32's 1.11-1.17). Single change: string branch only; outer skip, checkpoint logic, record pushes and for-await loop stay untouched.",
+      "sub_scores": {},
+      "failure_analysis": {
+        "what": "Rejected by critic before execution",
+        "why": "H003: same approach_family (optimization) as planner_a in the same round",
+        "category": "scope_error",
+        "lesson": "Assign distinct approach_family per planner up front; two alternatives of the same idea cannot share a round."
+      }
+    }
+  ],
+  "research_brief_id": "round_4"
+}

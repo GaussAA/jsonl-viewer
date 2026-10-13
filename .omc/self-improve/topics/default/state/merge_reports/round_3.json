@@ -1,0 +1,27 @@
+{
+  "iteration": 3,
+  "goal_slug": "lineindex_build_throughput",
+  "winner": {
+    "executor_id": "executor_1",
+    "branch": "experiment/round_3_executor_1",
+    "hypothesis": "Adding an outer non-structural skip to LineIndex.build (src/indexer/lineIndex.ts, outside-string path just before `const b = buf[i];` at L283) that, driven by a module-level Uint8Array(256) class table WCLS marking only '\"' '{' '[' '}' ']' '\\n' ' ' '\\t' '\\r' as 1, advances i over every run of class-0 bytes in one tight do/while (setting lineHasContent = true once per run) will raise the primary speedup from ~1.50 to ~1.62-1.68, because on top of the round-2 string loop the outside-string bytes are now a large share of cost and every class-0 byte currently pays a full outer iteration + inString test + switch dispatch only to set lineHasContent = true. Unlike round 2's failed skipLHC it is not gated on lineHasContent and whitespace is folded into the table, so it skips digits/true/false/null/':'/',' runs everywhere with no extra guard. This is the only change: the string branch, the switch cases, checkpoint modulo, record pushes, for-await loop, Buffer.from conversion and EOF handling are untouched.",
+    "score_before": 1.499,
+    "score_after": 1.623,
+    "sub_scores": {
+      "correctness": 1,
+      "cur_median_mb_s": 936.19,
+      "ref_median_mb_s": 577.13,
+      "min_ratio": 0.876,
+      "max_ratio": 2.842,
+      "sub_scores_note": "mb_s values taken from uncontended run 3 (median-score run 1 had depressed absolute throughput); min/max ratio are extremes across all 5 runs"
+    }
+  },
+  "archived": [
+    "archive/round_3_executor_1",
+    "archive/round_3_executor_2"
+  ],
+  "regressions_detected": false,
+  "re_benchmark_score": 1.623,
+  "status": "merged",
+  "reason": null
+}

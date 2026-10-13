@@ -1,0 +1,50 @@
+{
+  "plan_id": "round_2_planner_a",
+  "planner_id": "planner_a",
+  "round": 2,
+  "hypothesis": "Replacing the per-byte inString handling in LineIndex.build (src/indexer/lineIndex.ts L247-251) with a dedicated string-skip inner loop whose body is a 4x-unrolled fast reject (skip while buf[i..i+3] are all > 0x5c), with backslash pairs consumed inline and `escaped` carried across chunk boundaries, will raise the primary speedup from 0.898 to ~1.40-1.59, because ~75% of fixture bytes are string bytes > 0x5c that currently each pay a full outer-loop iteration plus three state checks. This is the only change: the switch cases, checkpoint modulo, record pushes, for-await loop, Buffer.from conversion and EOF handling are untouched.",
+  "approach_family": "optimization",
+  "critic_approved": true,
+  "target_files": ["src/indexer/lineIndex.ts"],
+  "steps": [
+    {
+      "step": 1,
+      "file": "src/indexer/lineIndex.ts",
+      "change": "Inside the `for await (const raw of handle)` body, replace ONLY the per-chunk byte loop, i.e. lines 245-294 from `for (let i = 0; i < n; i++) {` through its matching closing `}` (the line right before `totalBytes += n;`). Lines 241-244 (`for await`, `const buf = ...`, `const n = buf.length;`, `const chunkBase = totalBytes;`) and everything from `totalBytes += n;` (L295) to the end of build stay byte-for-byte identical. Do not add module-level constants, helper functions, DataView, tables, new state variables, or any nextCp / lazy-record / extraction change."
+    },
+    {
+      "step": 2,
+      "file": "src/indexer/lineIndex.ts",
+      "change": "The replacement for L245-294 is exactly this code. The `switch (b) { ... }` block must be copied VERBATIM from the original L253-293, including all its original Chinese comments (the listing below omits some of those comments only for brevity; it does not authorize removing them). Only the loop header, the inString branch, the `const b = buf[i];` placement and the trailing `i++` differ:\n\nlet i = 0;\nwhile (i < n) {\n  if (inString) {\n    // 上一 chunk 以反斜杠结尾：本 chunk 首字节被转义，直接跳过\n    if (escaped) {\n      escaped = false;\n      i++;\n      continue;\n    }\n    // 字符串体快速跳过：> 0x5c 的字节既不是 '\"'(0x22) 也不是 '\\\\'(0x5c)\n    for (;;) {\n      while (i + 3 < n && buf[i] > 0x5c && buf[i + 1] > 0x5c && buf[i + 2] > 0x5c && buf[i + 3] > 0x5c) i += 4;\n      if (i >= n) break;\n      const sb = buf[i++];\n      if (sb > 0x5c) continue;\n      if (sb === 0x22 /* \" */) {\n        inString = false;\n        break;\n      }\n      if (sb === 0x5c /* \\ */) {\n        if (i < n) i++; // 跳过被转义字节\n        else {\n          escaped = true; // 转义跨 chunk 边界\n          break;\n        }\n      }\n      // 其余 <= 0x5c 的字节（含字符串内裸换行）不改变任何状态\n    }\n    continue;\n  }\n  const b = buf[i];\n  switch (b) {\n    case 0x22: // \"\n      inString = true;\n      lineHasContent = true;\n      break;\n    case 0x7b: // {\n    case 0x5b: // [\n      depth++;\n      lineHasContent = true;\n      break;\n    case 0x7d: // }\n    case 0x5d: // ]\n      if (depth > 0) depth--;\n      lineHasContent = true;\n      break;\n    case 0x0a: // \\n —— 行结束\n      {\n        if (line % interval === 0) checkpoints.push({ line, offset: startOff });\n        if (depth === 0 && !inString) {\n          if (lineHasContent) {\n            recordEndLines.push(line);\n            recordEndOffsets.push(chunkBase + i + 1);\n          } else {\n            sawMultiline = true;\n          }\n        } else {\n          sawMultiline = true;\n        }\n        line++;\n        startOff = chunkBase + i + 1;\n        lineHasContent = false;\n      }\n      break;\n    default:\n      if (b !== 0x20 && b !== 0x09 && b !== 0x0d) lineHasContent = true;\n      break;\n  }\n  i++;\n}\n\nNotes for the executor: (a) the inner variable is named `sb` (not `b`) to avoid shadowing; (b) in the newline case `i` has NOT yet been incremented, so `chunkBase + i + 1` keeps its original meaning; (c) `break` inside the switch exits only the switch, then `i++` runs; (d) `break` inside `for (;;)` exits the string loop and the following `continue` returns to `while (i < n)`, which re-enters the switch with the byte after the closing quote, or exits when the chunk is exhausted; (e) a trailing backslash as the last byte of a chunk sets `escaped = true` with `inString` still true, and the next chunk's first byte is skipped by the `if (escaped)` branch exactly as the old per-byte code did; (f) raw 0x0a inside a string is consumed by the string loop and never reaches the newline case, matching the old `continue`; (g) a string open at EOF leaves `inString === true`, so the existing EOF logic at L303-319 behaves identically; (h) string chunks still go through the unchanged `Buffer.from(raw)`."
+    },
+    {
+      "step": 3,
+      "file": "src/indexer/lineIndex.ts",
+      "change": "Verification (no file edits): run the project's typecheck/build and the existing test suite as defined in package.json; all must pass. Then run a differential check of the new LineIndex.build against the sealed original bytewise reference on the sealed edge fixtures plus: escaped quote and escaped backslash split at every byte position (1-byte chunk splits), trailing backslash at EOF, raw newline inside a string, string left open at EOF (with and without trailing newline), unbalanced brackets, empty/blank leading lines, unicode, splits of 1/2/7/64/1000 bytes, checkpointInterval 1/3/1024, async-iterable, sync-iterable and string-chunk inputs; compare checkpoints, totalBytes, totalLines, multiline flag, recordEndLines, recordEndOffsets and endsWithNewline for exact equality. Finally run node scripts/benchmark-index-build.mjs (sealed, unmodified) at least 3 times and report the median primary speedup."
+    }
+  ],
+  "expected_outcome": {
+    "metric": "primary",
+    "estimated_impact": "+55-75% (primary ~1.40-1.59 vs baseline 0.898); does not by itself reach the 1.8 target",
+    "rationale": "75% of the 16 MB fixture's bytes are string padding ('x'/'y'/'z', all > 0x5c). The current code runs a full outer iteration per string byte (load, inString test, escaped test, two compares, continue). The tight loop removes the outer-loop overhead and the 4x unroll checks four bytes per bounds check with a single compare each. Round-2 scratch measured this exact candidate (e3 tight+rej4) at 1.374/1.383/1.530/1.590/1.499 across five processes, with the scratch mirror of current code at 0.79-0.91 and the real build at 0.78-0.92 in the same processes, so ratios transfer ~1:1. Noise is ~±0.05-0.08, far below the expected delta, so the result is decisively testable.",
+    "sub_score_expectations": {
+      "correctness": "1 (identical output on all edge fixtures)",
+      "cur_median_mb_s": "~800-900 MB/s (up from ~506)",
+      "ref_median_mb_s": "unchanged (~570 MB/s, reference not modified)"
+    }
+  },
+  "history_reference": {
+    "builds_on": "round_1_planner_a (tight string-skip loop, rejected only for bundling nextCp under H001) and research brief round_2 idea 1 (tight+rej4, highest-confidence single change); round_1 lesson that gains must come from the inner string loop, not from restructuring.",
+    "avoids": "Bundling of any second change (nextCp counter, lazy record storage, hasFirst guard, outer non-structural skip, SWAR/DataView) per H001 and round-1 critic rejections; ScanState/kernel extraction (round_1_planner_b, 0.897 neutral); Uint8Array class table in strings (slower, 1.151); 8x unroll (1.25, worse than 4x); Buffer#indexOf skipping (slower on short strings, wrong for raw newlines in strings)."
+  },
+  "critic_review": {
+    "h001_hypothesis_count": "pass",
+    "h002_family_streak": "pass",
+    "h003_intra_round_diversity": "pass",
+    "schema_valid": "pass",
+    "history_aware": "pass",
+    "verdict": "approved",
+    "rejection_reason": null
+  },
+  "architect_review": {}
+}

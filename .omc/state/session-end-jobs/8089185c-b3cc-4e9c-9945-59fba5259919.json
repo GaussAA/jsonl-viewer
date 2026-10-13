@@ -1,0 +1,345 @@
+{
+  "version": 1,
+  "jobId": "23a41f36-80d6-448f-aee8-1b5e8e3422c0",
+  "sessionId": "8089185c-b3cc-4e9c-9945-59fba5259919",
+  "scopeKey": "7c6b499cb478fc926fc92ae92b54ca18e948514fb92ab9254736b933ad7393b0",
+  "revision": 79,
+  "createdAt": "2026-10-13T02:05:46.853Z",
+  "updatedAt": "2026-10-13T02:06:25.882Z",
+  "producerGraceExpiresAt": "2026-10-13T02:06:16.854Z",
+  "bestEffortDeadlineAt": "2026-10-13T02:07:09.854Z",
+  "producers": {
+    "core": {
+      "state": "sealed",
+      "intentKey": "67af02897b6feae71b8b82500e6efd675ce9a0757957131b617fbb44ba5c2bca",
+      "payloadDigest": "67af02897b6feae71b8b82500e6efd675ce9a0757957131b617fbb44ba5c2bca",
+      "sealedAt": "2026-10-13T02:06:19.629Z",
+      "sealedBy": "recovery"
+    },
+    "wiki": {
+      "state": "no-op",
+      "sealedAt": "2026-10-13T02:05:46.853Z",
+      "sealedBy": "wiki-producer"
+    }
+  },
+  "actions": {
+    "foreground-cleanup": {
+      "class": "required",
+      "phase": "deferred-required",
+      "status": "completed",
+      "attempts": 1,
+      "idempotencyKey": "febf6dba2f2536433960a07f7cedce72e946b43ced0896570df80f017b8914d2",
+      "payload": {
+        "transcriptPath": "C:\\Users\\chaowu21\\.claude\\projects\\c--WorkSpace-jsonl-viewer\\8089185c-b3cc-4e9c-9945-59fba5259919.jsonl",
+        "cwd": "c:\\WorkSpace\\jsonl-viewer",
+        "reason": "other",
+        "input": {
+          "session_id": "8089185c-b3cc-4e9c-9945-59fba5259919",
+          "transcript_path": "C:\\Users\\chaowu21\\.claude\\projects\\c--WorkSpace-jsonl-viewer\\8089185c-b3cc-4e9c-9945-59fba5259919.jsonl",
+          "cwd": "c:\\WorkSpace\\jsonl-viewer",
+          "hook_event_name": "SessionEnd",
+          "reason": "other"
+        },
+        "initialTeamNames": [],
+        "openClawRouting": {},
+        "metrics": {
+          "session_id": "8089185c-b3cc-4e9c-9945-59fba5259919",
+          "ended_at": "2026-10-13T02:06:18.257Z",
+          "reason": "other",
+          "agents_spawned": 0,
+          "agents_completed": 0,
+          "modes_used": []
+        }
+      },
+      "budgetMs": 9000,
+      "claimedAt": "2026-10-13T02:06:17.460Z",
+      "runner": {
+        "attempt": 1,
+        "runnerNonce": "781da9dd-2b9b-4872-945b-1796091c5862",
+        "phase": "terminal",
+        "deadlineAt": "2026-10-13T02:06:26.860Z"
+      },
+      "lastOutcomeCode": "completed",
+      "completedAt": "2026-10-13T02:06:19.614Z"
+    },
+    "wiki-capture": {
+      "class": "required",
+      "phase": "deferred-required",
+      "status": "completed",
+      "attempts": 0,
+      "idempotencyKey": "1719cd1ef5b51e0269b78c4cb8c9308c9c1f7b82fd1c067fc034c060f23863f5",
+      "payload": {},
+      "budgetMs": 9000,
+      "completedAt": "2026-10-13T02:05:46.853Z"
+    },
+    "team-cleanup": {
+      "class": "required",
+      "phase": "deferred-required",
+      "status": "completed",
+      "attempts": 1,
+      "idempotencyKey": "cee6ac31df545408e1e822247ac249b3f8182a98a5fe8e448ae3b251e55bdee1",
+      "payload": {
+        "transcriptPath": "C:\\Users\\chaowu21\\.claude\\projects\\c--WorkSpace-jsonl-viewer\\8089185c-b3cc-4e9c-9945-59fba5259919.jsonl",
+        "cwd": "c:\\WorkSpace\\jsonl-viewer",
+        "reason": "other",
+        "input": {
+          "session_id": "8089185c-b3cc-4e9c-9945-59fba5259919",
+          "transcript_path": "C:\\Users\\chaowu21\\.claude\\projects\\c--WorkSpace-jsonl-viewer\\8089185c-b3cc-4e9c-9945-59fba5259919.jsonl",
+          "cwd": "c:\\WorkSpace\\jsonl-viewer",
+          "hook_event_name": "SessionEnd",
+          "reason": "other"
+        },
+        "initialTeamNames": [],
+        "openClawRouting": {},
+        "metrics": {
+          "session_id": "8089185c-b3cc-4e9c-9945-59fba5259919",
+          "ended_at": "2026-10-13T02:06:18.257Z",
+          "reason": "other",
+          "agents_spawned": 0,
+          "agents_completed": 0,
+          "modes_used": []
+        }
+      },
+      "budgetMs": 9000,
+      "claimedAt": "2026-10-13T02:06:19.679Z",
+      "runner": {
+        "attempt": 1,
+        "runnerNonce": "ee8c9174-c6ec-4dbe-8df9-a0f10206942a",
+        "phase": "terminal",
+        "deadlineAt": "2026-10-13T02:06:26.860Z"
+      },
+      "lastOutcomeCode": "completed",
+      "completedAt": "2026-10-13T02:06:20.574Z"
+    },
+    "python-cleanup": {
+      "class": "required",
+      "phase": "deferred-required",
+      "status": "completed",
+      "attempts": 1,
+      "idempotencyKey": "1f1370c4ac056606059d517e2f106b602d8cbcb04587b3fcc5f3b9f89e649cd0",
+      "payload": {
+        "transcriptPath": "C:\\Users\\chaowu21\\.claude\\projects\\c--WorkSpace-jsonl-viewer\\8089185c-b3cc-4e9c-9945-59fba5259919.jsonl",
+        "cwd": "c:\\WorkSpace\\jsonl-viewer",
+        "reason": "other",
+        "input": {
+          "session_id": "8089185c-b3cc-4e9c-9945-59fba5259919",
+          "transcript_path": "C:\\Users\\chaowu21\\.claude\\projects\\c--WorkSpace-jsonl-viewer\\8089185c-b3cc-4e9c-9945-59fba5259919.jsonl",
+          "cwd": "c:\\WorkSpace\\jsonl-viewer",
+          "hook_event_name": "SessionEnd",
+          "reason": "other"
+        },
+        "initialTeamNames": [],
+        "openClawRouting": {},
+        "metrics": {
+          "session_id": "8089185c-b3cc-4e9c-9945-59fba5259919",
+          "ended_at": "2026-10-13T02:06:18.257Z",
+          "reason": "other",
+          "agents_spawned": 0,
+          "agents_completed": 0,
+          "modes_used": []
+        }
+      },
+      "budgetMs": 9000,
+      "claimedAt": "2026-10-13T02:06:20.612Z",
+      "runner": {
+        "attempt": 1,
+        "runnerNonce": "745f5a92-54aa-42dc-9986-3d97b67c13a6",
+        "phase": "terminal",
+        "deadlineAt": "2026-10-13T02:06:26.860Z"
+      },
+      "lastOutcomeCode": "completed",
+      "completedAt": "2026-10-13T02:06:21.482Z"
+    },
+    "reply-cleanup": {
+      "class": "required",
+      "phase": "deferred-required",
+      "status": "completed",
+      "attempts": 1,
+      "idempotencyKey": "0b3a8b47c28b26d56aca004d4f572b96c118f16819c0d35162418816f9a5420a",
+      "payload": {
+        "transcriptPath": "C:\\Users\\chaowu21\\.claude\\projects\\c--WorkSpace-jsonl-viewer\\8089185c-b3cc-4e9c-9945-59fba5259919.jsonl",
+        "cwd": "c:\\WorkSpace\\jsonl-viewer",
+        "reason": "other",
+        "input": {
+          "session_id": "8089185c-b3cc-4e9c-9945-59fba5259919",
+          "transcript_path": "C:\\Users\\chaowu21\\.claude\\projects\\c--WorkSpace-jsonl-viewer\\8089185c-b3cc-4e9c-9945-59fba5259919.jsonl",
+          "cwd": "c:\\WorkSpace\\jsonl-viewer",
+          "hook_event_name": "SessionEnd",
+          "reason": "other"
+        },
+        "initialTeamNames": [],
+        "openClawRouting": {}
+      },
+      "budgetMs": 9000,
+      "claimedAt": "2026-10-13T02:06:21.556Z",
+      "runner": {
+        "attempt": 1,
+        "runnerNonce": "92969ed0-c93e-4936-8bb4-9d5ff1fa9c6c",
+        "phase": "terminal",
+        "deadlineAt": "2026-10-13T02:06:26.860Z"
+      },
+      "lastOutcomeCode": "completed",
+      "completedAt": "2026-10-13T02:06:22.428Z"
+    },
+    "callback": {
+      "class": "best-effort",
+      "phase": "deferred-best-effort",
+      "status": "completed",
+      "attempts": 1,
+      "idempotencyKey": "d068ede2655bf89e0c0950e087d0603d7dcf45538e94f20a654d08c6f4841895",
+      "payload": {
+        "transcriptPath": "C:\\Users\\chaowu21\\.claude\\projects\\c--WorkSpace-jsonl-viewer\\8089185c-b3cc-4e9c-9945-59fba5259919.jsonl",
+        "cwd": "c:\\WorkSpace\\jsonl-viewer",
+        "reason": "other",
+        "input": {
+          "session_id": "8089185c-b3cc-4e9c-9945-59fba5259919",
+          "transcript_path": "C:\\Users\\chaowu21\\.claude\\projects\\c--WorkSpace-jsonl-viewer\\8089185c-b3cc-4e9c-9945-59fba5259919.jsonl",
+          "cwd": "c:\\WorkSpace\\jsonl-viewer",
+          "hook_event_name": "SessionEnd",
+          "reason": "other"
+        },
+        "initialTeamNames": [],
+        "openClawRouting": {},
+        "metrics": {
+          "session_id": "8089185c-b3cc-4e9c-9945-59fba5259919",
+          "ended_at": "2026-10-13T02:06:18.257Z",
+          "reason": "other",
+          "agents_spawned": 0,
+          "agents_completed": 0,
+          "modes_used": []
+        }
+      },
+      "budgetMs": 2000,
+      "claimedAt": "2026-10-13T02:06:22.465Z",
+      "runner": {
+        "attempt": 1,
+        "runnerNonce": "e394328a-9b01-49af-92b4-8106a17b46b9",
+        "phase": "terminal",
+        "deadlineAt": "2026-10-13T02:06:26.860Z"
+      },
+      "lastOutcomeCode": "completed",
+      "completedAt": "2026-10-13T02:06:23.295Z"
+    },
+    "notification": {
+      "class": "best-effort",
+      "phase": "deferred-best-effort",
+      "status": "completed",
+      "attempts": 1,
+      "idempotencyKey": "89c0438ff63097ce04beb60efb87292ff68a7af350a0ee331f3de9dbf42d62fc",
+      "payload": {
+        "transcriptPath": "C:\\Users\\chaowu21\\.claude\\projects\\c--WorkSpace-jsonl-viewer\\8089185c-b3cc-4e9c-9945-59fba5259919.jsonl",
+        "cwd": "c:\\WorkSpace\\jsonl-viewer",
+        "reason": "other",
+        "input": {
+          "session_id": "8089185c-b3cc-4e9c-9945-59fba5259919",
+          "transcript_path": "C:\\Users\\chaowu21\\.claude\\projects\\c--WorkSpace-jsonl-viewer\\8089185c-b3cc-4e9c-9945-59fba5259919.jsonl",
+          "cwd": "c:\\WorkSpace\\jsonl-viewer",
+          "hook_event_name": "SessionEnd",
+          "reason": "other"
+        },
+        "initialTeamNames": [],
+        "openClawRouting": {},
+        "metrics": {
+          "session_id": "8089185c-b3cc-4e9c-9945-59fba5259919",
+          "ended_at": "2026-10-13T02:06:18.257Z",
+          "reason": "other",
+          "agents_spawned": 0,
+          "agents_completed": 0,
+          "modes_used": []
+        }
+      },
+      "budgetMs": 2000,
+      "claimedAt": "2026-10-13T02:06:23.328Z",
+      "runner": {
+        "attempt": 1,
+        "runnerNonce": "7f669421-ddf0-43f9-a89c-39e1ff62e183",
+        "phase": "terminal",
+        "deadlineAt": "2026-10-13T02:06:26.860Z"
+      },
+      "lastOutcomeCode": "completed",
+      "completedAt": "2026-10-13T02:06:24.133Z"
+    },
+    "openclaw": {
+      "class": "best-effort",
+      "phase": "deferred-best-effort",
+      "status": "completed",
+      "attempts": 1,
+      "idempotencyKey": "31fe8f6e1cf204e27006de511df257326fdd98655122ca437013e8779ffc735b",
+      "payload": {
+        "transcriptPath": "C:\\Users\\chaowu21\\.claude\\projects\\c--WorkSpace-jsonl-viewer\\8089185c-b3cc-4e9c-9945-59fba5259919.jsonl",
+        "cwd": "c:\\WorkSpace\\jsonl-viewer",
+        "reason": "other",
+        "input": {
+          "session_id": "8089185c-b3cc-4e9c-9945-59fba5259919",
+          "transcript_path": "C:\\Users\\chaowu21\\.claude\\projects\\c--WorkSpace-jsonl-viewer\\8089185c-b3cc-4e9c-9945-59fba5259919.jsonl",
+          "cwd": "c:\\WorkSpace\\jsonl-viewer",
+          "hook_event_name": "SessionEnd",
+          "reason": "other"
+        },
+        "initialTeamNames": [],
+        "openClawRouting": {},
+        "metrics": {
+          "session_id": "8089185c-b3cc-4e9c-9945-59fba5259919",
+          "ended_at": "2026-10-13T02:06:18.257Z",
+          "reason": "other",
+          "agents_spawned": 0,
+          "agents_completed": 0,
+          "modes_used": []
+        }
+      },
+      "budgetMs": 2000,
+      "claimedAt": "2026-10-13T02:06:24.173Z",
+      "runner": {
+        "attempt": 1,
+        "runnerNonce": "8abae6c2-5eca-43a6-ae18-d8661a96741b",
+        "phase": "terminal",
+        "deadlineAt": "2026-10-13T02:06:26.860Z"
+      },
+      "lastOutcomeCode": "completed",
+      "completedAt": "2026-10-13T02:06:24.969Z"
+    },
+    "spawn-next": {
+      "class": "best-effort",
+      "phase": "deferred-best-effort",
+      "status": "completed",
+      "attempts": 1,
+      "idempotencyKey": "408951e1348d4a381fd7b22db242636c91151ee01597146cf28243ae3875d0be",
+      "payload": {
+        "transcriptPath": "C:\\Users\\chaowu21\\.claude\\projects\\c--WorkSpace-jsonl-viewer\\8089185c-b3cc-4e9c-9945-59fba5259919.jsonl",
+        "cwd": "c:\\WorkSpace\\jsonl-viewer",
+        "reason": "other",
+        "input": {
+          "session_id": "8089185c-b3cc-4e9c-9945-59fba5259919",
+          "transcript_path": "C:\\Users\\chaowu21\\.claude\\projects\\c--WorkSpace-jsonl-viewer\\8089185c-b3cc-4e9c-9945-59fba5259919.jsonl",
+          "cwd": "c:\\WorkSpace\\jsonl-viewer",
+          "hook_event_name": "SessionEnd",
+          "reason": "other"
+        },
+        "initialTeamNames": [],
+        "openClawRouting": {}
+      },
+      "budgetMs": 2000,
+      "claimedAt": "2026-10-13T02:06:25.003Z",
+      "runner": {
+        "attempt": 1,
+        "runnerNonce": "60abe9ad-39b6-4f8b-b38a-dc78c1264135",
+        "phase": "terminal",
+        "deadlineAt": "2026-10-13T02:06:26.860Z"
+      },
+      "lastOutcomeCode": "completed",
+      "completedAt": "2026-10-13T02:06:25.825Z"
+    }
+  },
+  "owner": null,
+  "phase": "complete",
+  "recoverableFailure": {
+    "reason": "actions-settled",
+    "releasedAt": "2026-10-13T02:06:25.856Z",
+    "ownerNonce": "cab553b3-8cf7-4b24-a33a-0186a0e4335c"
+  },
+  "completion": {
+    "completedAt": "2026-10-13T02:06:25.856Z",
+    "terminalDigest": "b2fefd55ff3692eb1db0502b54de6c6f32ca7e71c2b7c504eb2df2ffe7fdd66e",
+    "terminalRevision": 78
+  }
+}

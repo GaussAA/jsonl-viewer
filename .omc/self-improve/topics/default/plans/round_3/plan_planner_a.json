@@ -1,0 +1,55 @@
+{
+  "plan_id": "round_3_planner_a",
+  "planner_id": "planner_a",
+  "round": 3,
+  "hypothesis": "Adding an outer non-structural skip to LineIndex.build (src/indexer/lineIndex.ts, outside-string path just before `const b = buf[i];` at L283) that, driven by a module-level Uint8Array(256) class table WCLS marking only '\"' '{' '[' '}' ']' '\\n' ' ' '\\t' '\\r' as 1, advances i over every run of class-0 bytes in one tight do/while (setting lineHasContent = true once per run) will raise the primary speedup from ~1.50 to ~1.62-1.68, because on top of the round-2 string loop the outside-string bytes are now a large share of cost and every class-0 byte currently pays a full outer iteration + inString test + switch dispatch only to set lineHasContent = true. Unlike round 2's failed skipLHC it is not gated on lineHasContent and whitespace is folded into the table, so it skips digits/true/false/null/':'/',' runs everywhere with no extra guard. This is the only change: the string branch, the switch cases, checkpoint modulo, record pushes, for-await loop, Buffer.from conversion and EOF handling are untouched.",
+  "approach_family": "architecture",
+  "critic_approved": true,
+  "target_files": ["src/indexer/lineIndex.ts"],
+  "steps": [
+    {
+      "step": 1,
+      "file": "src/indexer/lineIndex.ts",
+      "change": "Add ONE module-level constant immediately after the `import { INDEX_CHECKPOINT_INTERVAL, SCAN_CHUNK_SIZE, MAX_LINE_BYTES } from '../constants.ts';` line (L21) and before `export interface LineIndexOpts`, separated by blank lines:\n\n/**\n * build 的字符串外字节分类表：1 = 需交给状态机 switch 处理的字节\n * （'\"' '{' '[' '}' ']' '\\n' 以及空白 ' ' '\\t' '\\r'）；0 = 普通内容字节\n * （数字、true/false/null、':'、','、'\\\\' 等），它们在 switch 中只会落入 default\n * 并置 lineHasContent = true，故可整段跳过。\n */\nconst WCLS = new Uint8Array(256);\nfor (const c of [0x22, 0x7b, 0x5b, 0x7d, 0x5d, 0x0a, 0x20, 0x09, 0x0d]) {\n  WCLS[c] = 1;\n}\n\nExactly these nine byte values and no others. Do not export it, do not add any other table, helper, DataView, Uint32Array, or state variable."
+    },
+    {
+      "step": 2,
+      "file": "src/indexer/lineIndex.ts",
+      "change": "Inside `static async build`, in the per-chunk `while (i < n) {` loop, insert the following block between the closing `}` of the `if (inString) { ... continue; }` branch (L281-282, `continue;` / `}`) and the existing line `const b = buf[i];` (L283). Nothing else in the loop changes:\n\n        // 字符串外普通内容字节整段跳过：它们在 switch 中只会置 lineHasContent\n        if (WCLS[buf[i]] === 0) {\n          lineHasContent = true;\n          do {\n            i++;\n          } while (i < n && WCLS[buf[i]] === 0);\n          if (i >= n) break;\n        }\n\nRequirements: (a) the block is at the top level of the `while (i < n)` body, NOT inside the switch or the string `for (;;)`, so `break` exits the per-chunk while loop exactly as reaching `i === n` would and control continues at `totalBytes += n;`; (b) after the block, when i < n, buf[i] is guaranteed WCLS 1 and falls through to the unchanged `const b = buf[i]; switch (b) { ... } i++;`; (c) the string branch L247-282 (escaped carry, 4x '> 0x5c' reject, byte tail), the entire switch including its default case `if (b !== 0x20 && b !== 0x09 && b !== 0x0d) lineHasContent = true;`, the trailing `i++`, and all Chinese comments stay byte-for-byte identical; (d) use braces on the do/while body (oxlint/prettier style); do not rewrite the default case, do not reorder switch cases, do not add a quote-first check, nextCp counter, SWAR/Uint32Array string scanner, lazy/typed record storage, or chunk-iteration changes."
+    },
+    {
+      "step": 3,
+      "file": "src/indexer/lineIndex.ts",
+      "change": "Semantics review (no edits, executor must confirm each point holds):\n- Equivalence: a byte with WCLS 0 is not '\"' '{' '[' '}' ']' '\\n', so the old code sent it to `default`, and since it is also not 0x20/0x09/0x0d it set lineHasContent = true and did nothing else (no depth/inString/line/startOff/record change). Skipping a run of such bytes and setting lineHasContent = true once is therefore identical. Bytes > 0x7f (UTF-8 multibyte outside strings) and 0x5c outside strings are class 0 and behave as before.\n- lineHasContent: set to true before advancing, only when at least one class-0 byte exists (the guard `WCLS[buf[i]] === 0` with i < n guaranteed by the while header). It is reset only by the unchanged newline case.\n- Whitespace / CR: 0x20, 0x09, 0x0d are class 1, so they still go through the switch default and never set lineHasContent; whitespace-only lines and CRLF line ends ('\\r' before '\\n') are unchanged. '\\r' in mid-line is also unchanged.\n- Empty lines: '\\n' is class 1, so consecutive newlines each hit the newline case with lineHasContent false -> sawMultiline = true, as before.\n- Depth clamp: '}' and ']' are class 1, so `if (depth > 0) depth--;` is still the only depth decrement; '{' '[' still increment in the switch.\n- Strings: '\"' is class 1, so entering a string still goes through `case 0x22` (inString = true); the skip runs only when inString is false (the string branch `continue`s before reaching it).\n- Chunk-boundary resume: if a class-0 run reaches the end of a chunk, `break` exits with lineHasContent already true; the next chunk restarts at i = 0 with inString false and simply re-enters the skip or the switch. No new cross-chunk state exists. chunkBase/startOff arithmetic is untouched because the newline case still sees the original i.\n- EOF: the post-loop logic (startOff < totalBytes branch, dangling depth/inString branch, multiline / endsWithNewline derivation) is untouched and receives the same line, startOff, depth, inString, lineHasContent, sawMultiline values as before.\n- String chunks: Buffer.from(raw) unchanged; buf[i] for 0 <= i < n is always 0-255, so WCLS lookup is in range."
+    },
+    {
+      "step": 4,
+      "file": "src/indexer/lineIndex.ts",
+      "change": "Verification (no file edits): run `npm run typecheck` (tsc --noEmit), `npm run lint` (oxlint), `npx prettier --check src/indexer/lineIndex.ts` and `npm test`; all must pass, including src/indexer/__tests__ and src/perf/__tests__. Then run a differential check (scratch script outside the repo) of the new LineIndex.build against the branch-2fb4bdc build on: the sealed edge fixtures, compact JSONL with numbers/true/false/null at line start and line end, pretty multi-line records, CRLF files, whitespace-only and empty lines (leading, middle, trailing), unbalanced '}' / ']' at depth 0, string open at EOF with and without trailing newline, trailing backslash at EOF, escaped quotes, unicode/emoji outside and inside strings, unterminated final line; with chunk splits whole/1/2/7/64/1000 bytes, checkpointInterval 1/3/1024, array, async-iterable and string-chunk inputs. Compare checkpoints, totalBytes, totalLines, multiline, recordEndLines, recordEndOffsets and endsWithNewline for exact equality. Finally run `node scripts/benchmark-index-build.mjs` (sealed: must NOT be edited) at least 3 times, report each run's primary score and the median; correctness must be 1 in every run. Treat bimodal ratio distributions as contention-affected and re-run."
+    }
+  ],
+  "expected_outcome": {
+    "metric": "primary",
+    "estimated_impact": "+9-12% (primary ~1.62-1.68 vs current ~1.50); does not by itself reach the 1.8 target, which is expected from stacking one string scanner (swarU32 or rej4u32) in a later round",
+    "rationale": "After round 2's string loop, the outside-string path is still one outer iteration + inString test + switch dispatch per byte, and most non-string bytes in the fixture (numbers, literals, ':' ',') are class-0 content bytes that only set lineHasContent. A tight table-driven do/while removes that dispatch per byte. The round-3 scratch harness measured this exact candidate (skipCls) on top of the merged code at 1.119, 1.110, 1.095, 1.095 relative to the real build in the same process (raw 1.634/1.625/1.496/1.608), with mirror/real calibration 0.98-1.02, so sealed ~1.50 x 1.10 = ~1.65. It differs from round 2's failed skipLHC (0.869) by not waiting for lineHasContent (also skips line-start digits/literals, no extra guard) and by folding whitespace into the table; in the same runs skipLHC gave only 1.051/1.029 and the inline-compare skipCmp 1.066/1.039. Expected delta (~+0.15) is ~2-3x the ~±0.05-0.08 run-to-run noise, so the result is testable.",
+    "sub_score_expectations": {
+      "correctness": "1 (identical output on all edge fixtures)",
+      "cur_median_mb_s": "~900-950 MB/s (up from ~839)",
+      "ref_median_mb_s": "unchanged (~570 MB/s, reference not modified)"
+    }
+  },
+  "history_reference": {
+    "builds_on": "round_2_planner_a (merged 4x-reject string loop, 1.499) which makes outside-string bytes a larger share of cost; round_2 failure lesson for round_2_planner_b ('outer skip should only be tried stacked with a faster string loop'); research brief round_3 idea 1 (skipCls, highest-confidence single change, ~1.10x in 4/4 passes).",
+    "avoids": "Round 2's lineHasContent-gated skip form (skipLHC, 0.869) and the inline-compare form (skipCmp); bundling any string scanner (swarU32 / rej4u32 / DataView SWAR / 2-word SWAR) per H001; nextCp counter and quote-before-switch (neutral/negative in rounds 1-3); sync scanChunk kernel / index-based chunk loop (0.897 / 0.882, no effect); lazy recordEndLines and Float64Array record storage (5-20% slower); Buffer#indexOf skipping (slower, wrong for raw newlines in strings); Uint8Array class table inside strings (slower than '> 0x5c'); editing the sealed benchmark."
+  },
+  "critic_review": {
+    "h001_hypothesis_count": "pass",
+    "h002_family_streak": "pass",
+    "h003_intra_round_diversity": "pass",
+    "schema_valid": "pass",
+    "history_aware": "pass",
+    "verdict": "approved",
+    "rejection_reason": null
+  },
+  "architect_review": {}
+}

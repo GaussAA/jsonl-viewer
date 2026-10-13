@@ -246,6 +246,14 @@ export function createColumnLayout(deps: ColumnLayoutDeps): ColumnLayout {
     hamburger.title = open ? '收起记录目录' : '记录目录';
   }
   hamburger.addEventListener('click', () => setDrawer(!rootEl.classList.contains('list-open')));
+  // 点击遮罩关闭抽屉
+  backdrop.addEventListener('click', () => setDrawer(false));
+  // Esc 关闭抽屉
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && rootEl.classList.contains('list-open')) {
+      setDrawer(false);
+    }
+  });
   backdrop.addEventListener('click', () => setDrawer(false));
 
   /** 依据窄/宽容器收敛布局。 */

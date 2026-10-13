@@ -1,0 +1,12 @@
+{
+  "iteration": 4,
+  "goal_slug": "lineindex_build_throughput",
+  "winner": null,
+  "archived": [
+    "archive/round_4_executor_1"
+  ],
+  "regressions_detected": false,
+  "re_benchmark_score": null,
+  "status": "no_improvement",
+  "reason": "Only executor_1 (swarU32) ran; median 1.590 < best 1.623 (within ~4% noise but fails the no-regression check). plan_planner_b rejected by critic for H003 (same family as planner_a). No merge."
+}

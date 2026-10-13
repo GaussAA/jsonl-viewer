@@ -1,0 +1,27 @@
+{
+  "iteration": 2,
+  "goal_slug": "lineindex_build_throughput",
+  "winner": {
+    "executor_id": "executor_1",
+    "branch": "experiment/round_2_executor_1",
+    "hypothesis": "Replacing the per-byte inString handling in LineIndex.build (src/indexer/lineIndex.ts L247-251) with a dedicated string-skip inner loop whose body is a 4x-unrolled fast reject (skip while buf[i..i+3] are all > 0x5c), with backslash pairs consumed inline and `escaped` carried across chunk boundaries, will raise the primary speedup from 0.898 to ~1.40-1.59, because ~75% of fixture bytes are string bytes > 0x5c that currently each pay a full outer-loop iteration plus three state checks. This is the only change: the switch cases, checkpoint modulo, record pushes, for-await loop, Buffer.from conversion and EOF handling are untouched.",
+    "score_before": 0.898,
+    "score_after": 1.499,
+    "sub_scores": {
+      "correctness": 1,
+      "cur_median_mb_s": 838.97,
+      "ref_median_mb_s": 567.85,
+      "min_ratio": 1.205,
+      "max_ratio": 2.182
+    }
+  },
+  "archived": [
+    "archive/round_2_executor_2",
+    "archive/round_2_executor_3",
+    "archive/round_2_executor_1"
+  ],
+  "regressions_detected": false,
+  "re_benchmark_score": 1.499,
+  "status": "merged",
+  "reason": null
+}

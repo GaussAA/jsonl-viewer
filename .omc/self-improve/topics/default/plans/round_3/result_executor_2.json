@@ -1,0 +1,31 @@
+{
+  "executor_id": "executor_2",
+  "plan_id": "round_3_planner_b",
+  "benchmark_score": 1.587,
+  "benchmark_raw": {
+    "median_run": "{\"primary\":1.587,\"sub_scores\":{\"correctness\":1,\"cur_median_mb_s\":728.76,\"ref_median_mb_s\":455.31,\"min_ratio\":1.016,\"max_ratio\":3.604}}",
+    "runs": [
+      { "run": 1, "primary": 1.405, "correctness": 1, "cur_median_mb_s": 430.14, "ref_median_mb_s": 286.17, "min_ratio": 1.027, "max_ratio": 3.238, "dropped": true, "note": "contention: ref 286 MB/s (~half normal), ratios scattered 1.03-3.24 with no stable mode" },
+      { "run": 2, "primary": 1.609, "correctness": 1, "cur_median_mb_s": 733.56, "ref_median_mb_s": 470.68, "min_ratio": 0.992, "max_ratio": 2.041, "dropped": false },
+      { "run": 3, "primary": 1.562, "correctness": 1, "cur_median_mb_s": 665.58, "ref_median_mb_s": 426.49, "min_ratio": 0.799, "max_ratio": 1.938, "dropped": false },
+      { "run": 4, "primary": 1.587, "correctness": 1, "cur_median_mb_s": 728.76, "ref_median_mb_s": 455.31, "min_ratio": 1.016, "max_ratio": 3.604, "dropped": false },
+      { "run": 5, "primary": 1.556, "correctness": 1, "cur_median_mb_s": 446.56, "ref_median_mb_s": 299.48, "min_ratio": 0.811, "max_ratio": 2.193, "dropped": true, "note": "contention: ref 299 MB/s, wide scatter 0.81-2.19 in the first ~15 pairs" },
+      { "run": 6, "primary": 1.579, "correctness": 1, "cur_median_mb_s": 580.22, "ref_median_mb_s": 372.11, "min_ratio": 0.997, "max_ratio": 1.886, "dropped": false },
+      { "run": 7, "primary": 1.602, "correctness": 1, "cur_median_mb_s": 773.75, "ref_median_mb_s": 489.26, "min_ratio": 0.973, "max_ratio": 2.025, "dropped": false }
+    ],
+    "median_clean_runs": 1.587,
+    "median_all_runs": 1.579,
+    "lock": "mkdir lock /tmp/si-bench.lock.d (flock not available on this Git Bash host); every run acquired after 0s"
+  },
+  "status": "success",
+  "sub_scores": {
+    "correctness": 1,
+    "cur_median_mb_s": 728.76,
+    "ref_median_mb_s": 455.31,
+    "min_ratio": 1.016,
+    "max_ratio": 3.604
+  },
+  "failure_analysis": null,
+  "notes": "Median of the 5 clean runs is 1.587 (all 7 runs: 1.579), +5.9% vs current best 1.499. Plan estimate was ~1.58. This is only just above the ~±4% noise band, but all 5 clean runs (1.562-1.609) sit above 1.499 + 4% = 1.559; dropped run 5 (1.556) sits just under it and run 1 (1.405) is a contention outlier. The host was loaded the whole session: even clean runs had ref 372-489 MB/s against the nominal ~550, so absolute MB/s are low. The ratio is paired within each process and should be less affected. Every run's first ~12 pairs read lower (~1.2-1.4) before settling at ~1.55-1.70, which looks like warmup/JIT, not machine bimodality. Verification: tsc --noEmit 0, oxlint 0 (only the existing no-shadow warning in src/host/dataService.ts), prettier --check clean, node --test on src/indexer/__tests__ + src/perf/__tests__ 55/55 pass. Differential check vs the 2fb4bdc copy: 41256 cases, 0 mismatches (temp dir deleted). Sealed benchmark gate 306/306 in every run. git diff on scripts/benchmark-index-build.mjs is clean; the only changed file is src/indexer/lineIndex.ts. Commit e47fcb6 on experiment/round_3_executor_2.",
+  "timestamp": "2026-10-10T05:37:22Z"
+}

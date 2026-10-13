@@ -1,0 +1,63 @@
+{
+  "iteration": 3,
+  "researcher_id": "researcher",
+  "repo_analysis_summary": "LineIndex.build on improve/lineindex_build_throughput (2fb4bdc, src/indexer/lineIndex.ts L215-375) now has the round-2 string-skip loop (L247-282: escaped carry, 4x-unrolled 'buf[i..i+3] > 0x5c' reject, byte tail) inside a while(i < n) loop; the outside-string path (L283-325) is still one switch dispatch per byte, with line % interval and two record pushes per line at L302-307. Sealed score ~1.50 vs target 1.8. Round-3 scratch harness (outside the repo): C:/Users/chaowu21/AppData/Local/Temp/li-exp/exp4gen.mjs (candidate generator, each flag is one change on top of the merged rej4 code) + exp4run.mjs (runner) + sweep4.sh/sweep5.sh (one Node v24.21 process per candidate) + sweep4.log/sweep5.log (raw results). r3/src is a byte-identical copy of the branch file. Method: every candidate first passes a differential check against the sealed reference on all sealed edge fixtures plus extras (trailing backslash at EOF, escaped-quote runs, unicode/emoji, leading empty lines), splits whole/1/2/7/64/1000 bytes, intervals 1024/1/3, async-iterable input and string chunks; then 31 paired runs vs the reference (alternating order, median ratio). Every candidate below passed. Because absolute ratios drift with thermal/ESET load (the mirror ranged 1.35-1.56 across processes), each process also timed the real LineIndex.build, and results are reported as 'relative' = candidate ratio / real-build ratio in the same process. Calibration: mirror/real = 1.02, 1.00, 0.98, 1.01, so scratch transfers 1:1 and sealed score ~= 1.50 x relative. Key results: the outer non-structural skip now pays on its own once whitespace is in its class table (skipCls ~1.10x in all 4 passes); aligned Uint32Array SWAR and a word-wise 4x reject each give ~1.05x; skipCls stacked with either string scanner gives ~1.20-1.22x (sealed ~1.80-1.83, 1.644-1.820 measured raw). The stack is two changes, so under H001 it must land as two plans over two rounds: skipCls first (largest single gain), then one string scanner. DataView SWAR, 2-word SWAR, quote-before-switch and nextCp are neutral or negative.",
+  "ideas": [
+    {
+      "title": "Outer non-structural skip with whitespace in the class table (skipCls): skip runs of plain content bytes outside strings before the switch",
+      "source": "Scratch exp4gen.mjs candidate '(o2) skipCls'; sweep4.log passes 1-2, sweep5.log passes 3-4",
+      "evidence": "Relative to the real build in the same process: 1.119 (1.634/1.460), 1.110 (1.625/1.464), 1.095 (1.496/1.366), 1.095 (1.608/1.468); all four processes had unloaded real-build speeds (615-658 MB/s). Expected sealed score ~1.62-1.68. Single change: add a module-level table `const WCLS = new Uint8Array(256); for (const c of [0x22, 0x7b, 0x5b, 0x7d, 0x5d, 0x0a, 0x20, 0x09, 0x0d]) WCLS[c] = 1;` and, at the top of the outside-string path (just before `const b = buf[i];` at L283), `if (WCLS[buf[i]] === 0) { lineHasContent = true; do i++; while (i < n && WCLS[buf[i]] === 0); if (i >= n) break; }`. Correct because every byte with WCLS 0 would otherwise hit the switch default branch and only set lineHasContent = true; whitespace, quotes, brackets and newline still go through the unchanged switch. `break` leaves the per-chunk while loop exactly like reaching i === n. Differs from round 2's failed outer skip (0.869, skipLHC) in two ways: it is stacked on the faster string loop now merged, so outside-string bytes are a larger share of cost; and it does not wait for lineHasContent, so it also skips digits/true/false/null at line start and needs no extra guard. Same-run comparison of the variants: skipLHC (round-2 form) 1.051/1.029, inline-compare skipCmp 1.066/1.039, skipCls 1.119/1.110, so the table form is the one to plan. String branch, checkpoint logic, record pushes and for-await loop stay untouched.",
+      "approach_family": "architecture",
+      "confidence": "high",
+      "estimated_impact": "+9-12% (sealed ~1.62-1.68 from ~1.50)"
+    },
+    {
+      "title": "NEGATIVE: DataView SWAR string skip (swarDV) and 2-words-per-step SWAR (swarU32x2)",
+      "source": "Scratch candidates '(s1) swarDV', '(s3) swarU32x2', 'stack swarDV+skipLHC'",
+      "evidence": "swarDV alone: 0.975 (1.428/1.465), 0.924 (1.391/1.505): slower than the merged 4x reject on top of the current code. Its round-2 stack with skipLHC (1.54-1.68 raw) re-measured at 1.116/1.148 relative, below swarU32+skipCls (~1.22x). swarU32x2 (two u32 loads per step, combined test, single-word tail): 0.990, 0.994, i.e. the extra unroll costs as much as it saves, matching round 2's finding that 8x byte unroll was worse than 4x. Do not plan either.",
+      "approach_family": "optimization",
+      "confidence": "high",
+      "estimated_impact": "negative (-1% to -8%)"
+    },
+    {
+      "title": "NEUTRAL/NEGATIVE: nextCp counter and quote-check before the switch",
+      "source": "Scratch candidates '(n) nextCp', '(q) quoteFirst'; round-2 brief idea 2",
+      "evidence": "nextCp (`if (line === nextCp) { checkpoints.push(...); nextCp += interval; }` instead of line % interval): 1.002, 0.993; third neutral result across rounds 1-3, newlines are ~0.5% of bytes. quoteFirst (`if (b === 0x22) { inString = true; lineHasContent = true; i++; continue; }` before the switch): 0.999, 0.973; V8 already compiles the switch to a jump table, so peeling the most common case gains nothing. Usable only as an expected-null third plan if H003 needs another family; do not expect score movement.",
+      "approach_family": "other",
+      "confidence": "high",
+      "estimated_impact": "~0% (nextCp) / 0 to -3% (quoteFirst)"
+    },
+    {
+      "title": "STILL REJECTED from rounds 1-2: chunk-iteration reshaping, lazy/typed record storage, Buffer#indexOf skipping, table lookup inside strings",
+      "source": "iteration_history round_1.json and round_2.json; research_briefs round_2.json ideas 3, 4, 7",
+      "evidence": "Sync scanChunk kernel 0.897 and index-based array loop 0.882 (no effect: ~16 chunks per build). Lazy recordEndLines 5-10% slower, Float64Array record offsets 15-20% slower, so per-line record push cost is not a lever: the fixture has 87,725 lines in 16 MB (~190 bytes/line), and both pushes together are under 1% of bytes. Buffer#indexOf quote/newline skipping slower on short strings and wrong for raw newlines inside strings. Uint8Array class table inside strings slower than the plain '> 0x5c' compare. Not re-measured this round; listed so planners do not resubmit them.",
+      "approach_family": "infrastructure",
+      "confidence": "high",
+      "estimated_impact": "negative or neutral"
+    },
+    {
+      "title": "Aligned Uint32Array SWAR string skip (swarU32): replace the 4x byte reject with a word loop testing for 0x22/0x5c via haszero",
+      "source": "Scratch candidates '(s2) swarU32' and 'stack swarU32+skipCls'",
+      "evidence": "Alone, relative: 1.077, 1.014, 1.047, 1.063 (median ~1.055; pass 2 ran under load, real build 494 MB/s). Stacked with skipCls: 1.223 (raw 1.813), 1.213 (1.820), 1.239 (1.662), 1.170 (1.644, loaded process: real build 392 MB/s), i.e. sealed ~1.80-1.85. Single change, string branch only. Per chunk: `const base = buf.byteOffset; const aOff = (base + 3) & ~3; const wN = base + n > aOff ? (base + n - aOff) >> 2 : 0; const u32 = new Uint32Array(buf.buffer, aOff, wN);`. In the string loop, replace the 4x unrolled while with `if (((base + i) & 3) === 0) { let w = (base + i - aOff) >> 2; while (w < wN) { const x = u32[w]; const a = x ^ 0x22222222, c = x ^ 0x5c5c5c5c; if (((((a - 0x01010101) & ~a) | ((c - 0x01010101) & ~c)) & 0x80808080) !== 0) break; w++; } i = aOff - base + (w << 2); }` and keep the existing byte tail (`if (i >= n) break; const sb = buf[i++]; if (sb > 0x5c) continue; ...`). The byte tail walks to the next aligned word on its own, so unaligned subarrays, pooled Buffer.from(string) buffers and 1-byte splits pass; haszero is byte-wise so endianness does not matter, and a false positive only drops to the byte path. Differs from the DataView SWAR (negative, below) by using a typed-array element load instead of DataView.getUint32. Planned after idea 1 lands, this is the change expected to cross 1.8; planned alone this round, expect only ~1.55-1.60.",
+      "approach_family": "optimization",
+      "confidence": "medium",
+      "estimated_impact": "+1-8% alone (~1.05x); ~+10% on top of idea 1 (stack ~1.21x, sealed ~1.80-1.85)"
+    },
+    {
+      "title": "Word-wise 4x reject on the aligned Uint32Array (rej4u32): same structure as idea 2 but test each byte lane > 0x5c instead of haszero",
+      "source": "Scratch candidates '(s4) rej4u32' and 'stack rej4u32+skipCls'",
+      "evidence": "Alone, relative: 1.041, 1.050, 1.048, 1.048: the lowest variance of all string-scanner candidates. Stacked with skipCls: 1.193 (raw 1.613), 1.206 (raw 1.755). Same per-chunk u32 setup and alignment guard as idea 2; the word test is `if (((x & 0xff) <= 0x5c) || ((x >>> 8 & 0xff) <= 0x5c) || ((x >>> 16 & 0xff) <= 0x5c) || ((x >>> 24) <= 0x5c)) break;`. It keeps the merged code's '> 0x5c' semantics (stops on any byte <= 0x5c, not just quote/backslash), so the existing byte tail is unchanged. Same family and same slot as idea 2: plan one or the other, not both. Pick this one if the planner wants the smaller, more predictable delta; pick idea 2 for the slightly better stack (1.21x vs 1.20x, within noise).",
+      "approach_family": "optimization",
+      "confidence": "medium",
+      "estimated_impact": "+4-5% alone; ~+9% on top of idea 1 (stack ~1.20x)"
+    },
+    {
+      "title": "Weaker outer-skip forms: lineHasContent-gated table skip (skipLHC) and inline-compare skip (skipCmp)",
+      "source": "Scratch candidates '(o1) skipLHC', '(o3) skipCmp', 'stack swarU32+skipCmp', 'stack swarDV+skipLHC'",
+      "evidence": "skipLHC (round 2's form, `if (lineHasContent) { while (i < n && OCLS[buf[i]] === 0) i++; if (i >= n) break; }`): 1.051, 1.029. skipCmp (`c !== 0x22 && c !== 0x7b && c !== 0x5b && c !== 0x7d && c !== 0x5d && c > 0x20` chain): 1.066, 1.039; stacked with swarU32 1.173/1.136 vs 1.22x for swarU32+skipCls. Both correct, both positive now, but consistently 4-7 points below skipCls. Listed only as fallbacks if a table lookup is rejected for some reason; do not plan them alongside idea 1 (same hypothesis).",
+      "approach_family": "architecture",
+      "confidence": "medium",
+      "estimated_impact": "+3-6% (dominated by idea 1)"
+    }
+  ]
+}
