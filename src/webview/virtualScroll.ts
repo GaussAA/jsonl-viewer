@@ -1032,8 +1032,28 @@ function bindCtxGlobalOnce(): void {
   document.addEventListener('contextmenu', () => {
     if (ctxEl) ctxEl.hidden = true;
   });
+  // Esc 关闭菜单，方向键导航
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && ctxEl) ctxEl.hidden = true;
+    if (!ctxEl || ctxEl.hidden) return;
+    if (e.key === 'Escape') {
+      ctxEl.hidden = true;
+      return;
+    }
+    // 方向键在菜单项间导航
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      const items = Array.from(ctxEl.querySelectorAll<HTMLElement>('[role="menuitem"]'));
+      if (items.length === 0) return;
+      const current = document.activeElement as HTMLElement;
+      const idx = items.indexOf(current);
+      if (e.key === 'ArrowDown') {
+        const next = items[idx + 1] || items[0];
+        next.focus();
+      } else {
+        const prev = items[idx - 1] || items[items.length - 1];
+        prev.focus();
+      }
+    }
   });
   window.addEventListener('blur', () => {
     if (ctxEl) ctxEl.hidden = true;
@@ -1048,10 +1068,13 @@ function openContextMenu(x: number, y: number, items: CtxItem[]): void {
   bindCtxGlobalOnce();
   const el = ensureCtx();
   el.textContent = '';
+  el.setAttribute('role', 'menu');
+  let firstItem: HTMLElement | null = null;
   for (const it of items) {
     if (it.sep) {
       const s = document.createElement('div');
       s.className = 'jlv-ctx-sep';
+      s.setAttribute('role', 'separator');
       el.appendChild(s);
       continue;
     }
@@ -1059,11 +1082,13 @@ function openContextMenu(x: number, y: number, items: CtxItem[]): void {
     b.type = 'button';
     b.className = 'jlv-ctx-item';
     b.textContent = it.label ?? '';
+    b.setAttribute('role', 'menuitem');
     b.addEventListener('click', () => {
       el.hidden = true;
       it.run?.();
     });
     el.appendChild(b);
+    if (!firstItem) firstItem = b;
   }
   el.hidden = false;
   const w = el.offsetWidth || 160;
@@ -1078,6 +1103,8 @@ function openContextMenu(x: number, y: number, items: CtxItem[]): void {
     el.style.left = `${Math.max(0, Math.min(x, window.innerWidth - w2 - 4))}px`;
     el.style.top = `${Math.max(0, Math.min(y, window.innerHeight - h2 - 4))}px`;
   });
+  // 打开时聚焦第一个菜单项
+  firstItem?.focus();
 }
 
 /** 把任意 JSON 值格式化为多行文本。 */
