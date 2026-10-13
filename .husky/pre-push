@@ -40,7 +40,7 @@ node node_modules/typescript/bin/tsc --noEmit
 NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]')"
 if [ "$NODE_MAJOR" -ge 22 ]; then
   echo "[pre-push] node --test（Node $(node -v)）"
-  node --experimental-transform-types --test "src/**/*.test.ts"
+  node --import ./scripts/register-loaders.mjs --experimental-transform-types --test "src/**/*.test.ts"
 else
   echo "[pre-push] 跳过单测：当前 node $(node -v) < 22，不支持 --experimental-transform-types（CI 会执行）"
 fi
