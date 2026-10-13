@@ -986,7 +986,7 @@ export class DataService {
 
       this.badLines.delete(line);
       this.history.execute({
-        id: `h${Date.now()}`,
+        id: this.history.nextId(),
         op: { kind: 'edit', line, before: beforeText, after: text },
         label: `编辑第 ${line + 1} 行`,
         lines: 1,
@@ -1222,7 +1222,7 @@ export class DataService {
       const op: HistoryOp = { kind: 'delete', line, before: removedText };
       const { label, lines } = historyLabel(op);
       this.history.execute({
-        id: `h${Date.now()}`,
+        id: this.history.nextId(),
         op,
         label,
         lines,
@@ -1331,7 +1331,7 @@ export class DataService {
       const op: HistoryOp = { kind: 'insert', line: at, text };
       const { label, lines } = historyLabel(op);
       this.history.execute({
-        id: `h${Date.now()}`,
+        id: this.history.nextId(),
         op,
         label,
         lines,
@@ -2117,7 +2117,7 @@ export class DataService {
       const op: HistoryOp = { kind: 'deleteMany', ranges };
       const { label, lines } = historyLabel(op);
       this.history.execute({
-        id: `h${Date.now()}`,
+        id: this.history.nextId(),
         op,
         label,
         lines,
@@ -2452,7 +2452,7 @@ export class DataService {
       const op: HistoryOp = { kind: 'replaceAll', changes };
       const { label, lines } = historyLabel(op);
       this.history.execute({
-        id: `h${Date.now()}`,
+        id: this.history.nextId(),
         op,
         label,
         lines,

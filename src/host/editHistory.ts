@@ -137,6 +137,11 @@ export class EditHistory {
     return this.entries.findIndex((e) => e.id === id);
   }
 
+  /** 生成唯一的历史 ID（递增序列，保证单调性）。 */
+  nextId(): string {
+    return `h${++this.seq}`;
+  }
+
   /**
    * 记入一步操作。
    *
