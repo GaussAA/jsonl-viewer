@@ -10,6 +10,7 @@
  * 一次点击可能撤销十几步，用户需要先知道代价。
  */
 
+import { setupFocusTrap } from './focusTrap.ts';
 import { formatBytes } from './editLogic.ts';
 import type { HistoryEntryView, HistoryPayload, HistoryResultPayload } from '../protocol/rpc.ts';
 
@@ -53,6 +54,7 @@ const KIND_LABEL: Record<HistoryEntryView['kind'], string> = {
 export function createHistoryPanel(deps: HistoryPanelDeps): HistoryPanelController {
   let opened = false;
   let busy = false;
+  let trapDispose: (() => void) | undefined;
 
   const backdrop = document.createElement('div');
   backdrop.className = 'jlv-hist-backdrop';
@@ -240,6 +242,9 @@ export function createHistoryPanel(deps: HistoryPanelDeps): HistoryPanelControll
     requestAnimationFrame(() => {
       backdrop.classList.add('open');
       panel.classList.add('open');
+      // 设置焦点陷阱
+      trapDispose?.();
+      trapDispose = setupFocusTrap({ container: panel, onClose: close }).dispose;
     });
     void refresh();
   }
@@ -247,6 +252,8 @@ export function createHistoryPanel(deps: HistoryPanelDeps): HistoryPanelControll
   function close(): void {
     if (!opened) return;
     opened = false;
+    trapDispose?.();
+    trapDispose = undefined;
     backdrop.classList.remove('open');
     panel.classList.remove('open');
     setTimeout(
@@ -263,6 +270,9 @@ export function createHistoryPanel(deps: HistoryPanelDeps): HistoryPanelControll
     open,
     close,
     isOpen: () => opened,
-    dispose: () => document.removeEventListener('keydown', onKeyDown),
+    dispose: () => {
+      document.removeEventListener('keydown', onKeyDown);
+      trapDispose?.();
+    },
   };
 }

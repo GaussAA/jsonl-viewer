@@ -20,6 +20,7 @@
  * 整行编辑 —— 两种入口各司其职，比让一个输入框猜意图可靠得多。
  */
 
+import { setupFocusTrap } from './focusTrap.ts';
 import {
   initialFieldText,
   isFieldEditableKind,
@@ -71,6 +72,7 @@ function preview(value: unknown): string {
 export function createFieldPanel(deps: FieldPanelDeps): FieldPanelController {
   let opened = false;
   let busy = false;
+  let trapDispose: (() => void) | undefined;
   let closeTimer: ReturnType<typeof setTimeout> | undefined;
   let currentSegs: readonly PathSeg[] = [];
   /** 浮层打开时的原值（勾选「应用到全部」时作为批量匹配基准上交）。 */
@@ -321,6 +323,9 @@ export function createFieldPanel(deps: FieldPanelDeps): FieldPanelController {
     requestAnimationFrame(() => {
       backdrop.classList.add('open');
       panel.classList.add('open');
+      // 设置焦点陷阱
+      trapDispose?.();
+      trapDispose = setupFocusTrap({ container: panel, onClose: close }).dispose;
     });
   }
 
@@ -328,6 +333,8 @@ export function createFieldPanel(deps: FieldPanelDeps): FieldPanelController {
     if (!opened) return;
     opened = false;
     busy = false;
+    trapDispose?.();
+    trapDispose = undefined;
     backdrop.classList.remove('open');
     panel.classList.remove('open');
     if (closeTimer) clearTimeout(closeTimer);
@@ -356,6 +363,7 @@ export function createFieldPanel(deps: FieldPanelDeps): FieldPanelController {
     isOpen: () => opened,
     dispose: () => {
       document.removeEventListener('keydown', onKeyDown);
+      trapDispose?.();
       if (closeTimer) clearTimeout(closeTimer);
     },
   };

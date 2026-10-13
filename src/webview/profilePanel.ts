@@ -18,6 +18,7 @@
  * 且列表加标记 —— 宁可显得啰嗦，也不让一份残缺结论被当成结论。
  */
 
+import { setupFocusTrap } from './focusTrap.ts';
 import { formatBytes } from './editLogic.ts';
 import {
   fieldHasQualityIssue,
@@ -51,6 +52,7 @@ export interface ProfilePanelController {
 
 export function createProfilePanel(deps: ProfilePanelDeps): ProfilePanelController {
   let opened = false;
+  let trapDispose: (() => void) | undefined;
   let current: ProfileResult | undefined;
   let sortMode: ProfileSort = 'presence';
   let closeTimer: ReturnType<typeof setTimeout> | undefined;
@@ -230,6 +232,9 @@ export function createProfilePanel(deps: ProfilePanelDeps): ProfilePanelControll
     requestAnimationFrame(() => {
       backdrop.classList.add('open');
       panel.classList.add('open');
+      // 设置焦点陷阱
+      trapDispose?.();
+      trapDispose = setupFocusTrap({ container: panel, onClose: close }).dispose;
     });
     // 首次打开自动扫一次：用户点「数据画像」就是想看数据长什么样，
     // 再让他点一次「开始扫描」是多余的一道手续。
@@ -240,6 +245,8 @@ export function createProfilePanel(deps: ProfilePanelDeps): ProfilePanelControll
   function close(): void {
     if (!opened) return;
     opened = false;
+    trapDispose?.();
+    trapDispose = undefined;
     backdrop.classList.remove('open');
     panel.classList.remove('open');
     if (closeTimer) clearTimeout(closeTimer);
@@ -270,6 +277,7 @@ export function createProfilePanel(deps: ProfilePanelDeps): ProfilePanelControll
       status.textContent = `正在扫描整个文件… ${pct}%（已读 ${formatBytes(processedBytes)} / ${formatBytes(totalBytes)}）`;
     },
     dispose() {
+      trapDispose?.();
       if (closeTimer) clearTimeout(closeTimer);
       backdrop.remove();
     },

@@ -41,6 +41,12 @@ export const CSS_TEXT = `
   --jlv-info: var(--vscode-charts-blue, #88c0ff);
   --jlv-key-dim: var(--vscode-charts-yellow, #c8a86a);
 
+  /* 补充定义（之前被引用但未定义） */
+  --jlv-error: var(--vscode-errorForeground, #f48771);
+  --jlv-muted: var(--vscode-descriptionForeground, #8a8a8a);
+  --jlv-surface-2: rgba(128, 128, 128, 0.06);
+  --jlv-input-bg: transparent;
+
   /* 间距刻度 */
   --jlv-space-1: 4px;
   --jlv-space-2: 8px;
@@ -101,9 +107,15 @@ body {
  * （并排双栏时左右面板各自独立缩放、不同尺寸的嵌入口也有相同的降级行为）。 */
 #app { container-type: inline-size; }
 
-/* 系统减弱动效：全部关闭 */
+/* 系统减弱动效：全部关闭（包括延迟），加载圈改静态 */
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+  *, *::before, *::after {
+    animation-duration: .01ms !important;
+    animation-delay: 0s !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+  }
+  .jlv-progress-ring { animation: none !important; border-top-color: var(--vscode-progressBar-background, #0e639c); }
 }
 
 /* 窄容器（宽度 < NARROW_BREAKPOINT_PX）：off-canvas 抽屉 —— 详情常驻为主视图；目录左栏收进左上角「汉堡菜单」，
@@ -449,7 +461,8 @@ body {
 .jlv-list-wrap {
   flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden;
   display: flex; flex-direction: column; gap: 6px;
-  padding: 2px 6px 2px 0;
+  padding: 2px 6px 2px 4px; /* 左侧留 4px 避免选中态发光被切 */
+  margin-left: -4px;        /* 平移回原位，保持列表边缘对齐 */
 }
 
 /* 记录卡片（原型 .record-card） */
@@ -469,19 +482,16 @@ body {
   opacity: 0;
   transition: transform .16s var(--jlv-ease), opacity .16s var(--jlv-ease);
 }
-.jlv-record-card:hover { background: rgba(255,255,255,0.032); border-color: rgba(255,255,255,0.09); transform: translateX(1px); }
-/* 选中：整张卡片背景变亮的高亮（实色蓝底 + 亮边框 + 左高亮条 + 外发光），保留语义配色并整体提亮 */
+.jlv-record-card:hover { background: rgba(255,255,255,0.032); border-color: rgba(255,255,255,0.09); }
+/* 选中：背景提亮 + 左高亮条 + 细边框（不用外发光，避免溢出被裁） */
 .jlv-record-card.selected {
   background: color-mix(in srgb, var(--jlv-info) 26%, var(--jlv-panel-bg));
   color: var(--jlv-fg);
-  border: 1px solid var(--jlv-info);
+  border: 1px solid color-mix(in srgb, var(--jlv-info) 65%, transparent);
   border-radius: 10px;
   border-left: 3px solid var(--jlv-info);
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--jlv-info) 50%, transparent),
-    0 0 18px color-mix(in srgb, var(--jlv-info) 42%, transparent);
 }
-/* 保留各 token 的语义色，但整体提亮，让选中项在亮蓝底上更醒目 */
-.jlv-record-card.selected /* 详情内查找条（Ctrl+F）：只在需要时占据一条窄栏 */
+/* 详情内查找条（Ctrl+F）：只在需要时占据一条窄栏 */
 .jlv-find {
   display: flex;
   align-items: center;
@@ -541,10 +551,10 @@ mark.jlv-hit {
 }
 
 .jlv-card-preview { color: #ffffff; filter: brightness(1.35); }
-.jlv-record-card.selected .jlv-card-preview .str { color: var(--jlv-string); }
-.jlv-record-card.selected .jlv-card-preview .num { color: var(--jlv-number); }
-.jlv-record-card.selected .jlv-card-preview .bool { color: var(--jlv-bool); }
-.jlv-record-card.selected .jlv-card-preview .key { color: var(--jlv-key); }
+.jlv-card-preview .str { color: var(--jlv-string); }
+.jlv-card-preview .num { color: var(--jlv-number); }
+.jlv-card-preview .bool { color: var(--jlv-bool); }
+.jlv-card-preview .key { color: var(--jlv-key-dim); }
 /* 类型徽章：提亮保留取色 */
 .jlv-record-card.selected .jlv-type-badge { filter: brightness(1.3); }
 .jlv-record-card.selected .jlv-type-badge.object { color: var(--jlv-good); }
@@ -584,7 +594,6 @@ mark.jlv-hit {
   font-size: 10px; font-family: var(--jlv-mono); color: var(--jlv-dim);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 1.5;
 }
-.jlv-record-card.selected .jlv-card-preview { color: var(--jlv-selection-fg); }
 .jlv-card-preview .str { color: var(--jlv-string); }
 .jlv-card-preview .num { color: var(--jlv-number); }
 .jlv-card-preview .bool { color: var(--jlv-bool); }
@@ -745,8 +754,8 @@ mark.jlv-hit {
 /* 树节点容器（作为 flex 子项必须 min-width:0 否则会撑破父级宽度约束） */
 .jlv-tree-node { min-width: 0; max-width: 100%; box-sizing: border-box; }
 
-/* 切换记录：字段逐条出现（舒缓错峰） */
-.jlv-tree-body.animating .jlv-tree-row { animation: jlv-row-in 420ms var(--jlv-ease) backwards; }
+/* 切换记录：字段逐条出现（240ms + 20ms 错峰）*/
+.jlv-tree-body.animating .jlv-tree-row { animation: jlv-row-in 240ms var(--jlv-ease) backwards; }
 .jlv-tree-row {
   display: flex; align-items: flex-start; gap: 4px;
   padding: 2px 6px; border-radius: 5px;
@@ -1306,7 +1315,7 @@ mark.jlv-hit {
  * 文件变更 / 错误横幅（右上角浮层）
  * ============================================================ */
 .jlv-banner {
-  position: fixed; top: var(--jlv-space-3); right: var(--jlv-space-3); z-index: 30;
+  position: fixed; top: var(--jlv-space-3); right: var(--jlv-space-3); z-index: 90;
   max-width: min(420px, calc(100vw - 24px));
   display: flex; align-items: flex-start; gap: var(--jlv-space-2);
   padding: var(--jlv-space-2) var(--jlv-space-3);

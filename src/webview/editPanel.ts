@@ -13,6 +13,7 @@
  * 提交端点不同，交互完全一致，没必要造两套浮层。
  */
 
+import { setupFocusTrap } from './focusTrap.ts';
 import {
   describeEditFailure,
   editCostWarning,
@@ -134,6 +135,9 @@ export function createEditPanel(deps: EditPanelDeps): EditPanelController {
   panel.append(head, hint, input, error, foot);
   backdrop.appendChild(panel);
 
+  /* ---------------- 焦点陷阱（M11 可访问性增强） ---------------- */
+  let trapDispose: (() => void) | undefined;
+
   /* ---------------- 内部动作 ---------------- */
 
   function showError(message: string): void {
@@ -162,6 +166,8 @@ export function createEditPanel(deps: EditPanelDeps): EditPanelController {
     opened = false;
     submitting = false;
     clearError();
+    trapDispose?.();
+    trapDispose = undefined;
     panel.classList.remove('open');
     backdrop.classList.remove('open');
     // 关闭走快速淡出（设计体系 §3.6：100ms），结束后再真正隐藏，避免打断过渡。
@@ -271,6 +277,11 @@ export function createEditPanel(deps: EditPanelDeps): EditPanelController {
       void panel.offsetWidth;
       panel.classList.add('open');
       backdrop.classList.add('open');
+
+      // 设置焦点陷阱（M11 可访问性增强）
+      trapDispose?.();
+      trapDispose = setupFocusTrap({ container: panel, onClose: close, noAutoFocus: true }).dispose;
+
       input.focus();
       input.setSelectionRange(input.value.length, input.value.length);
     },

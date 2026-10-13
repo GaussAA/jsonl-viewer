@@ -380,7 +380,7 @@ export function createDetailTree(
     body.classList.remove('animating');
     const rows = body.querySelectorAll<HTMLElement>('.jlv-tree-row');
     rows.forEach((r, i) => {
-      r.style.animationDelay = `${Math.min(i, 10) * 30}ms`;
+      r.style.animationDelay = `${Math.min(i, 10) * 20}ms`; // 20ms 错峰，总长约 440ms
     });
     void body.offsetWidth;
     body.classList.add('animating');

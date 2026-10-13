@@ -21,6 +21,7 @@
  * 不编造摘要，就不会有摘要是错的。
  */
 
+import { setupFocusTrap } from './focusTrap.ts';
 import { formatBytes } from './editLogic.ts';
 import type { BadLinesPayload } from '../protocol/rpc.ts';
 
@@ -57,6 +58,7 @@ export interface BadLinesPanelController {
 
 export function createBadLinesPanel(deps: BadLinesPanelDeps): BadLinesPanelController {
   let opened = false;
+  let trapDispose: (() => void) | undefined;
   /** 最近一次渲染的数据（「全选」按钮要用）。 */
   let current: BadLinesPayload | undefined;
   let closeTimer: ReturnType<typeof setTimeout> | undefined;
@@ -239,6 +241,9 @@ export function createBadLinesPanel(deps: BadLinesPanelDeps): BadLinesPanelContr
     requestAnimationFrame(() => {
       backdrop.classList.add('open');
       panel.classList.add('open');
+      // 设置焦点陷阱
+      trapDispose?.();
+      trapDispose = setupFocusTrap({ container: panel, onClose: close }).dispose;
     });
     void refresh();
   }
@@ -246,6 +251,8 @@ export function createBadLinesPanel(deps: BadLinesPanelDeps): BadLinesPanelContr
   function close(): void {
     if (!opened) return;
     opened = false;
+    trapDispose?.();
+    trapDispose = undefined;
     backdrop.classList.remove('open');
     panel.classList.remove('open');
     if (closeTimer) clearTimeout(closeTimer);
