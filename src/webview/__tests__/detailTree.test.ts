@@ -577,4 +577,115 @@ describe('createDetailTree（视图层覆盖率补强）', () => {
     assert.strictEqual(count.textContent, '无命中');
     assert.strictEqual(h.tree.root.querySelectorAll('mark.jlv-hit').length, 0);
   });
+
+  /* ------------------------- 键盘导航（ARIA tree） ------------------------- */
+
+  type KbCtor = new (t: string, o?: unknown) => Event;
+  const press = (el: HTMLElement, key: string): Event => {
+    const Kb = (globalThis as unknown as { window: { KeyboardEvent: KbCtor } }).window
+      .KeyboardEvent;
+    const ev = new Kb('keydown', { key, bubbles: true, cancelable: true });
+    el.dispatchEvent(ev);
+    return ev;
+  };
+  const containerRows = (h: Harness): HTMLElement[] =>
+    rows(h).filter((r) => r.getAttribute('tabindex') === '0');
+
+  it('方向键 ↓/↑ 在容器行间移动焦点，并在两端回绕', () => {
+    const h = makeTree();
+    h.tree.showRecord({ a: { x: 1 }, b: { y: 2 }, c: [1] });
+    const cs = containerRows(h);
+    assert.strictEqual(cs.length, 3);
+
+    cs[0].focus();
+    assert.strictEqual(press(cs[0], 'ArrowDown').defaultPrevented, true);
+    assert.strictEqual(globalThis.document.activeElement, cs[1]);
+    press(cs[1], 'ArrowDown');
+    assert.strictEqual(globalThis.document.activeElement, cs[2]);
+    press(cs[2], 'ArrowDown');
+    assert.strictEqual(globalThis.document.activeElement, cs[0], '末尾 ↓ 回绕到首行');
+
+    press(cs[0], 'ArrowUp');
+    assert.strictEqual(globalThis.document.activeElement, cs[2], '首行 ↑ 回绕到末行');
+    press(cs[2], 'ArrowUp');
+    assert.strictEqual(globalThis.document.activeElement, cs[1]);
+  });
+
+  it('Home / End 跳到第一 / 最后一个可聚焦行', () => {
+    const h = makeTree();
+    h.tree.showRecord({ a: { x: 1 }, b: { y: 2 }, c: [1] });
+    const cs = containerRows(h);
+    cs[1].focus();
+    press(cs[1], 'End');
+    assert.strictEqual(globalThis.document.activeElement, cs[2]);
+    press(cs[2], 'Home');
+    assert.strictEqual(globalThis.document.activeElement, cs[0]);
+  });
+
+  it('→ 展开折叠的容器行，← 折叠已展开的容器行；状态不符时不处理', async () => {
+    const h = makeTree();
+    h.tree.showRecord({ nested: { a: 1 } });
+    const row = firstContainerRow(h);
+    row.focus();
+
+    // 已折叠时 ← 不处理
+    assert.strictEqual(press(row, 'ArrowLeft').defaultPrevented, false);
+
+    assert.strictEqual(press(row, 'ArrowRight').defaultPrevented, true);
+    await wait(30);
+    assert.strictEqual(row.getAttribute('aria-expanded'), 'true', '→ 展开');
+
+    // 已展开时 → 不处理
+    assert.strictEqual(press(row, 'ArrowRight').defaultPrevented, false);
+
+    assert.strictEqual(press(row, 'ArrowLeft').defaultPrevented, true);
+    await wait(300);
+    assert.strictEqual(row.getAttribute('aria-expanded'), 'false', '← 折叠');
+  });
+
+  it('→/← 在焦点不在任何容器行上时不处理', () => {
+    const h = makeTree();
+    h.tree.showRecord({ nested: { a: 1 } });
+    const row = firstContainerRow(h);
+    (globalThis.document.activeElement as HTMLElement | null)?.blur();
+    assert.strictEqual(press(row, 'ArrowRight').defaultPrevented, false);
+    assert.strictEqual(press(row, 'ArrowLeft').defaultPrevented, false);
+  });
+
+  it('没有可聚焦行（全是标量）时方向键安全无操作', () => {
+    const h = makeTree();
+    h.tree.showRecord({ a: 1, b: 'x' });
+    const row = rows(h)[0];
+    assert.strictEqual(press(row, 'ArrowDown').defaultPrevented, false);
+  });
+
+  it('Enter / Space 在树行上触发展开折叠；在按钮上不拦截', async () => {
+    const h = makeTree();
+    h.tree.showRecord({ nested: { a: 1 } });
+    const row = firstContainerRow(h);
+    row.focus();
+
+    assert.strictEqual(press(row, 'Enter').defaultPrevented, true);
+    await wait(30);
+    assert.strictEqual(row.getAttribute('aria-expanded'), 'true', 'Enter 展开');
+
+    assert.strictEqual(press(row, ' ').defaultPrevented, true);
+    await wait(300);
+    assert.strictEqual(row.getAttribute('aria-expanded'), 'false', 'Space 折叠');
+
+    const btn = tool(h, '复制 JSON');
+    assert.strictEqual(press(btn, 'Enter').defaultPrevented, false, '按钮自行处理');
+  });
+
+  it('Enter 在「加载更多」上触发加载', () => {
+    const h = makeTree();
+    h.tree.showRecord({ big: Array.from({ length: LARGE_ARRAY_PREVIEW * 3 }, (_, i) => i) });
+    const row = firstContainerRow(h);
+    row.click();
+    const more = h.tree.root.querySelector<HTMLElement>('.jlv-load-more');
+    if (!more) return; // 首屏不足一页时无入口
+    const rowsBefore = rows(h).length;
+    assert.strictEqual(press(more, 'Enter').defaultPrevented, true);
+    assert.ok(rows(h).length > rowsBefore, '加载后行数增长');
+  });
 });
