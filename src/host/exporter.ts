@@ -15,7 +15,7 @@
 import { createWriteStream } from 'node:fs';
 import { rename, unlink } from 'node:fs/promises';
 import type { LineIndex } from '../indexer/lineIndex.ts';
-import type { ByteReader } from '../parser/jsonParser.ts';
+import type { ByteReader } from '../parser/types.ts';
 
 /** 导出临时文件后缀（与目标文件**同目录**，否则 rename 跨分区不具原子性）。 */
 export const EXPORT_TEMP_SUFFIX = '.jlv-export-tmp';

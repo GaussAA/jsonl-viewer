@@ -10,6 +10,7 @@
 import type { FileHandle } from 'node:fs/promises';
 import { LineIndex } from '../indexer/lineIndex.ts';
 import { MAX_LINE_BYTES } from '../constants.ts';
+import type { ByteReader } from './types.ts';
 
 /** 解析单行的结果。合法行返回 value；非法行返回 error（含定位）。 */
 export type JsonParseResult =
@@ -40,12 +41,6 @@ export interface ReadRecordOpts {
 export interface ReadBatchOpts extends ReadRecordOpts {
   /** 中断回调：返回 true 则提前终止剩余行（配合宿主 CancelToken 做真正的可中断）。 */
   shouldCancel?: () => boolean;
-}
-
-/** 对一行的任意字节区间做随机读的抽象（底层可为文件句柄或内存缓冲区）。 */
-export interface ByteReader {
-  readBytes(start: number, length: number): Promise<Buffer>;
-  close?(): Promise<void>;
 }
 
 const LF = 10;

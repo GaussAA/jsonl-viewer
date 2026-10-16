@@ -15,7 +15,8 @@
 
 import { stat } from 'node:fs/promises';
 import { LineIndex, applyIndexOps, tailAppendOp, type IndexDeltaOp } from '../indexer/lineIndex.ts';
-import type { ByteReader, ReadRecordOpts } from '../parser/jsonParser.ts';
+import type { ByteReader } from '../parser/types.ts';
+import type { ReadRecordOpts } from '../parser/jsonParser.ts';
 import {
   openFileReader,
   parseJsonLine,
@@ -2115,12 +2116,12 @@ export class DataService {
         this.badLines.remapAfterDeletes(wanted);
       }
       const op: HistoryOp = { kind: 'deleteMany', ranges };
-      const { label, lines } = historyLabel(op);
+      const { label, lines: affectedLines } = historyLabel(op);
       this.history.execute({
         id: this.history.nextId(),
         op,
         label,
-        lines,
+        lines: affectedLines,
         bytesDelta: res.bytesDelta,
         at: Date.now(),
         bytes: historyOpBytes(op),

@@ -25,7 +25,7 @@
 
 import { ARRAY_RECORD_KEY, SCALAR_RECORD_KEY, fieldTypeOf } from '../core/query.ts';
 import { parseJsonLine, scanRecords } from '../parser/jsonParser.ts';
-import type { ByteReader } from '../parser/jsonParser.ts';
+import type { ByteReader } from '../parser/types.ts';
 import type { LineIndex } from '../indexer/lineIndex.ts';
 
 /** 每字段保留的 top 值数量。 */

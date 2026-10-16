@@ -74,6 +74,10 @@ jobs:
       - name: Build (minified)
         run: pnpm build
 
+      - name: Verify build artifacts
+        run: node --import ./scripts/register-loaders.mjs --experimental-transform-types --test src/webview/__tests__/dist-product.test.ts
+        # 守卫：CSS 必须内联进 webview.js，禁止抽成独立的 dist/webview.css（v1.11.0 回归）
+
       - name: Package VSIX
         run: npx @vscode/vsce package
         # vsce 默认把 VSIX 放在仓库根目录，文件名 = publisher-name-version.vsix
