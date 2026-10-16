@@ -709,6 +709,7 @@ async function trySync(fh: FileHandle, want: boolean): Promise<boolean> {
     await fh.sync();
     return true;
   } catch {
+    // 少数文件系统不支持 fsync（如某些网络文件系统），降级为未同步
     return false;
   }
 }

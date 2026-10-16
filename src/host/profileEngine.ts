@@ -112,6 +112,7 @@ function valueText(v: unknown): string {
     try {
       t = JSON.stringify(v) ?? String(v);
     } catch {
+      // 循环引用等无法序列化时回退到 String()
       t = String(v);
     }
   } else t = String(v);

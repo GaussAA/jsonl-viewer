@@ -74,12 +74,13 @@ export function createLogger(opts: LoggerOptions): Logger {
         ...fields,
       });
     } catch {
+      // fields 序列化失败时回退到基础日志（不含 fields）
       line = JSON.stringify({ ts: new Date(now()).toISOString(), level, msg });
     }
     try {
       opts.sink(line);
     } catch {
-      /* 写日志失败不得影响业务 */
+      // 日志写入失败不得影响业务逻辑，静默忽略
     }
   }
 
