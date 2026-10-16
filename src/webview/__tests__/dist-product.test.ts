@@ -133,3 +133,25 @@ describe('dist 产物（minify IIFE）字段编辑链路', () => {
     }
   );
 });
+
+/**
+ * 样式内联守卫（静态检查，无 jsdom，默认即运行）。
+ *
+ * 回归来源：styles.css 抽离后 build.mjs 未配 `.css` text loader，esbuild 走缺省 css loader
+ * 把样式抽成 dist/webview.css（webview 从不加载），CSS_TEXT 为空 → 界面完全无样式。
+ * 单测用自定义 Node loader 读 CSS，看不到这类构建差异，只能对着产物断言。
+ */
+describe('dist 产物：样式必须内联进 webview.js', () => {
+  const opts = { skip: !HAS_DIST ? 'dist/webview.js 不存在（先 pnpm compile 构建）' : false };
+
+  it('不得产出独立的 dist/webview.css', opts, () => {
+    const cssOut = fileURLToPath(new URL('../../../dist/webview.css', import.meta.url));
+    assert.strictEqual(existsSync(cssOut), false, 'CSS 被抽成独立文件 → webview 内无样式');
+  });
+
+  it('webview.js 内含样式文本（主题变量与核心选择器）', opts, () => {
+    const js = readFileSync(DIST, 'utf8');
+    assert.ok(js.includes('--jlv-font'), '缺少 :root 主题变量');
+    assert.ok(js.includes('.jlv-record-card'), '缺少记录卡片样式');
+  });
+});
