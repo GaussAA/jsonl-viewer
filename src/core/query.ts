@@ -102,6 +102,7 @@ export function stringifyValue(value: unknown): string {
     try {
       return JSON.stringify(value) ?? String(value);
     } catch {
+      // JSON.stringify 失败（循环引用等）时回退到 String()
       return String(value);
     }
   }

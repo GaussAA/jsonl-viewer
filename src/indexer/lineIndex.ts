@@ -17,7 +17,7 @@
  *     上限保护（超出该行 yield `error`，绝不无界拼接 → 不 OOM）。
  */
 
-import type { ByteReader } from '../parser/jsonParser.ts';
+import type { ByteReader } from '../parser/types.ts';
 import { INDEX_CHECKPOINT_INTERVAL, SCAN_CHUNK_SIZE, MAX_LINE_BYTES } from '../constants.ts';
 
 /**

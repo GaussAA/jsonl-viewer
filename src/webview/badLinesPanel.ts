@@ -21,7 +21,7 @@
  * 不编造摘要，就不会有摘要是错的。
  */
 
-import { setupFocusTrap } from './focusTrap.ts';
+import { createPanelAnimation } from './panelAnimation.ts';
 import { formatBytes } from './editLogic.ts';
 import type { BadLinesPayload } from '../protocol/rpc.ts';
 
@@ -57,11 +57,8 @@ export interface BadLinesPanelController {
 }
 
 export function createBadLinesPanel(deps: BadLinesPanelDeps): BadLinesPanelController {
-  let opened = false;
-  let trapDispose: (() => void) | undefined;
   /** 最近一次渲染的数据（「全选」按钮要用）。 */
   let current: BadLinesPayload | undefined;
-  let closeTimer: ReturnType<typeof setTimeout> | undefined;
 
   const backdrop = document.createElement('div');
   backdrop.className = 'jlv-bad-backdrop';
@@ -123,6 +120,8 @@ export function createBadLinesPanel(deps: BadLinesPanelDeps): BadLinesPanelContr
 
   panel.append(head, status, note, list);
   backdrop.append(panel);
+
+  const anim = createPanelAnimation({ panel, backdrop, onOpen: () => void refresh() });
 
   /* ---------------- 渲染 ---------------- */
 
@@ -214,12 +213,12 @@ export function createBadLinesPanel(deps: BadLinesPanelDeps): BadLinesPanelContr
       deps.notify(`扫描失败：${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setBusy(false);
-      if (opened) await refresh();
+      if (anim.isOpen()) await refresh();
     }
   }
 
   const onKeyDown = (e: KeyboardEvent): void => {
-    if (e.key === 'Escape' && opened) {
+    if (e.key === 'Escape' && anim.isOpen()) {
       e.preventDefault();
       close();
     }
@@ -229,48 +228,17 @@ export function createBadLinesPanel(deps: BadLinesPanelDeps): BadLinesPanelContr
     if (e.target === backdrop) close();
   });
 
-  function open(): void {
-    if (opened) return;
-    opened = true;
-    if (closeTimer) {
-      clearTimeout(closeTimer);
-      closeTimer = undefined;
-    }
-    backdrop.hidden = false;
-    // 下一帧再加类，保证过渡生效（与 editPanel / historyPanel 一致）
-    requestAnimationFrame(() => {
-      backdrop.classList.add('open');
-      panel.classList.add('open');
-      // 设置焦点陷阱
-      trapDispose?.();
-      trapDispose = setupFocusTrap({ container: panel, onClose: close }).dispose;
-    });
-    void refresh();
-  }
-
-  function close(): void {
-    if (!opened) return;
-    opened = false;
-    trapDispose?.();
-    trapDispose = undefined;
-    backdrop.classList.remove('open');
-    panel.classList.remove('open');
-    if (closeTimer) clearTimeout(closeTimer);
-    closeTimer = setTimeout(() => {
-      // 过渡期间用户可能又打开了它 —— 关闭定时器不得把新开的浮层藏掉。
-      if (!opened) backdrop.hidden = true;
-      closeTimer = undefined;
-    }, 120);
-  }
+  const open = anim.open;
+  const close = anim.close;
 
   return {
     root: backdrop,
     open,
     close,
-    isOpen: () => opened,
+    isOpen: anim.isOpen,
     dispose: () => {
       document.removeEventListener('keydown', onKeyDown);
-      if (closeTimer) clearTimeout(closeTimer);
+      anim.dispose();
     },
   };
 }

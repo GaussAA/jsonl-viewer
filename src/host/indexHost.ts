@@ -13,7 +13,8 @@
 import { createReadStream } from 'node:fs';
 import { Worker } from 'node:worker_threads';
 import { LineIndex, applyIndexOps, type IndexDeltaOp } from '../indexer/lineIndex.ts';
-import { openFileReader, type ByteReader } from '../parser/jsonParser.ts';
+import { openFileReader } from '../parser/jsonParser.ts';
+import type { ByteReader } from '../parser/types.ts';
 import { searchLines, filterLines, type SearchScope } from './searchEngine.ts';
 import type { SearchLinesResult, FilterLinesResult } from './searchEngine.ts';
 import type { Condition } from '../core/query.ts';

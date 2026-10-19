@@ -21,7 +21,7 @@
  */
 
 import type { LineIndex } from '../indexer/lineIndex.ts';
-import type { ByteReader } from '../parser/jsonParser.ts';
+import type { ByteReader } from '../parser/types.ts';
 import { SAMPLE_SCAN_LINES } from '../constants.ts';
 import { parseJsonLine, scanRecords } from '../parser/jsonParser.ts';
 import {

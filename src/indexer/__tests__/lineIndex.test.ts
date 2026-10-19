@@ -14,12 +14,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { LineIndex, applyIndexOps, tailAppendOp, type IndexDeltaOp } from '../lineIndex.ts';
-import {
-  MemoryReader,
-  readLineBuffer,
-  readRecord,
-  type ByteReader,
-} from '../../parser/jsonParser.ts';
+import { MemoryReader, readLineBuffer, readRecord } from '../../parser/jsonParser.ts';
+import type { ByteReader } from '../../parser/types.ts';
 
 /** 把字符串切成极小 chunk，强制 \n 落在块边界、跨块定位。 */
 function* chunks(s: string, size: number): Generator<Buffer> {

@@ -15,7 +15,7 @@ import { join } from 'node:path';
 import { DataService } from '../dataService.ts';
 import { searchLines } from '../../host/searchEngine.ts';
 import type { LineIndex } from '../../indexer/lineIndex.ts';
-import type { ByteReader } from '../../parser/jsonParser.ts';
+import type { ByteReader } from '../../parser/types.ts';
 import { MAX_SELECTION_LINES, MAX_HISTORY_ENTRIES, MAX_BAD_LINES } from '../../constants.ts';
 
 async function makeFile(dir: string, lines: string[]): Promise<string> {

@@ -27,6 +27,10 @@ const common = {
   target: ['es2022'],
   logLevel: 'info',
   legalComments: 'none',
+  // webview 通过 `import cssText from './styles.css?raw'` 取得样式文本并注入 <style>。
+  // 必须用 text loader：缺省的 css loader 会把样式抽成独立的 dist/webview.css
+  // （webview 从不加载它），导入值为空，界面完全无样式。
+  loader: { '.css': 'text' },
   // 仅 minify 模式：标记 console.log/warn/info 为 pure，未用返回值则整体剔除；
   // 同时 drop debugger 语句。非 minify（开发）模式保留完整日志。
   ...(minify && {

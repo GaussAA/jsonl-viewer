@@ -15,7 +15,8 @@
 
 import { stat } from 'node:fs/promises';
 import { LineIndex, applyIndexOps, tailAppendOp, type IndexDeltaOp } from '../indexer/lineIndex.ts';
-import type { ByteReader, ReadRecordOpts } from '../parser/jsonParser.ts';
+import type { ByteReader } from '../parser/types.ts';
+import type { ReadRecordOpts } from '../parser/jsonParser.ts';
 import {
   openFileReader,
   parseJsonLine,
@@ -579,6 +580,7 @@ export class DataService {
       const s = await stat(this.path);
       return { size: s.size, mtimeMs: s.mtimeMs };
     } catch {
+      // 文件不存在或无权限访问时返回 undefined（预期行为）
       return undefined;
     }
   }
@@ -1103,6 +1105,7 @@ export class DataService {
     try {
       await this.host?.applyIndexOps(ops);
     } catch {
+      // 索引更新失败时标记为 dirty，下次查询会触发重建
       this.hostDirty = true;
     }
   }
@@ -1585,6 +1588,7 @@ export class DataService {
       JSON.stringify(from);
       JSON.stringify(to);
     } catch {
+      // from 或 to 包含循环引用等无法序列化的值
       return DataService.replaceFailure('匹配值或新值无法序列化为 JSON。');
     }
 
@@ -2115,12 +2119,12 @@ export class DataService {
         this.badLines.remapAfterDeletes(wanted);
       }
       const op: HistoryOp = { kind: 'deleteMany', ranges };
-      const { label, lines } = historyLabel(op);
+      const { label, lines: affectedLines } = historyLabel(op);
       this.history.execute({
         id: this.history.nextId(),
         op,
         label,
-        lines,
+        lines: affectedLines,
         bytesDelta: res.bytesDelta,
         at: Date.now(),
         bytes: historyOpBytes(op),

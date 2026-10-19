@@ -56,6 +56,7 @@ export function startStaleWatch(deps: StaleWatchDeps): ReturnType<typeof setInte
       try {
         res = await deps.checkStale();
       } catch {
+        // checkStale 失败时当作无变化（避免轮询异常中断监视）
         res = null;
       }
       try {
@@ -78,7 +79,7 @@ export function startStaleWatch(deps: StaleWatchDeps): ReturnType<typeof setInte
         staleSignaled = true;
         deps.signal({ message: res.message, deleted: res.deleted });
       } catch {
-        // 推送失败同样吞掉（后台轮询不该因为一次 post 失败而中断整条定时器）。
+        // signal 或 onAppended 回调失败不应中断轮询
       }
     })();
   }, pollMs);

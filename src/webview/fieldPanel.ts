@@ -20,7 +20,7 @@
  * 整行编辑 —— 两种入口各司其职，比让一个输入框猜意图可靠得多。
  */
 
-import { setupFocusTrap } from './focusTrap.ts';
+import { createPanelAnimation } from './panelAnimation.ts';
 import {
   initialFieldText,
   isFieldEditableKind,
@@ -70,10 +70,7 @@ function preview(value: unknown): string {
 }
 
 export function createFieldPanel(deps: FieldPanelDeps): FieldPanelController {
-  let opened = false;
   let busy = false;
-  let trapDispose: (() => void) | undefined;
-  let closeTimer: ReturnType<typeof setTimeout> | undefined;
   let currentSegs: readonly PathSeg[] = [];
   /** 浮层打开时的原值（勾选「应用到全部」时作为批量匹配基准上交）。 */
   let openedValue: unknown = undefined;
@@ -130,6 +127,8 @@ export function createFieldPanel(deps: FieldPanelDeps): FieldPanelController {
 
   panel.append(head, meta, body, applyAllRow, errorEl);
   backdrop.append(panel);
+
+  const anim = createPanelAnimation({ panel, backdrop });
 
   /* ---------------- 内部工具 ---------------- */
 
@@ -300,7 +299,7 @@ export function createFieldPanel(deps: FieldPanelDeps): FieldPanelController {
   /* ---------------- 开关 ---------------- */
 
   function open(segs: readonly PathSeg[], value: unknown): void {
-    if (opened) return;
+    if (anim.isOpen()) return;
     const kind = jsonKindOf(value);
     if (!isFieldEditableKind(kind)) {
       // 入口侧已过滤；此处防御并**明确告知**，而不是打开一个改不了任何东西的浮层。
@@ -314,39 +313,17 @@ export function createFieldPanel(deps: FieldPanelDeps): FieldPanelController {
     meta.textContent = `原值 ${preview(value)}（${kind}）`;
     buildBody(kind, initialFieldText(value));
 
-    opened = true;
-    if (closeTimer) {
-      clearTimeout(closeTimer);
-      closeTimer = undefined;
-    }
-    backdrop.hidden = false;
-    requestAnimationFrame(() => {
-      backdrop.classList.add('open');
-      panel.classList.add('open');
-      // 设置焦点陷阱
-      trapDispose?.();
-      trapDispose = setupFocusTrap({ container: panel, onClose: close }).dispose;
-    });
+    anim.open();
   }
 
   function close(): void {
-    if (!opened) return;
-    opened = false;
+    if (!anim.isOpen()) return;
     busy = false;
-    trapDispose?.();
-    trapDispose = undefined;
-    backdrop.classList.remove('open');
-    panel.classList.remove('open');
-    if (closeTimer) clearTimeout(closeTimer);
-    closeTimer = setTimeout(() => {
-      // 过渡期间可能又被打开 —— 定时器不得把新开的浮层藏掉。
-      if (!opened) backdrop.hidden = true;
-      closeTimer = undefined;
-    }, 120);
+    anim.close();
   }
 
   const onKeyDown = (e: KeyboardEvent): void => {
-    if (e.key === 'Escape' && opened) {
+    if (e.key === 'Escape' && anim.isOpen()) {
       e.preventDefault();
       close();
     }
@@ -360,11 +337,10 @@ export function createFieldPanel(deps: FieldPanelDeps): FieldPanelController {
     root: backdrop,
     open,
     close,
-    isOpen: () => opened,
+    isOpen: anim.isOpen,
     dispose: () => {
       document.removeEventListener('keydown', onKeyDown);
-      trapDispose?.();
-      if (closeTimer) clearTimeout(closeTimer);
+      anim.dispose();
     },
   };
 }

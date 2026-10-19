@@ -216,6 +216,7 @@ class JsonScanner {
       const v: unknown = JSON.parse(this.text.slice(start, end));
       return typeof v === 'string' ? v : undefined;
     } catch {
+      // JSON.parse 失败时返回 undefined 是预期行为（非法 JSON token）
       return undefined;
     }
   }

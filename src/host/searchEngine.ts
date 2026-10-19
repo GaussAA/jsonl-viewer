@@ -14,7 +14,7 @@
  */
 
 import type { LineIndex } from '../indexer/lineIndex.ts';
-import type { ByteReader } from '../parser/jsonParser.ts';
+import type { ByteReader } from '../parser/types.ts';
 import { parseJsonLine, scanRecords } from '../parser/jsonParser.ts';
 import {
   hasAnyRealCondition,
