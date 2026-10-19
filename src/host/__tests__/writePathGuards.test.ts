@@ -755,7 +755,7 @@ test('句柄释放 / 重新获取 / dispose 报错都被吞掉：写入照常成
         await realHost.releaseFile();
         throw new Error('releaseFile 炸了');
       },
-      reacquireFile: async (path) => {
+      reacquireFile: async (path: string) => {
         await realHost.reacquireFile(path);
         throw new Error('reacquireFile 炸了');
       },
@@ -803,7 +803,7 @@ test('批量删除三段不相邻区间；区间表乱序且含越界偏移的�
 
     // 倒序传入、其中一段偏移越界：insertRanges 先按偏移排序再逐段校验，
     // 任何一段失效就整体拒绝（宁可不撤销，也不在错误位置插入）。
-    const ranges = [...(del.changes ?? [])].reverse();
+    const ranges = (del.changes ?? []).toReversed();
     ranges[0] = { ...ranges[0], start: 99999, end: 99999 };
     const back = await ds.insertRanges(ranges);
     assert.equal(back.ok, false);
