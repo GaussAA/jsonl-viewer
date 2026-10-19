@@ -71,6 +71,12 @@ export const REWRITE_TEMP_SUFFIX = '.jlv-rewrite-tmp';
  */
 export const PROGRESS_THROTTLE_MS = 100;
 
+/**
+ * 主线程轮询 `shouldCancel` 的间隔（毫秒）：搜索 / 过滤跑在 worker 里，收不到 webview 的取消置位，
+ * 只能由主线程轮询后转发。足够短，用户点取消后至多再多扫一小段；又不至于让主线程空转。
+ */
+export const CANCEL_POLL_INTERVAL_MS = 30;
+
 /** 批量重写的估算有效吞吐（字节/毫秒），用于给用户预估耗时。100MB/s。 */
 export const REWRITE_THROUGHPUT_BYTES_PER_MS = (100 * 1024 * 1024) / 1000;
 

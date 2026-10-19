@@ -22,6 +22,12 @@
  */
 
 import { createPanelAnimation } from './panelAnimation.ts';
+import {
+  createPanelButton,
+  createPanelHead,
+  createPanelTitle,
+  createReportBody,
+} from './panelChrome.ts';
 import { formatBytes } from './editLogic.ts';
 import type { BadLinesPayload } from '../protocol/rpc.ts';
 
@@ -71,57 +77,35 @@ export function createBadLinesPanel(deps: BadLinesPanelDeps): BadLinesPanelContr
   panel.setAttribute('aria-label', '坏行诊断');
 
   /* ---------------- 头部 ---------------- */
-  const head = document.createElement('div');
-  head.className = 'jlv-edit-head';
-
-  const title = document.createElement('div');
-  title.className = 'jlv-edit-title';
-  title.textContent = '坏行诊断';
-
-  const scanBtn = document.createElement('button');
-  scanBtn.type = 'button';
-  scanBtn.className = 'jlv-btn';
-  scanBtn.textContent = '扫描整个文件';
-  scanBtn.title = '扫描整个文件，找出全部坏行（耗时操作，可取消）';
-  scanBtn.addEventListener('click', () => void runScan());
-
-  const selectBtn = document.createElement('button');
-  selectBtn.type = 'button';
-  selectBtn.className = 'jlv-btn';
-  selectBtn.textContent = '全选坏行';
-  selectBtn.title = '写入选区后可用工具栏下方的「删除」一次清除';
-  selectBtn.addEventListener('click', () => {
-    if (!current || current.lines.length === 0) return;
-    const n = deps.selectLines(current.lines);
-    if (n > 0) close();
-  });
-
-  const closeBtn = document.createElement('button');
-  closeBtn.type = 'button';
-  closeBtn.className = 'jlv-btn';
-  closeBtn.textContent = '关闭';
-  closeBtn.addEventListener('click', () => close());
-
-  const headActions = document.createElement('div');
-  headActions.className = 'jlv-edit-head-actions';
-  headActions.append(scanBtn, selectBtn, closeBtn);
-  head.append(title, headActions);
+  const scanBtn = createPanelButton(
+    '扫描整个文件',
+    () => void runScan(),
+    '扫描整个文件，找出全部坏行（耗时操作，可取消）'
+  );
+  const selectBtn = createPanelButton(
+    '全选坏行',
+    () => {
+      if (!current || current.lines.length === 0) return;
+      const n = deps.selectLines(current.lines);
+      if (n > 0) close();
+    },
+    '写入选区后可用工具栏下方的「删除」一次清除'
+  );
+  const closeBtn = createPanelButton('关闭', () => close());
+  const head = createPanelHead(createPanelTitle('坏行诊断'), [scanBtn, selectBtn, closeBtn]);
 
   /* ---------------- 状态行 + 列表 ---------------- */
-  const status = document.createElement('div');
-  status.className = 'jlv-bad-status';
-
-  const note = document.createElement('div');
-  note.className = 'jlv-bad-note';
-  note.hidden = true;
-
-  const list = document.createElement('div');
-  list.className = 'jlv-bad-list';
+  const { status, note, list } = createReportBody();
 
   panel.append(head, status, note, list);
   backdrop.append(panel);
 
-  const anim = createPanelAnimation({ panel, backdrop, onOpen: () => void refresh() });
+  const anim = createPanelAnimation({
+    panel,
+    backdrop,
+    onOpen: () => void refresh(),
+    onDismiss: () => close(),
+  });
 
   /* ---------------- 渲染 ---------------- */
 
@@ -217,17 +201,6 @@ export function createBadLinesPanel(deps: BadLinesPanelDeps): BadLinesPanelContr
     }
   }
 
-  const onKeyDown = (e: KeyboardEvent): void => {
-    if (e.key === 'Escape' && anim.isOpen()) {
-      e.preventDefault();
-      close();
-    }
-  };
-  document.addEventListener('keydown', onKeyDown);
-  backdrop.addEventListener('click', (e) => {
-    if (e.target === backdrop) close();
-  });
-
   const open = anim.open;
   const close = anim.close;
 
@@ -236,10 +209,7 @@ export function createBadLinesPanel(deps: BadLinesPanelDeps): BadLinesPanelContr
     open,
     close,
     isOpen: anim.isOpen,
-    dispose: () => {
-      document.removeEventListener('keydown', onKeyDown);
-      anim.dispose();
-    },
+    dispose: anim.dispose,
   };
 }
 

@@ -128,7 +128,7 @@ export function createFieldPanel(deps: FieldPanelDeps): FieldPanelController {
   panel.append(head, meta, body, applyAllRow, errorEl);
   backdrop.append(panel);
 
-  const anim = createPanelAnimation({ panel, backdrop });
+  const anim = createPanelAnimation({ panel, backdrop, onDismiss: () => close() });
 
   /* ---------------- 内部工具 ---------------- */
 
@@ -322,25 +322,11 @@ export function createFieldPanel(deps: FieldPanelDeps): FieldPanelController {
     anim.close();
   }
 
-  const onKeyDown = (e: KeyboardEvent): void => {
-    if (e.key === 'Escape' && anim.isOpen()) {
-      e.preventDefault();
-      close();
-    }
-  };
-  document.addEventListener('keydown', onKeyDown);
-  backdrop.addEventListener('click', (e) => {
-    if (e.target === backdrop) close();
-  });
-
   return {
     root: backdrop,
     open,
     close,
     isOpen: anim.isOpen,
-    dispose: () => {
-      document.removeEventListener('keydown', onKeyDown);
-      anim.dispose();
-    },
+    dispose: anim.dispose,
   };
 }
