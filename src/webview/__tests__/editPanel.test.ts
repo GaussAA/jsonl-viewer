@@ -9,6 +9,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { setupWebviewDom } from './domHarness.ts';
 
+// setupWebviewDom 会把全局 setTimeout 换成 unref 版本；tick 必须用装配前保存的真实定时器，
+// 否则在 CI 上事件循环可能在 await 挂起时提前退出，后续用例被取消（与 toolbar.test.ts 同源）。
+const REAL_SET_TIMEOUT = globalThis.setTimeout;
+
 // editPanel 直接使用 document/window，须先装配 DOM 环境再动态导入。
 const host = setupWebviewDom();
 const win = host.dom.window;
@@ -48,7 +52,7 @@ function q<T extends Element>(root: HTMLElement, sel: string): T {
 }
 
 /** 让 async 的保存流程走完（内部有 await）。 */
-const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
+const tick = (): Promise<void> => new Promise((r) => REAL_SET_TIMEOUT(r, 0));
 
 test('editPanel：open 填充标题与初始文本，isOpen 立即为真', () => {
   const { panel } = makePanel();
