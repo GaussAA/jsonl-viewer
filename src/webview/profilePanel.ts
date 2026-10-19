@@ -19,6 +19,12 @@
  */
 
 import { createPanelAnimation } from './panelAnimation.ts';
+import {
+  createPanelButton,
+  createPanelHead,
+  createPanelTitle,
+  createReportBody,
+} from './panelChrome.ts';
 import { formatBytes } from './editLogic.ts';
 import {
   fieldHasQualityIssue,
@@ -65,11 +71,7 @@ export function createProfilePanel(deps: ProfilePanelDeps): ProfilePanelControll
   panel.setAttribute('aria-label', '数据画像');
 
   /* ---------------- 头部 ---------------- */
-  const head = document.createElement('div');
-  head.className = 'jlv-edit-head';
-  const title = document.createElement('div');
-  title.className = 'jlv-edit-title';
-  title.textContent = '数据画像';
+  const title = createPanelTitle('数据画像');
 
   const sortSel = document.createElement('select');
   sortSel.title = '排序方式';
@@ -87,35 +89,17 @@ export function createProfilePanel(deps: ProfilePanelDeps): ProfilePanelControll
     if (current) render(current);
   });
 
-  const scanBtn = document.createElement('button');
-  scanBtn.type = 'button';
-  scanBtn.className = 'jlv-btn';
-  scanBtn.textContent = '开始扫描';
-  scanBtn.title = '扫描整个文件统计字段分布（耗时操作，可取消）';
-  scanBtn.addEventListener('click', () => void runScan());
-
-  const closeBtn = document.createElement('button');
-  closeBtn.type = 'button';
-  closeBtn.className = 'jlv-btn';
-  closeBtn.textContent = '关闭';
-  closeBtn.addEventListener('click', () => close());
-
-  const headActions = document.createElement('div');
-  headActions.className = 'jlv-edit-head-actions';
-  headActions.append(sortSel, scanBtn, closeBtn);
-  head.append(title, headActions);
+  const scanBtn = createPanelButton(
+    '开始扫描',
+    () => void runScan(),
+    '扫描整个文件统计字段分布（耗时操作，可取消）'
+  );
+  const closeBtn = createPanelButton('关闭', () => close());
+  const head = createPanelHead(title, [sortSel, scanBtn, closeBtn]);
 
   /* ---------------- 状态 + 列表 ---------------- */
-  const status = document.createElement('div');
-  status.className = 'jlv-bad-status';
+  const { status, note, list } = createReportBody();
   status.textContent = '尚未扫描。画像会读取整个文件，比抽样更准也更慢。';
-
-  const note = document.createElement('div');
-  note.className = 'jlv-bad-note';
-  note.hidden = true;
-
-  const list = document.createElement('div');
-  list.className = 'jlv-bad-list';
 
   panel.append(head, status, note, list);
   backdrop.append(panel);

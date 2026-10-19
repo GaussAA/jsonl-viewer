@@ -92,6 +92,83 @@ describe('createPanelAnimation', () => {
     assert.strictEqual(anim.isOpen(), false);
   });
 
+  describe('onDismiss（全局 Esc / 点击遮罩空白处）', () => {
+    // 必须惰性取：describe 体在 before() 装配 DOM 之前就会执行。
+    const Kb = function (t: string, o?: unknown): Event {
+      const C = (
+        globalThis as unknown as {
+          window: { KeyboardEvent: new (t: string, o?: unknown) => Event };
+        }
+      ).window.KeyboardEvent;
+      return new C(t, o);
+    } as unknown as new (t: string, o?: unknown) => Event;
+    const Mouse = function (t: string, o?: unknown): Event {
+      const C = (
+        globalThis as unknown as {
+          window: { MouseEvent: new (t: string, o?: unknown) => Event };
+        }
+      ).window.MouseEvent;
+      return new C(t, o);
+    } as unknown as new (t: string, o?: unknown) => Event;
+
+    function makeDismissable() {
+      const doc = globalThis.document;
+      doc.body.innerHTML = '';
+      const backdrop = doc.createElement('div');
+      const panel = doc.createElement('div');
+      backdrop.append(panel);
+      doc.body.append(backdrop);
+      let dismissed = 0;
+      const anim = createPanelAnimation({ panel, backdrop, onDismiss: () => dismissed++ });
+      return { anim, backdrop, panel, count: () => dismissed };
+    }
+
+    it('打开后 document 级 Esc 触发 onDismiss 并 preventDefault；未打开时忽略', () => {
+      const { anim, count } = makeDismissable();
+      const closedEvt = new Kb('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+      globalThis.document.dispatchEvent(closedEvt);
+      assert.strictEqual(count(), 0, '未打开不响应');
+      assert.strictEqual(closedEvt.defaultPrevented, false);
+
+      anim.open();
+      const evt = new Kb('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+      globalThis.document.dispatchEvent(evt);
+      assert.strictEqual(count(), 1);
+      assert.strictEqual(evt.defaultPrevented, true);
+
+      globalThis.document.dispatchEvent(new Kb('keydown', { key: 'a', bubbles: true }));
+      assert.strictEqual(count(), 1, '非 Esc 按键不触发');
+      anim.dispose();
+    });
+
+    it('点击遮罩空白处触发 onDismiss；点击浮层内部不触发', () => {
+      const { anim, backdrop, panel, count } = makeDismissable();
+      anim.open();
+      panel.dispatchEvent(new Mouse('click', { bubbles: true }));
+      assert.strictEqual(count(), 0, '冒泡自浮层内部的点击 target 不是遮罩');
+      backdrop.dispatchEvent(new Mouse('click', { bubbles: true }));
+      assert.strictEqual(count(), 1);
+      anim.dispose();
+    });
+
+    it('dispose 卸掉全局 Esc 监听', () => {
+      const { anim, count } = makeDismissable();
+      anim.open();
+      anim.dispose();
+      globalThis.document.dispatchEvent(new Kb('keydown', { key: 'Escape', bubbles: true }));
+      assert.strictEqual(count(), 0);
+    });
+
+    it('未传 onDismiss 时不挂全局 Esc / 遮罩点击', () => {
+      const { anim, backdrop } = make();
+      anim.open();
+      globalThis.document.dispatchEvent(new Kb('keydown', { key: 'Escape', bubbles: true }));
+      backdrop.dispatchEvent(new Mouse('click', { bubbles: true }));
+      assert.strictEqual(anim.isOpen(), true, '由调用方自行决定是否启用');
+      anim.dispose();
+    });
+  });
+
   it('dispose：撤掉焦点陷阱与定时器，之后 Esc 不再响应', async () => {
     const { anim, panel } = make({ closeDelayMs: 30 });
     anim.open();

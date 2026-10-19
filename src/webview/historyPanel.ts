@@ -11,6 +11,7 @@
  */
 
 import { createPanelAnimation } from './panelAnimation.ts';
+import { createPanelButton, createPanelHead, createPanelTitle } from './panelChrome.ts';
 import { formatBytes } from './editLogic.ts';
 import type { HistoryEntryView, HistoryPayload, HistoryResultPayload } from '../protocol/rpc.ts';
 
@@ -65,35 +66,10 @@ export function createHistoryPanel(deps: HistoryPanelDeps): HistoryPanelControll
   panel.setAttribute('aria-label', '编辑历史');
 
   /* ---------------- 头部 ---------------- */
-  const head = document.createElement('div');
-  head.className = 'jlv-edit-head';
-
-  const title = document.createElement('div');
-  title.className = 'jlv-edit-title';
-  title.textContent = '编辑历史';
-
-  const undoBtn = document.createElement('button');
-  undoBtn.type = 'button';
-  undoBtn.className = 'jlv-btn';
-  undoBtn.textContent = '撤销一步';
-  undoBtn.addEventListener('click', () => void step('undo'));
-
-  const redoBtn = document.createElement('button');
-  redoBtn.type = 'button';
-  redoBtn.className = 'jlv-btn';
-  redoBtn.textContent = '重做一步';
-  redoBtn.addEventListener('click', () => void step('redo'));
-
-  const closeBtn = document.createElement('button');
-  closeBtn.type = 'button';
-  closeBtn.className = 'jlv-btn';
-  closeBtn.textContent = '关闭';
-  closeBtn.addEventListener('click', () => close());
-
-  const headActions = document.createElement('div');
-  headActions.className = 'jlv-edit-head-actions';
-  headActions.append(undoBtn, redoBtn, closeBtn);
-  head.append(title, headActions);
+  const undoBtn = createPanelButton('撤销一步', () => void step('undo'));
+  const redoBtn = createPanelButton('重做一步', () => void step('redo'));
+  const closeBtn = createPanelButton('关闭', () => close());
+  const head = createPanelHead(createPanelTitle('编辑历史'), [undoBtn, redoBtn, closeBtn]);
 
   /* ---------------- 列表 ---------------- */
   const list = document.createElement('div');
@@ -106,7 +82,12 @@ export function createHistoryPanel(deps: HistoryPanelDeps): HistoryPanelControll
   panel.append(head, list, note);
   backdrop.append(panel);
 
-  const anim = createPanelAnimation({ panel, backdrop, onOpen: () => void refresh() });
+  const anim = createPanelAnimation({
+    panel,
+    backdrop,
+    onOpen: () => void refresh(),
+    onDismiss: () => close(),
+  });
   const open = anim.open;
   const close = anim.close;
 
@@ -223,27 +204,11 @@ export function createHistoryPanel(deps: HistoryPanelDeps): HistoryPanelControll
     }
   }
 
-  /* ---------------- 开关 ---------------- */
-
-  const onKeyDown = (e: KeyboardEvent): void => {
-    if (e.key === 'Escape' && anim.isOpen()) {
-      e.preventDefault();
-      close();
-    }
-  };
-  document.addEventListener('keydown', onKeyDown);
-  backdrop.addEventListener('click', (e) => {
-    if (e.target === backdrop) close();
-  });
-
   return {
     root: backdrop,
     open,
     close,
     isOpen: anim.isOpen,
-    dispose: () => {
-      document.removeEventListener('keydown', onKeyDown);
-      anim.dispose();
-    },
+    dispose: anim.dispose,
   };
 }

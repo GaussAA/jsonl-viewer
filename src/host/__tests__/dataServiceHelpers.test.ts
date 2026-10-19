@@ -5,6 +5,9 @@ import {
   cloneSearchResult,
   cloneFilterResult,
   describeProbeFailure,
+  eolText,
+  expandRecordLines,
+  normalizeLines,
   probeLine,
   throttleProgress,
   toReplaceOpts,
@@ -174,5 +177,51 @@ describe('BadLineTracker', () => {
     t.reset();
     assert.equal(t.size, 0);
     assert.equal(t.isComplete, false);
+  });
+});
+
+describe('normalizeLines', () => {
+  it('去重、滤掉越界 / 非整数 / 负数，并升序', () => {
+    assert.deepEqual(normalizeLines([5, 1, 3, 1, -1, 1.5, 9, Number.NaN], 6), [1, 3, 5]);
+  });
+
+  it('全部非法或为空 → 空数组（调用方据此报「没有可…的记录」）', () => {
+    assert.deepEqual(normalizeLines([], 10), []);
+    assert.deepEqual(normalizeLines([10, 11], 10), []);
+  });
+});
+
+describe('expandRecordLines', () => {
+  it('紧凑文件：记录号 == 物理行号，区间为首尾目标', async () => {
+    const buf = Buffer.from('{"a":1}\n{"a":2}\n{"a":3}\n{"a":4}\n', 'utf8');
+    const li = await LineIndex.build([buf], {});
+    const r = expandRecordLines(li, [1, 3]);
+    assert.deepEqual(
+      [...r.wanted].toSorted((a, b) => a - b),
+      [1, 3]
+    );
+    assert.equal(r.firstLine, 1);
+    assert.equal(r.lastLine, 3);
+  });
+
+  it('多行（pretty）文件：一条记录展开为连续的多个物理行', async () => {
+    const buf = Buffer.from('{\n  "a": 1\n}\n{\n  "a": 2\n}\n', 'utf8');
+    const li = await LineIndex.build([buf], {});
+    assert.equal(li.multiline, true, '前置：应被识别为多行文件');
+    const r = expandRecordLines(li, [1]);
+    assert.deepEqual(
+      [...r.wanted].toSorted((a, b) => a - b),
+      [3, 4, 5]
+    );
+    assert.equal(r.firstLine, 3);
+    assert.equal(r.lastLine, 5);
+  });
+});
+
+describe('eolText', () => {
+  it('行尾风格 → 文本；none 为空串', () => {
+    assert.equal(eolText('lf'), '\n');
+    assert.equal(eolText('crlf'), '\r\n');
+    assert.equal(eolText('none'), '');
   });
 });

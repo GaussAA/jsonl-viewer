@@ -15,6 +15,13 @@ export interface PanelAnimationConfig {
   closeDelayMs?: number;
   /** 已进入打开状态后调用（刷新、自动扫描等面板自己的事）。 */
   onOpen?: () => void;
+  /**
+   * 用户用「全局 Esc / 点击遮罩空白处」请求关闭时调用。传入即启用这两个入口。
+   *
+   * 要面板自己回调（而非这里直接 close）是因为有的面板关闭前还有善后（如字段浮层
+   * 要先复位 busy）；绕过它直接收起会让面板停在脏状态。
+   */
+  onDismiss?: () => void;
 }
 
 export interface PanelAnimationController {
@@ -25,7 +32,7 @@ export interface PanelAnimationController {
 }
 
 export function createPanelAnimation(config: PanelAnimationConfig): PanelAnimationController {
-  const { panel, backdrop, onOpen } = config;
+  const { panel, backdrop, onOpen, onDismiss } = config;
   const closeDelayMs = config.closeDelayMs ?? 120;
 
   let opened = false;
@@ -67,7 +74,22 @@ export function createPanelAnimation(config: PanelAnimationConfig): PanelAnimati
     }, closeDelayMs);
   }
 
+  // 全局 Esc：焦点陷阱只在焦点位于浮层内时才收得到按键，焦点落到别处时靠它兜底。
+  const onKeyDown = (e: KeyboardEvent): void => {
+    if (e.key === 'Escape' && opened) {
+      e.preventDefault();
+      onDismiss?.();
+    }
+  };
+  if (onDismiss) {
+    document.addEventListener('keydown', onKeyDown);
+    backdrop.addEventListener('click', (e) => {
+      if (e.target === backdrop) onDismiss();
+    });
+  }
+
   function dispose(): void {
+    if (onDismiss) document.removeEventListener('keydown', onKeyDown);
     trapDispose?.();
     trapDispose = undefined;
     clearCloseTimer();

@@ -18,7 +18,7 @@ import type { ByteReader } from '../parser/types.ts';
 import { searchLines, filterLines, type SearchScope } from './searchEngine.ts';
 import type { SearchLinesResult, FilterLinesResult } from './searchEngine.ts';
 import type { Condition } from '../core/query.ts';
-import { INDEX_CHUNK_SIZE, INDEX_REPORT_INTERVAL } from '../constants.ts';
+import { CANCEL_POLL_INTERVAL_MS, INDEX_CHUNK_SIZE, INDEX_REPORT_INTERVAL } from '../constants.ts';
 import type { BuildResult, WorkerRequest, WorkerResponse } from './workerProtocol.ts';
 
 /**
@@ -327,17 +327,7 @@ export class WorkerIndexHost implements IndexHost {
   ): Promise<SearchLinesResult> {
     const requestId = this.nextId++;
     return new Promise<SearchLinesResult>((resolve, reject) => {
-      let stop: (() => void) | undefined;
-      if (shouldCancel) {
-        // 主线程轮询 shouldCancel（webview 取消置位），命中即转发 cancel 给 worker 提前终止扫描。
-        const timer = setInterval(() => {
-          if (shouldCancel()) {
-            this.post({ type: 'cancel', requestId });
-            if (timer) clearInterval(timer);
-          }
-        }, 30);
-        stop = () => clearInterval(timer);
-      }
+      const stop = this.startCancelPoll(requestId, shouldCancel);
       this.pending.set(requestId, {
         resolve: (v) => resolve(v as SearchLinesResult),
         reject,
@@ -354,16 +344,7 @@ export class WorkerIndexHost implements IndexHost {
   ): Promise<FilterLinesResult> {
     const requestId = this.nextId++;
     return new Promise<FilterLinesResult>((resolve, reject) => {
-      let stop: (() => void) | undefined;
-      if (shouldCancel) {
-        const timer = setInterval(() => {
-          if (shouldCancel()) {
-            this.post({ type: 'cancel', requestId });
-            if (timer) clearInterval(timer);
-          }
-        }, 30);
-        stop = () => clearInterval(timer);
-      }
+      const stop = this.startCancelPoll(requestId, shouldCancel);
       this.pending.set(requestId, {
         resolve: (v) => resolve(v as FilterLinesResult),
         reject,
@@ -403,6 +384,27 @@ export class WorkerIndexHost implements IndexHost {
     await this.worker.terminate().catch(() => {});
     // 统一走 settleAll：确保取消轮询定时器一并停止（此前遗漏 → setInterval 泄漏）。
     this.settleAll(new Error('worker disposed'));
+  }
+
+  /**
+   * 为长耗时请求（search / filter）启动取消轮询。
+   *
+   * worker 在自己的线程里扫描，收不到 webview 的取消置位；故主线程轮询 `shouldCancel`，
+   * 命中即转发 `cancel` 让 worker 提前终止。返回的 `stop` 必须挂进 `pending`，由
+   * 应答 / 拒绝 / `settleAll` 统一调用，否则定时器会随请求泄漏。未提供 `shouldCancel` 则不轮询。
+   */
+  private startCancelPoll(
+    requestId: number,
+    shouldCancel: (() => boolean) | undefined
+  ): (() => void) | undefined {
+    if (!shouldCancel) return undefined;
+    const timer = setInterval(() => {
+      if (shouldCancel()) {
+        this.post({ type: 'cancel', requestId });
+        clearInterval(timer);
+      }
+    }, CANCEL_POLL_INTERVAL_MS);
+    return () => clearInterval(timer);
   }
 
   /** 无载荷请求（releaseFile / reacquireFile）：等一条 `ack` 即算完成。 */

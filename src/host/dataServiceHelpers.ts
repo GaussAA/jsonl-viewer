@@ -126,6 +126,43 @@ export function toReplaceOpts(opts: EditRecordOpts): {
   };
 }
 
+/** 归一化行号：去重、滤越界、升序（宿主对前端的最后一道防线）。 */
+export function normalizeLines(lines: readonly number[], totalLines: number): number[] {
+  const seen = new Set<number>();
+  for (const l of lines) {
+    if (Number.isInteger(l) && l >= 0 && l < totalLines) seen.add(l);
+  }
+  return [...seen].toSorted((a, b) => a - b);
+}
+
+/**
+ * 记录号 → 物理行集合（多行记录展开为连续行区间；紧凑文件下 == 记录号本身）。
+ *
+ * 同时给出覆盖全部目标的物理行区间 `[firstLine, lastLine]`（闭区间），
+ * 调用方据此做**一次**顺序 scan，而不是逐条随机读。
+ * 要求 `targets` 已经 `normalizeLines`（非空、升序、无越界）。
+ */
+export function expandRecordLines(
+  li: LineIndex,
+  targets: readonly number[]
+): { wanted: Set<number>; firstLine: number; lastLine: number } {
+  const wanted = new Set<number>();
+  for (const no of targets) {
+    const rr = li.recordRange(no);
+    for (let l = rr.startLine; l <= rr.endLine; l++) wanted.add(l);
+  }
+  return {
+    wanted,
+    firstLine: li.recordRange(targets[0]).startLine,
+    lastLine: li.recordRange(targets[targets.length - 1]).endLine,
+  };
+}
+
+/** 行尾风格 → 文本形式（批量复制 / 批量删除要原样保留磁盘上的行尾）。 */
+export function eolText(ending: LineEnding): string {
+  return ending === 'crlf' ? '\r\n' : ending === 'lf' ? '\n' : '';
+}
+
 /**
  * 单行编辑的可选行为。
  *
