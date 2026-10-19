@@ -5,6 +5,19 @@ All notable changes to the JSONL Viewer extension will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.2] - 2026-10-19
+
+### Changed
+
+- 抽出 `createPanelAnimation`，bad-lines / history / profile / field 四个浮层共用开合动画与焦点陷阱
+- `dataService.ts` 第一阶段拆分：无状态辅助函数移入 `dataServiceHelpers.ts`，坏行跟踪移入 `badLineTracker.ts`（2821 → 2601 行，对外导出不变）
+
+### Fixed
+
+- 修复 `editPanel` / `toolbar` 测试在 CI 上因 `setupWebviewDom()` 替换 `setTimeout` 而被取消的问题
+- `test:coverage` / `test:coverage:gate` 补上 CSS 加载器，修复 CI 覆盖率任务
+- 补提交 `pnpm-lock.yaml`，修复 `--frozen-lockfile` 安装失败
+
 ## [1.11.1] - 2026-10-16
 
 ### Fixed
