@@ -266,7 +266,12 @@ jsonl-viewer/
 │   │   ├── inferFields.ts       # 前 N 行字段推断抽样
 │   │   └── __tests__/inferFields.test.ts
 │   ├── host/
-│   │   ├── dataService.ts       # 数据宿主服务（统一调度各能力）
+│   │   ├── dataService.ts       # 数据宿主服务（持有全部可变状态；写操作只做加锁与委托）
+│   │   ├── writeSupport.ts      # 写路径共享契约：WriteContext、回执构造器、guardedWrite、recordHistory
+│   │   ├── recordWriter.ts      # 单条记录编辑/删除/插入（含写后读回验证与回滚）
+│   │   ├── textReplacer.ts      # 批量查找替换 / 按行号写回 / 字段级替换
+│   │   ├── rangeWriter.ts       # 多选批量删除 / 区间插回
+│   │   ├── historyReplay.ts     # 撤销 / 重做 / 回退到某点的磁盘回放
 │   │   ├── searchEngine.ts      # 流式搜索 / 字段过滤
 │   │   └── __tests__/searchEngine.test.ts
 │   ├── webview/
@@ -377,6 +382,9 @@ jsonl-viewer/
   - `checkStale()`：size/mtime 快照比对，幂等，返回删除/变更语义。
   - `reload()`：释放旧句柄/索引 → 重建。
   - `dispose()`：关闭文件句柄、清空缓存。
+  - **写操作**（`editRecord` / `deleteRecord` / `insertRecord` / `replaceText` / `replaceField` / `deleteRecords` / `insertRanges` / `undoStep` / `redoStep` / `setHistoryCursor` / `revertTo`）在这里只做两件事：取写锁 `runExclusive`，再把活交给写路径模块。实现分布在 `recordWriter`（单条）、`textReplacer`（批量改写）、`rangeWriter`（多选）、`historyReplay`（历史回放）。
+  - **`WriteContext`**（`writeSupport.ts`）：`DataService` 交给写路径的受控视图。写模块只能经它取索引/句柄、提交索引变更，**不能直接给 `this.index` 赋值**，也不 import `dataService.ts`（无环）。「索引只能经 `commitIndex` 变更」这条不变量因此仍由 `DataService` 独家守护。
+  - 加锁纪律不变：只有 `DataService` 的对外入口加锁，写模块里全是无锁的 `*Internal` 实现，历史回放在锁内直接调它们。
 
 ### 4.7 `src/host/searchEngine.ts` — 流式搜索与过滤
 

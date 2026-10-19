@@ -262,3 +262,26 @@ indexer/ parser/ infer/ perf/ constants.ts  ← 共享叶子（被 host/webview 
 会让 `Code.exe` 退化为 Node，导致所有 CLI 参数报 `bad option`（`Code.exe --version` 还会
 打印 Node 版本号，极易误判为下载损坏）。已在 `scripts/test-integration.mjs` 中主动清除该变量，
 脚本自身免疫，使用者无需手动 `env -u`。详见 `error_ledger.md`。
+
+### 9.7 DataService 写路径拆分
+
+§B2 的结论是「不把 `DataService` 拆成 Index/Read/Search 多个 Service」，该结论**仍然成立**。
+本轮拆的是另一个维度：不新增 Service 类，而是把写路径的**实现**按职责移出文件，
+`DataService` 仍是唯一的状态持有者与对外门面。
+
+| 项 | 拆分前 | 拆分后 |
+|---|---|---|
+| `dataService.ts` | 2601 行 | 约 1200 行 |
+| 写路径 | 全部在 `DataService` 私有方法里 | `recordWriter` / `textReplacer` / `rangeWriter` / `historyReplay` + 共享的 `writeSupport` |
+
+要点：
+
+- **接缝是 `WriteContext`**（受控接口），不是继承或 mixin。写模块拿不到 `this.index`，
+  「索引只能经 `commitIndex` 变更」因此由类型系统而非约定守护。
+- **无环**：写模块不 import `dataService.ts`；`historyReplay` 依赖三个 writer，反向不成立。
+- **加锁纪律不变**：对外入口在 `DataService` 里加锁，写模块只有无锁的 `*Internal`。
+- **顺带消除的重复**：5 处手写的 `editing = true; try/catch/finally`（→ `guardedWrite`）、
+  5 处「取消 vs 失败」映射（→ 三个 `*ErrorResult`）、5 处入历史的样板（→ `recordHistory`）、
+  撤销与重做两份几乎相同的方法（→ `stepOnce`）、`replaceText` 与 `applyLineTexts` 各算一遍字节差（→ `pushLineEdit`）。
+- **测试**：既有 298 个 host 用例原样通过；新增 `writePathGuards.test.ts`（自检失败回滚、冲突与入参拒绝等此前无人覆盖的安全分支）与 `writeSupport.test.ts`。
+

@@ -20,22 +20,12 @@ import type { ReadRecordOpts } from '../parser/jsonParser.ts';
 import {
   openFileReader,
   parseJsonLine,
-  readLineAt,
   readRecord as readRecordAt,
   scanRecords,
 } from '../parser/jsonParser.ts';
 import { inferFields } from '../infer/inferFields.ts';
-import {
-  detectLineEnding,
-  lineEndingBytes,
-  replaceLine,
-  replaceRange,
-  rewriteWithEdits,
-  WriteCancelledError,
-} from './fileWriter.ts';
-import type { ByteEdit, LineEnding } from './fileWriter.ts';
-import { planLineReplace } from '../core/replaceLogic.ts';
-import { jsonValueEquals, locateValue, replaceValueAtPath } from '../core/jsonSpan.ts';
+import { detectLineEnding, rewriteWithEdits } from './fileWriter.ts';
+import type { ByteEdit } from './fileWriter.ts';
 import type { Condition } from '../core/query.ts';
 import type { FilterLinesResult, SearchLinesResult } from './searchEngine.ts';
 import {
@@ -43,8 +33,6 @@ import {
   RECORDS_MAX_COUNT,
   SEARCH_MAX_RESULTS,
   FILTER_MAX_RESULTS,
-  MAX_REPLACE_UNDO_LINES,
-  MAX_REPLACE_UNDO_BYTES,
   MAX_SELECTION_LINES,
   COPY_MAX_BYTES,
   MAX_BAD_LINES,
@@ -53,7 +41,6 @@ import {
   MAX_EXPORT_LINES,
   TAIL_APPEND_MAX_BYTES,
   TAIL_ANCHOR_BYTES,
-  MAX_LINE_BYTES,
 } from '../constants.ts';
 import {
   discardOrphanBackup,
@@ -65,8 +52,8 @@ import { exportLinesToFile, type ExportOpts } from './exporter.ts';
 import { buildIndexWithFallback, type IndexHost } from './indexHost.ts';
 import { profileRecords, type ProfileResult } from './profileEngine.ts';
 import type { BuildResult } from './workerProtocol.ts';
-import { EditHistory, historyLabel, historyOpBytes } from './editHistory.ts';
-import type { HistoryEntry, HistoryOp, HistoryStepResult } from './editHistory.ts';
+import { EditHistory } from './editHistory.ts';
+import type { HistoryStepResult } from './editHistory.ts';
 import { buildRecordsPayload, PROTOCOL_VERSION } from '../protocol/rpc.ts';
 import type {
   BadLinesPayload,
@@ -78,7 +65,6 @@ import type {
   OverviewPayload,
   RecordsPayload,
   RecordsPayloadItem,
-  ReplaceChange,
   ReplaceResultPayload,
   SampleFieldsPayload,
   ExportResultPayload,
@@ -92,16 +78,34 @@ import {
 } from './recordSummary.ts';
 
 import {
-  probeLine,
-  describeProbeFailure,
   throttleProgress,
   cloneSearchResult,
   cloneFilterResult,
-  countLessThan,
-  toReplaceOpts,
+  eolText,
+  expandRecordLines,
+  normalizeLines,
   type EditRecordOpts,
 } from './dataServiceHelpers.ts';
 import { BadLineTracker } from './badLineTracker.ts';
+import {
+  deleteRecordInternal,
+  editRecordChecked,
+  insertRecordInternal,
+  validateInsertText,
+} from './recordWriter.ts';
+import { applyLineTexts, replaceFieldInternal, replaceTextInternal } from './textReplacer.ts';
+import { deleteRecordsInternal, insertRangesInternal } from './rangeWriter.ts';
+import {
+  redoStepInternal,
+  revertToInternal,
+  setHistoryCursorInternal,
+  undoStepInternal,
+} from './historyReplay.ts';
+import { editFailure } from './writeSupport.ts';
+import type { ReplaceOpts, WriteContext } from './writeSupport.ts';
+
+// ReplaceOpts 的定义随写路径拆分移到 writeSupport.ts；此处重新导出以保持对外 API 不变。
+export type { ReplaceOpts } from './writeSupport.ts';
 
 /** 检测文件是否已变更（size/mtime）的最小快照。 */
 export interface FileSnapshot {
@@ -149,28 +153,6 @@ export type IndexHostBuilder = (
   path: string,
   onProgress?: (info: { bytesRead: number; lines: number; done: boolean }) => void
 ) => Promise<{ host: IndexHost; result: BuildResult; fellBack: boolean }>;
-
-/* ---------------------- 会话编辑历史 ---------------------- */
-
-/** 批量改写（查找替换 / 撤销 / 重做）的可选行为。 */
-export interface ReplaceOpts {
-  /** 是否大小写不敏感（与搜索保持一致；默认 true）。 */
-  caseInsensitive?: boolean;
-  /** 调用方视图的期望总行数（乐观锁的调用方一侧；详见 detectWriteConflict）。 */
-  expectedTotalLines?: number;
-  /**
-   * 全文件重写阶段的进度回调（已按 `PROGRESS_THROTTLE_MS` 节流，终态必发）。
-   * 1GB 文件底层会按 4MB 分块回调 250 次，全量上报只是无意义的 IPC 压力。
-   */
-  onProgress?: (info: { processedBytes: number; totalBytes: number }) => void;
-  /**
-   * 取消回调：返回 true 则中止本次改写。
-   *
-   * 批量重写在 `rename` **之前**中止是**零风险**的 —— 临时文件被清理，目标文件从未被触碰。
-   * 这正是选择「全量重写 + 原子 rename」而非逐处搬移换来的额外红利：可取消且不留残迹。
-   */
-  shouldCancel?: () => boolean;
-}
 
 /** 坏行全文件扫描的可选行为。 */
 export interface ScanBadLinesOpts {
@@ -293,11 +275,41 @@ export class DataService {
   private readonly path: string;
   private readonly opts: DataServiceOptions;
 
+  /**
+   * 写路径（recordWriter / textReplacer / rangeWriter / historyReplay）看到的受控视图。
+   *
+   * 写路径只能经它访问索引与句柄、提交索引变更 —— 不能直接碰 `this.index`，
+   * 「索引只能经 `commitIndex` 变更」这条不变量因此仍由本类独家守护。
+   * 每个访问器都是**现取**（`rebuildIndex` / `rewriteAtomic` 会替换索引与句柄）。
+   */
+  private readonly write: WriteContext;
+
   // 注意：不用参数属性语法（Node 类型擦除运行 TS 单测时不支持）。
   constructor(uri: string, path: string, opts: DataServiceOptions = {}) {
     this.uri = uri;
     this.path = path;
     this.opts = opts;
+    this.write = {
+      path,
+      history: this.history,
+      badLines: this.badLines,
+      ensureIndex: () => this.ensureIndex(),
+      index: () => this.index!,
+      reader: () => this.reader!,
+      commitIndex: (li, ops) => this.commitIndex(li, ops),
+      rebuildIndex: () => this.rebuildIndex(),
+      detectWriteConflict: (line, expected) => this.detectWriteConflict(line, expected),
+      rewriteAtomic: (edits, replaceOpts) => this.rewriteAtomic(edits, replaceOpts),
+      withEditing: async (body) => {
+        this.editing = true;
+        try {
+          return await body();
+        } finally {
+          this.editing = false;
+        }
+      },
+      search: (query, field, scope) => this.search(query, field, scope),
+    };
   }
 
   /** 惰性构建（并发安全：多次同时调用只构建一次；失败后允许重试）。 */
@@ -554,243 +566,19 @@ export class DataService {
     };
   }
 
-  /** 编辑失败的统一回执（避免多处重复填充字段）。 */
-  private static editFailure(
-    line: number,
-    error: string,
-    extra?: Partial<EditResultPayload>
-  ): EditResultPayload {
-    return {
-      ok: false,
-      line,
-      bytesDelta: 0,
-      inPlace: false,
-      movedBytes: 0,
-      costMs: 0,
-      error,
-      ...extra,
-    };
-  }
-
   /**
-   * 就地替换第 `recordNo` 条逻辑记录（紧凑文件下即第 `line` 行，行为与旧版一致）。
+   * 就地替换第 `line` 条逻辑记录（紧凑文件下即第 `line` 行）。
    *
-   * 安全与一致性要点（**顺序即正确性**）：
-   *   1. **写前冲突检测**：stat 与索引基线比对（size/mtime）。不一致说明文件已被外部
-   *      改动，拒绝写入并返回 conflict —— 避免基于过期视图覆写他人改动；
-   *   2. **乐观锁**：`expectedBytes` 非空时须与磁盘上该记录聚合内容字节长度一致；
-   *   3. **JSON 校验 + JSONL 单行约束**：多行 pretty 文本会被拒绝（写入后会把一条
-   *      记录拆成多行，从那一行起整个文件错位 —— v1.8.0 事故根因）；
-   *   4. **写盘**：单行记录走 `replaceLine` 快路径（索引增量平移）；多行记录走
-   *      `replaceRange` 整体区间替换 + 索引全量重建（行数变化使增量失效，宁可慢不可错）；
-   *   5. **索引与基线同步**：写盘成功后先换上新索引，再立刻刷新基线快照；
-   *   6. **写后验证**：用新索引把该记录读回并校验，失败自动回滚（详见内部方法）。
-   *
-   * 历史回退/重放走 `editRecordInternal`（before/after 可能是多行 —— 曾合法写入文件的
-   * 内容），因此单行约束只在本对外入口检查。
+   * 对外入口：串行化后进入带校验的实现（校验同样在锁内，避免校验与写入之间被插队）。
+   * 冲突检测、乐观锁、写盘、写后验证与回滚的完整流程见 recordWriter.ts。
    */
-  /** 对外入口：串行化后进入带校验的编辑实现（校验同样在锁内，避免校验与写入之间被插队）。 */
   async editRecord(
     line: number,
     text: string,
     expectedBytes?: number,
     opts: EditRecordOpts = {}
   ): Promise<EditResultPayload> {
-    return this.runExclusive(() => this.editRecordChecked(line, text, expectedBytes, opts));
-  }
-
-  /** 编辑的入参校验（JSONL 单行约束 + JSON 合法性）；校验通过才落盘。 */
-  private async editRecordChecked(
-    line: number,
-    text: string,
-    expectedBytes?: number,
-    opts: EditRecordOpts = {}
-  ): Promise<EditResultPayload> {
-    const li = await this.ensureIndex();
-    if (!Number.isInteger(line) || line < 0 || line >= li.totalRecords) {
-      return DataService.editFailure(line, `无效记录号：${line}`);
-    }
-    // JSONL 单行约束（对外入口）：物理换行会把一条记录拆成多行，从那一行起整个文件
-    // 的行号与内容全部错位。合法 JSONL 行中字符串值的换行必然已转义为 \n 字面量。
-    if (/\r|\n/.test(text)) {
-      return DataService.editFailure(
-        line,
-        'JSONL 每条记录必须单行（文本含换行）。请把记录并回一行后再保存。',
-        { invalid: true }
-      );
-    }
-    const parsed = parseJsonLine(text);
-    if (!parsed.ok) {
-      return DataService.editFailure(line, `JSON 校验未通过：${parsed.error}`, { invalid: true });
-    }
-    return this.editRecordInternal(line, text, expectedBytes, opts);
-  }
-
-  /**
-   * 编辑内部实现（对外 editRecord 与历史回退/重放共用）。
-   *
-   * 定位记录区间（多行记录=多行区间）→ 乐观锁 → 写盘 → 索引同步 → 写后验证与回滚 →
-   * 历史。**不做单行约束检查** —— 历史重放写回的 before/after 可能是多行（曾合法
-   * 存在于文件中的内容），回退必须能够原样恢复。
-   */
-  private async editRecordInternal(
-    line: number,
-    text: string,
-    expectedBytes?: number,
-    opts: EditRecordOpts = {}
-  ): Promise<EditResultPayload> {
-    const li = await this.ensureIndex();
-    const reader = this.reader!;
-
-    if (!Number.isInteger(line) || line < 0 || line >= li.totalRecords) {
-      return DataService.editFailure(line, `无效记录号：${line}`);
-    }
-
-    // ① 写前冲突检测
-    const conflict = await this.detectWriteConflict(line, opts.expectedTotalLines);
-    if (conflict) return conflict;
-
-    // ② 定位该记录的字节区间与聚合原文（多行记录=多行区间；顺带探明下一条记录
-    //    首行的合法性，供写后验证区分「原本就是坏记录」与「本次写入弄坏了它」）。
-    let range: { start: number; end: number } | undefined;
-    let oldContentBytes = 0;
-    let beforeText = '';
-    let isMultiline = false;
-    let tailEnding: LineEnding = 'lf'; // 记录尾行尾（保持磁盘原样，不擅自规范化）
-    let nextRecordWasValid: boolean | undefined;
-    {
-      const recRange = li.recordRange(line);
-      isMultiline = recRange.endLine > recRange.startLine;
-      const parts: string[] = [];
-      const scanTo = Math.min(recRange.endLine + 2, li.totalLines);
-      for await (const r of li.scan(reader, recRange.startLine, scanTo)) {
-        if (r.line === recRange.endLine) {
-          // 记录尾行：行尾字节数决定回写时的 ending（保持原样）
-          const tailBytes = r.end - r.start - r.bytes.length;
-          tailEnding = tailBytes >= 2 ? 'crlf' : 'lf';
-        }
-        if (r.line <= recRange.endLine) {
-          if (r.error) return DataService.editFailure(line, `该记录过大，暂不支持编辑：${r.error}`);
-          parts.push(r.bytes.toString('utf8'));
-        } else if (r.line === recRange.endLine + 1) {
-          // 下一条记录的首行超长（error）时无从判定合法性，跳过写后验证。
-          nextRecordWasValid = r.error ? undefined : parseJsonLine(r.bytes.toString('utf8')).ok;
-          break;
-        }
-      }
-      if (parts.length === 0) return DataService.editFailure(line, `记录不存在：${line}`);
-      beforeText = parts.join('\n');
-      oldContentBytes = Buffer.byteLength(beforeText, 'utf8');
-      // 字节区间：多行索引直接用分组偏移（含前导空行，一并替换无害）；
-      // 紧凑快路径（multiline=false）recordRange 无偏移，用扫描给出的精确行区间。
-      range =
-        li.multiline || isMultiline
-          ? { start: recRange.startOffset, end: recRange.endOffset }
-          : undefined;
-      if (!range) {
-        for await (const r of li.scan(reader, line, line + 1)) {
-          if (r.error) return DataService.editFailure(line, `该记录过大，暂不支持编辑：${r.error}`);
-          range = { start: r.start, end: r.end };
-          break;
-        }
-        if (!range) return DataService.editFailure(line, `记录不存在：${line}`);
-      }
-    }
-
-    // ③ 乐观锁
-    if (expectedBytes != null && expectedBytes !== oldContentBytes) {
-      return DataService.editFailure(line, '该行内容已变化（与编辑前视图不一致），请重新加载。', {
-        conflict: true,
-      });
-    }
-
-    // ④⑤⑥ 写盘 + 同步索引与基线
-    this.editing = true;
-    try {
-      let bytesDelta: number;
-      let inPlace: boolean;
-      let movedBytes: number;
-      let costMs: number;
-      let ending: LineEnding = tailEnding;
-
-      if (li.multiline && isMultiline) {
-        // —— 多行记录：整体区间替换为单行新文本（记录数 1→1）+ 索引全量重建 ——
-        // 行数变化打破增量平移的前提；重建 = 全文件重扫（秒级），低频操作宁可慢不可错。
-        const replacement = Buffer.concat([Buffer.from(text, 'utf8'), lineEndingBytes(tailEnding)]);
-        const res = await replaceRange(this.path, range, replacement, toReplaceOpts(opts));
-        await this.rebuildIndex();
-        bytesDelta = res.bytesDelta;
-        inPlace = res.inPlace;
-        movedBytes = res.movedBytes;
-        costMs = res.costMs;
-      } else {
-        // —— 单行记录：原行替换快路径，索引增量平移 ——
-        ending = detectLineEnding(range, oldContentBytes);
-        const res = await replaceLine(
-          this.path,
-          range,
-          Buffer.from(text, 'utf8'),
-          ending,
-          toReplaceOpts(opts)
-        );
-        await this.commitIndex(li, [{ kind: 'replace', line, delta: res.bytesDelta }]);
-        bytesDelta = res.bytesDelta;
-        inPlace = res.inPlace;
-        movedBytes = res.movedBytes;
-        costMs = res.costMs;
-      }
-
-      // ⑦ 写后验证（防御性收口）：「写盘成功」的唯一可信依据是**用新索引把字节读回
-      //    来仍是合法 JSON**。校验对象 = 被编辑记录（必须合法），外加紧邻下一条记录
-      //    （仅在它编辑前就合法时参与）。失败 = 本次写入在某个环节损坏了内容，**立即
-      //    用原文写回（回滚）**，并把根因如实带回前端。验证安排在记入历史之前。
-      const verifyError = await this.verifyAfterRecordEdit(line, nextRecordWasValid);
-      if (verifyError !== '') {
-        const rollbackError =
-          li.multiline && isMultiline
-            ? await this.rollbackRecordEdit(line, beforeText, tailEnding)
-            : await this.rollbackLineEdit(line, beforeText, ending, bytesDelta);
-        if (rollbackError === '') {
-          return DataService.editFailure(
-            line,
-            `编辑写入后自检未通过（${verifyError}），已自动回滚，文件保持编辑前状态。`
-          );
-        }
-        return DataService.editFailure(
-          line,
-          `编辑写入后自检未通过（${verifyError}），且自动回滚失败：${rollbackError}。请先检查文件完整性。`
-        );
-      }
-
-      this.badLines.delete(line);
-      this.history.execute({
-        id: this.history.nextId(),
-        op: { kind: 'edit', line, before: beforeText, after: text },
-        label: `编辑第 ${line + 1} 行`,
-        lines: 1,
-        bytesDelta,
-        at: Date.now(),
-        bytes: beforeText.length + text.length,
-      });
-      return {
-        ok: true,
-        line,
-        bytesDelta,
-        inPlace,
-        movedBytes,
-        costMs: Math.round(costMs * 100) / 100,
-        beforeText,
-      };
-    } catch (e) {
-      // 取消与失败必须分开报：取消会自动回滚（文件原样），报成「失败」会让用户
-      // 以为文件可能损坏 —— 那是与事实相反的恐慌。
-      if (e instanceof WriteCancelledError) {
-        return DataService.editFailure(line, e.message, { cancelled: true });
-      }
-      return DataService.editFailure(line, e instanceof Error ? e.message : String(e));
-    } finally {
-      this.editing = false;
-    }
+    return this.runExclusive(() => editRecordChecked(this.write, line, text, expectedBytes, opts));
   }
 
   /** 写前冲突检测：文件被外部改动过则返回失败回执，否则返回 undefined。 */
@@ -808,7 +596,7 @@ export class DataService {
     if (expectedTotalLines != null) {
       const actual = this.index?.totalLines;
       if (actual != null && actual !== expectedTotalLines) {
-        return DataService.editFailure(
+        return editFailure(
           line,
           `当前视图已过期（你看到的 ${expectedTotalLines} 行，磁盘上已是 ${actual} 行），` +
             `为避免改错行，已拒绝本次操作；请重新加载后再试。`,
@@ -819,28 +607,18 @@ export class DataService {
 
     // ② 宿主基线（拦外部程序改动）
     const before = await this.currentSnapshot();
-    if (!before) return DataService.editFailure(line, '文件不存在或无法访问', { conflict: true });
+    if (!before) return editFailure(line, '文件不存在或无法访问', { conflict: true });
     if (
       this.snapshot &&
       (before.size !== this.snapshot.size || before.mtimeMs !== this.snapshot.mtimeMs)
     ) {
-      return DataService.editFailure(line, '文件已被外部修改，请先重新加载再编辑。', {
+      return editFailure(line, '文件已被外部修改，请先重新加载再编辑。', {
         conflict: true,
       });
     }
     return undefined;
   }
 
-  /**
-   * 索引 update 的**唯一入口**（写路径专用）：同时更新主索引与待回填队列。
-   *
-   * 为何必须收口：索引现在有两份实例（本类的 `this.index` 与索引宿主内部那份），
-   * 任何绕过本方法直接 `this.index = li.applyLineXxx(...)` 的写法，都会让两份索引
-   * 悄悄分家 —— 而 `search` / `filter` 只读宿主那一份，于是错误只在「写完再搜」时才
-   * 出现，既不报错也难复现。
-   *
-   * @param ops 严格按发生顺序（op 之间会互相影响行号）；调用方负责算好合法顺序。
-   */
   /**
    * 写盘成功后维护索引的**唯一分流点**：多行（pretty）文件全量重建，紧凑文件增量平移。
    *
@@ -861,6 +639,16 @@ export class DataService {
     await this.refreshSnapshot();
   }
 
+  /**
+   * 索引 update 的**唯一入口**（写路径专用）：同时更新主索引与待回填队列。
+   *
+   * 为何必须收口：索引现在有两份实例（本类的 `this.index` 与索引宿主内部那份），
+   * 任何绕过本方法直接 `this.index = li.applyLineXxx(...)` 的写法，都会让两份索引
+   * 悄悄分家 —— 而 `search` / `filter` 只读宿主那一份，于是错误只在「写完再搜」时才
+   * 出现，既不报错也难复现。
+   *
+   * @param ops 严格按发生顺序（op 之间会互相影响行号）；调用方负责算好合法顺序。
+   */
   private stageIndexOps(ops: readonly IndexDeltaOp[]): void {
     if (!this.index || ops.length === 0) return;
     this.index = applyIndexOps(this.index, ops);
@@ -934,552 +722,57 @@ export class DataService {
     this.queryCache.set(key, res);
   }
 
-  /**
-   * 删除第 `line` 行（含行尾）。行数减一，其后所有行的行号**前移一位**。
-   *
-   * 前置保护与 `editRecord` 一致（写前冲突检测）；落盘复用写入层同一原语
-   * `replaceRange`（空 replacement 即区间删除），随后同步索引与基线快照。
-   */
-  /** 对外入口：串行化删除。 */
+  /** 删除第 `line` 条记录（对外入口：串行化；实现见 recordWriter.ts）。 */
   async deleteRecord(line: number, opts: EditRecordOpts = {}): Promise<EditResultPayload> {
-    return this.runExclusive(() => this.deleteRecordInternal(line, opts));
-  }
-
-  private async deleteRecordInternal(
-    line: number,
-    opts: EditRecordOpts = {}
-  ): Promise<EditResultPayload> {
-    const li = await this.ensureIndex();
-    const reader = this.reader!;
-
-    // 口径必须是**记录号**（与 editRecord 一致）：多行文件里记录号 ≠ 物理行号，
-    // 此前按 totalLines 判上界、按物理行删除 —— 用户选中的是一条 pretty 记录，
-    // 落盘却只删了它的首行，把整条记录撕成碎片。
-    if (!Number.isInteger(line) || line < 0 || line >= li.totalRecords) {
-      return DataService.editFailure(line, `无效记录号：${line}`);
-    }
-    const conflict = await this.detectWriteConflict(line, opts.expectedTotalLines);
-    if (conflict) return conflict;
-
-    // 定位**整条记录**：紧凑文件 = 单个物理行（沿用探测路径）；多行文件 = 记录区间
-    // （recordRange 直接给出字节偏移；紧凑文件的该值为 -1，不可用）。
-    let start: number;
-    let end: number;
-    if (li.multiline) {
-      const rr = li.recordRange(line);
-      if (rr.endOffset - rr.startOffset > MAX_LINE_BYTES) {
-        return DataService.editFailure(
-          line,
-          `该记录过大，暂不支持删除：超过 ${MAX_LINE_BYTES} 字节`
-        );
-      }
-      start = rr.startOffset;
-      end = rr.endOffset;
-    } else {
-      const probed = await probeLine(li, reader, line);
-      if (!probed.ok) {
-        return DataService.editFailure(line, describeProbeFailure(line, probed.reason));
-      }
-      start = probed.start;
-      end = probed.end;
-    }
-    const removedBytes = end - start;
-    // 旧原文用于撤销：删除的逆操作就是把这段文本插回去（多行记录 = 聚合原文，
-    // 撤销路径不做单行 / JSON 校验 —— 见 insertRecord 对外入口的说明）。
-    const removedText = await readLineAt(reader, start, end).catch(() => '');
-
-    this.editing = true;
-    try {
-      const res = await replaceRange(
-        this.path,
-        { start, end },
-        Buffer.alloc(0),
-        toReplaceOpts(opts)
-      );
-      await this.commitIndex(li, [{ kind: 'delete', line, bytes: removedBytes }]);
-      this.badLines.shiftAfterDelete(line);
-      const op: HistoryOp = { kind: 'delete', line, before: removedText };
-      const { label, lines } = historyLabel(op);
-      this.history.execute({
-        id: this.history.nextId(),
-        op,
-        label,
-        lines,
-        bytesDelta: res.bytesDelta,
-        at: Date.now(),
-        bytes: historyOpBytes(op),
-      });
-      return {
-        ok: true,
-        line,
-        bytesDelta: res.bytesDelta,
-        inPlace: res.inPlace,
-        movedBytes: res.movedBytes,
-        costMs: Math.round(res.costMs * 100) / 100,
-        beforeText: removedText,
-      };
-    } catch (e) {
-      if (e instanceof WriteCancelledError) {
-        return DataService.editFailure(line, e.message, { cancelled: true });
-      }
-      return DataService.editFailure(line, e instanceof Error ? e.message : String(e));
-    } finally {
-      this.editing = false;
-    }
+    return this.runExclusive(() => deleteRecordInternal(this.write, line, opts));
   }
 
   /**
-   * 在第 `at` 行**之前**插入一行（`at === totalLines` 表示追加到文件末尾）。
+   * 在第 `at` 条记录之前插入一行（`at === totalRecords` 表示追加）。
    *
-   * 新行的行尾风格取「参考行」——优先前一行，其次插入点所在行；二者皆无（空文件）用 LF。
-   * 这样在 CRLF 文件里插入的行同样是 CRLF，不会把行尾风格搅乱。
+   * 对外入口：单行与 JSON 约束只在这一层、且在取锁**之前**校验；历史重放（撤销「删除」）
+   * 走无校验的内部实现，才能把多行 / 当年就是坏记录的原文原样插回。
    */
-  /** 对外入口：串行化插入。单行与 JSON 约束只放这一层 —— 历史重放（撤销「删除」）
-   *  必须能把**多行 / 当年就是坏记录**的原文原样插回，故内部实现不做这两项检查
-   *  （与 editRecord 对外校验、内部放行的分层完全一致）。 */
   async insertRecord(
     at: number,
     text: string,
     opts: EditRecordOpts = {}
   ): Promise<EditResultPayload> {
-    if (/\r|\n/.test(text)) {
-      return DataService.editFailure(
-        at,
-        'JSONL 每条记录必须单行（文本含换行）。请把记录并回一行后再插入。',
-        { invalid: true }
-      );
-    }
-    const parsed = parseJsonLine(text);
-    if (!parsed.ok) {
-      return DataService.editFailure(at, `JSON 校验未通过：${parsed.error}`, { invalid: true });
-    }
-    return this.runExclusive(() => this.insertRecordInternal(at, text, opts));
+    const invalid = validateInsertText(at, text);
+    if (invalid) return invalid;
+    return this.runExclusive(() => insertRecordInternal(this.write, at, text, opts));
   }
 
-  private async insertRecordInternal(
-    at: number,
-    text: string,
-    opts: EditRecordOpts = {}
-  ): Promise<EditResultPayload> {
-    const li = await this.ensureIndex();
-    const reader = this.reader!;
-
-    if (!Number.isInteger(at) || at < 0 || at > li.totalRecords) {
-      return DataService.editFailure(at, `无效插入位置：${at}`);
-    }
-    const conflict = await this.detectWriteConflict(at, opts.expectedTotalLines);
-    if (conflict) return conflict;
-
-    // 插入点 = 第 at 条**记录**的起始偏移（多行文件里记录号 ≠ 物理行号，此前按物理行
-    // 探测会把新行插进前面的 pretty 记录中间）；at === totalRecords 表示追加到文件末尾。
-    // 行尾参考：优先前一条记录的尾行（保持 CRLF 文件的风格），at === 0 则取首条记录首行。
-    let insertAt = li.totalBytes;
-    let refEnding: LineEnding | undefined;
-    if (at < li.totalRecords) {
-      if (li.multiline) {
-        insertAt = li.recordRange(at).startOffset;
-        const refLine = at > 0 ? li.recordRange(at - 1).endLine : li.recordRange(0).startLine;
-        const probed = await probeLine(li, reader, refLine);
-        refEnding = probed.ok ? probed.ending : undefined;
-      } else {
-        const probed = await probeLine(li, reader, at);
-        if (!probed.ok) return DataService.editFailure(at, describeProbeFailure(at, probed.reason));
-        insertAt = probed.start;
-        if (at > 0) {
-          const prev = await probeLine(li, reader, at - 1);
-          refEnding = (prev.ok ? prev.ending : undefined) ?? probed.ending;
-        } else {
-          refEnding = probed.ending;
-        }
-      }
-    }
-    // 参考行若位于文件末尾且原本无换行，插入的新行仍须自带行尾（否则会与下一行粘连）。
-    const ending: LineEnding = !refEnding || refEnding === 'none' ? 'lf' : refEnding;
-    const newLineBytes = Buffer.concat([Buffer.from(text, 'utf8'), lineEndingBytes(ending)]);
-
-    this.editing = true;
-    try {
-      const res = await replaceRange(
-        this.path,
-        { start: insertAt, end: insertAt },
-        newLineBytes,
-        toReplaceOpts(opts)
-      );
-      await this.commitIndex(li, [{ kind: 'insert', line: at, bytes: newLineBytes.length }]);
-      this.badLines.shiftAfterInsert(at);
-      const op: HistoryOp = { kind: 'insert', line: at, text };
-      const { label, lines } = historyLabel(op);
-      this.history.execute({
-        id: this.history.nextId(),
-        op,
-        label,
-        lines,
-        bytesDelta: res.bytesDelta,
-        at: Date.now(),
-        bytes: historyOpBytes(op),
-      });
-      return {
-        ok: true,
-        line: at,
-        bytesDelta: res.bytesDelta,
-        inPlace: res.inPlace,
-        movedBytes: res.movedBytes,
-        costMs: Math.round(res.costMs * 100) / 100,
-      };
-    } catch (e) {
-      if (e instanceof WriteCancelledError) {
-        return DataService.editFailure(at, e.message, { cancelled: true });
-      }
-      return DataService.editFailure(at, e instanceof Error ? e.message : String(e));
-    } finally {
-      this.editing = false;
-    }
-  }
-
-  /* ------------------------- 查找替换（批量改写） ------------------------- */
-
-  /**
-   * 全文查找替换：把每一命中行中的 `query` 字面量替换为 `replacement`，一次性落盘。
-   *
-   * 流程即正确性：
-   *   1. **复用搜索定位命中行** —— 搜索即预览，不另造一套预览机制（用户在工具栏已看到命中数）；
-   *   2. **一次顺序扫过命中区间取原文** —— 成本 O(命中区间)，与整体重写同阶，不做逐行随机读；
-   *   3. **逐行校验替换后的 JSON** —— 非法则该行跳过（个别行失败不该拖垮整批，但必须如实统计）；
-   *   4. **原子重写** —— 写同目录临时文件再 rename，失败时用户拿到的仍是完整旧文件；
-   *   5. **索引增量 + 基线快照** —— 行数不变，逐行平移其后检查点即可，无需重建。
-   *
-   * 查询为空直接拒绝：空串会匹配每一行的每个位置，那不是「替换」而是毁文件。
-   * 命中数达到搜索上限（truncated）时同样拒绝 —— 我们无法确认待改行的全集，
-   * 在此基础上的「批量替换」是不可控的。
-   */
-  /** 对外入口：串行化批量文本替换。 */
+  /** 全文查找替换（对外入口：串行化；流程与取舍见 textReplacer.ts）。 */
   async replaceText(
     query: string,
     replacement: string,
     opts: ReplaceOpts = {}
   ): Promise<ReplaceResultPayload> {
-    return this.runExclusive(() => this.replaceTextInternal(query, replacement, opts));
-  }
-
-  private async replaceTextInternal(
-    query: string,
-    replacement: string,
-    opts: ReplaceOpts = {}
-  ): Promise<ReplaceResultPayload> {
-    if (!query) return DataService.replaceFailure('查找内容不能为空');
-
-    const li = await this.ensureIndex();
-    const reader = this.reader!;
-
-    const conflict = await this.detectWriteConflict(-1, opts.expectedTotalLines);
-    if (conflict) {
-      return DataService.replaceFailure(conflict.error ?? '文件已被外部修改', { conflict: true });
-    }
-
-    // 多行（pretty）文件暂不支持批量文本替换：替换以物理行为单位，会跨记录边界
-    // 破坏多行记录的结构。逐条编辑（双击/铅笔）在多行文件下完全可用。
-    if (li.multiline) {
-      return DataService.replaceFailure(
-        '多行（pretty）文件暂不支持批量替换：替换以物理行为单位，会破坏跨行记录的结构。请逐条编辑。'
-      );
-    }
-
-    // ① 搜索定位（走 host：worker 或主线程兜底）
-    const found = await this.search(query, undefined, 'all');
-    // 被中断的搜索只知道「扫到哪儿」，此后是否还有命中一无所知 ——
-    // 基于它做批量改写就是「漏改一批行却报成功」，宁可拒绝重来。
-    if (found.cancelled) {
-      return DataService.replaceFailure(
-        '查找在扫描完成前被中断，无法确认待改行的全集，已拒绝批量替换；请重试。'
-      );
-    }
-    if (found.truncated) {
-      return DataService.replaceFailure(
-        `命中行超过 ${SEARCH_MAX_RESULTS} 行，无法确认待改行的全集，已拒绝批量替换；请缩小查找范围。`
-      );
-    }
-    if (found.matches.length === 0) {
-      return DataService.replaceOk(0, 0, 0, 0, 0, false);
-    }
-
-    // ② 一次顺序扫过命中行区间，取出原文并规划替换
-    const hitSet = new Set(found.matches);
-    const first = found.matches[0];
-    const last = found.matches[found.matches.length - 1];
-    const edits: ByteEdit[] = [];
-    const deltas: { line: number; delta: number }[] = [];
-    const changes: ReplaceChange[] = [];
-    let skippedInvalid = 0;
-    let unchanged = 0;
-
-    // 替换后含物理换行 = 把一条记录拆成多行，与「JSONL 单行约束」同罪
-    //（统计上计入 invalid，与其他非法结果一致，不静默略过）。
-    const validate = (t: string): boolean => !/\r|\n/.test(t) && parseJsonLine(t).ok;
-
-    for await (const r of li.scan(reader, first, last + 1)) {
-      if (!hitSet.has(r.line)) continue;
-      // 超长行（scan 以 error 标记）无法安全取出与改回，计入跳过而非静默略过。
-      if (r.error) {
-        skippedInvalid++;
-        continue;
-      }
-      const raw = r.bytes.toString('utf8');
-      const plan = planLineReplace(raw, query, replacement, {
-        caseInsensitive: opts.caseInsensitive,
-        validate,
-      });
-      if (!plan.text) {
-        if (plan.skip === 'invalid-json') skippedInvalid++;
-        else unchanged++;
-        continue;
-      }
-      // 行尾按磁盘原样保留：替换只动行内容，不擅自把 CRLF 规范化成 LF。
-      const ending = detectLineEnding({ start: r.start, end: r.end }, r.bytes.length);
-      const next = Buffer.concat([Buffer.from(plan.text, 'utf8'), lineEndingBytes(ending)]);
-      edits.push({ start: r.start, end: r.end, replacement: next });
-      deltas.push({ line: r.line, delta: next.length - (r.end - r.start) });
-      changes.push({ line: r.line, before: raw, after: plan.text });
-    }
-
-    const total = found.matches.length;
-    if (edits.length === 0) {
-      return DataService.replaceOk(0, skippedInvalid, unchanged, total, 0, false);
-    }
-    return this.applyEdits(li, edits, deltas, changes, total, skippedInvalid, unchanged, opts);
+    return this.runExclusive(() => replaceTextInternal(this.write, query, replacement, opts));
   }
 
   /**
    * 按行号批量写回指定文本（批量替换的撤销 / 重做走这条路）。
    *
-   * 与 `replaceText` 的区别只在「规划」阶段：这里不做查询匹配，直接接受「这些行该是什么」。
-   * 撤销必须走批量重写而非逐行 `editRecord` —— 后者是 N 次尾部搬移（成本 Σ(改动点距 EOF)），
-   * 撤销一次 5000 行的替换可能要几分钟；批量重写恒为 O(文件大小)。
+   * 与其它写入口不同，这里**不**自带写锁：它是历史回放与 `replaceField` 在锁内复用的原语，
+   * 再取一次锁会自死锁。需要独立调用的外部使用者须自行保证串行。
    */
   async applyLineTexts(
     entries: readonly { line: number; text: string }[],
     opts: ReplaceOpts = {}
   ): Promise<ReplaceResultPayload> {
-    const li = await this.ensureIndex();
-    const reader = this.reader!;
-
-    // 目标行 → 期望文本（重复行号后者覆盖前者，避免同一区间被规划两次）
-    const wanted = new Map<number, string>();
-    for (const e of entries) {
-      if (Number.isInteger(e.line) && e.line >= 0 && e.line < li.totalRecords) {
-        wanted.set(e.line, e.text);
-      }
-    }
-    if (wanted.size === 0) return DataService.replaceFailure('没有可写回的行');
-
-    const conflict = await this.detectWriteConflict(-1, opts.expectedTotalLines);
-    if (conflict) {
-      return DataService.replaceFailure(conflict.error ?? '文件已被外部修改', { conflict: true });
-    }
-
-    const lines = [...wanted.keys()].toSorted((a, b) => a - b);
-    const edits: ByteEdit[] = [];
-    const deltas: { line: number; delta: number }[] = [];
-    const changes: ReplaceChange[] = [];
-    let skippedInvalid = 0;
-    let unchanged = 0;
-
-    for await (const r of li.scan(reader, lines[0], lines[lines.length - 1] + 1)) {
-      const text = wanted.get(r.line);
-      if (text === undefined) continue;
-      if (r.error) {
-        skippedInvalid++;
-        continue;
-      }
-      const raw = r.bytes.toString('utf8');
-      if (raw === text) {
-        unchanged++;
-        continue;
-      }
-      // 写回的内容同样要过 JSON 校验：撤销的是「曾经合法的内容」，但磁盘可能已被
-      // 外部改过，此处不能假设它一定还合法。
-      if (!parseJsonLine(text).ok) {
-        skippedInvalid++;
-        continue;
-      }
-      const ending = detectLineEnding({ start: r.start, end: r.end }, r.bytes.length);
-      const next = Buffer.concat([Buffer.from(text, 'utf8'), lineEndingBytes(ending)]);
-      edits.push({ start: r.start, end: r.end, replacement: next });
-      deltas.push({ line: r.line, delta: next.length - (r.end - r.start) });
-      changes.push({ line: r.line, before: raw, after: text });
-    }
-
-    if (edits.length === 0) {
-      return DataService.replaceOk(0, skippedInvalid, unchanged, wanted.size, 0, false);
-    }
-    return this.applyEdits(
-      li,
-      edits,
-      deltas,
-      changes,
-      wanted.size,
-      skippedInvalid,
-      unchanged,
-      opts
-    );
+    return applyLineTexts(this.write, entries, opts);
   }
 
-  /**
-   * 批量字段级替换（M3 收尾）：把所有行中「指定路径下的值恰好等于 `from`」的字段改成 `to`。
-   *
-   * 与 `replaceText` 的本质区别：匹配的是**该路径下的值**（结构化语义），而非行内文本。
-   * 把每行的 `status: "pending"` 改成 `"done"` 时，正文里恰好含 "pending" 字样的字段
-   * 不应被波及 —— 这正是本能力相对整行替换的存在意义。
-   *
-   * 落盘复用 `applyLineTexts`：冲突检测、批量原子重写、撤销栈都在那里，复制必漂移。
-   * 本方法只负责「规划」—— 找出哪些行该变成什么样。规划阶段（全文件逐行定位）是耗时
-   * 主体，进度与取消由这里自管；写入阶段的重写进度由 `applyEdits` 继续接管，两种进度
-   * 共用同一个 `onProgress` 通道，前端横幅表现为「扫描 → 重写」连续推进。
-   */
-  /** 对外入口：串行化批量字段级替换。 */
+  /** 批量字段级替换（对外入口：串行化；结构化匹配语义见 textReplacer.ts）。 */
   async replaceField(
     path: readonly (string | number)[],
     from: unknown,
     to: unknown,
     opts: ReplaceOpts = {}
   ): Promise<ReplaceResultPayload> {
-    return this.runExclusive(() => this.replaceFieldInternal(path, from, to, opts));
-  }
-
-  private async replaceFieldInternal(
-    path: readonly (string | number)[],
-    from: unknown,
-    to: unknown,
-    opts: ReplaceOpts = {}
-  ): Promise<ReplaceResultPayload> {
-    if (!Array.isArray(path) || path.length === 0) {
-      return DataService.replaceFailure('字段路径不能为空（改整行请用批量替换）。');
-    }
-    // from/to 必须是合法 JSON 值。`JSON.stringify(undefined)` 返回 undefined 而**不抛错**，
-    // 故 undefined 须显式拒绝 —— 否则一个来自上游 bug 的 undefined 会变成「永远匹配不到」，
-    // 用户看到的是一次安静的无操作，而不是一声报错。
-    if (from === undefined || to === undefined) {
-      return DataService.replaceFailure('匹配值或新值不能为 undefined。');
-    }
-    try {
-      JSON.stringify(from);
-      JSON.stringify(to);
-    } catch {
-      // from 或 to 包含循环引用等无法序列化的值
-      return DataService.replaceFailure('匹配值或新值无法序列化为 JSON。');
-    }
-
-    const li = await this.ensureIndex();
-    const reader = this.reader!;
-
-    // 多行（pretty）文件暂不支持批量字段替换：按记录聚合替换的写入路径尚未打通。
-    // 逐条编辑（双击/铅笔）在多行文件下完全可用。
-    if (li.multiline) {
-      return DataService.replaceFailure(
-        '多行（pretty）文件暂不支持批量字段替换。请逐条编辑（双击字段值或点铅笔）。'
-      );
-    }
-
-    const conflict = await this.detectWriteConflict(-1, opts.expectedTotalLines);
-    if (conflict) {
-      return DataService.replaceFailure(conflict.error ?? '文件已被外部修改', { conflict: true });
-    }
-
-    const report = throttleProgress(opts.onProgress);
-    const entries: { line: number; text: string }[] = [];
-    let skippedInvalid = 0;
-    let unchanged = 0;
-    const total = li.totalRecords;
-    const totalBytes = li.totalBytes;
-
-    for await (const r of li.scan(reader, 0, total)) {
-      // 进度按字节报（与其它长任务同一分母），节流由 helper 管。
-      report?.({ processedBytes: r.end, totalBytes });
-      if (opts.shouldCancel?.()) {
-        // 扫描是纯读 —— 中止时磁盘未被触碰，与「写入前取消」同等零风险。
-        return { ...DataService.replaceFailure('已取消'), cancelled: true };
-      }
-      // 超长行无法安全取出与改回，计入跳过而非静默略过（与 replaceText 同一口径）。
-      if (r.error) {
-        skippedInvalid++;
-        continue;
-      }
-      const raw = r.bytes.toString('utf8');
-      // scan 本身不做 JSON 校验（r.error 只标记超长行），非法行在这里判定 ——
-      // 与 replaceText 的「替换后非法才跳过」不同：本操作的**原文**就必须合法，
-      // 否则无法定位字段（也无法保证改完仍是合法 JSONL）。
-      if (!parseJsonLine(raw).ok) {
-        skippedInvalid++;
-        continue;
-      }
-      const span = locateValue(raw, path);
-      if (!span) {
-        // 路径在该行不存在：该行本就不在本次改动的目标范围内，计入 unchanged。
-        unchanged++;
-        continue;
-      }
-      let current: unknown;
-      try {
-        current = JSON.parse(raw.slice(span.start, span.end));
-      } catch {
-        // locateValue 已保证区间是完整合法的 JSON token，此处只是纵深防御。
-        skippedInvalid++;
-        continue;
-      }
-      if (!jsonValueEquals(current, from)) {
-        unchanged++;
-        continue;
-      }
-      const replaced = replaceValueAtPath(raw, path, to);
-      if (!replaced.ok) {
-        unchanged++;
-        continue;
-      }
-      entries.push({ line: r.line, text: replaced.text });
-    }
-    report?.({ processedBytes: totalBytes, totalBytes }); // 终态必发：停在 96% 比没有进度条更糟
-
-    if (entries.length === 0) {
-      return DataService.replaceOk(0, skippedInvalid, unchanged, total, 0, false);
-    }
-    const res = await this.applyLineTexts(entries, opts);
-    // 扫描阶段的统计（跳过 / 未匹配）与写入结果合并 —— 缺了任何一半，数字都是错的。
-    return res.ok
-      ? {
-          ...res,
-          skippedInvalid: res.skippedInvalid + skippedInvalid,
-          unchanged: res.unchanged + unchanged,
-          total,
-        }
-      : res;
-  }
-
-  /* ---------------------- 会话编辑历史 ---------------------- */
-
-  /**
-   * 写后验证：用**新索引**把被编辑记录（以及紧邻下一条，仅当它编辑前合法）重新读回
-   * 并 `parseJsonLine`。返回空串表示通过；否则返回「第 N 行：<原因>」。
-   *
-   * 之所以要求「读回」而不是相信写入返回值：写入 API 只知道「写了多少字节」，不知道
-   * 「落盘的字节是不是我们想写的」—— 磁盘层任何一环（搬移、fsync、并发写）出错，
-   * 都只有读回才能发现。
-   */
-  private async verifyAfterRecordEdit(
-    line: number,
-    nextRecordWasValid: boolean | undefined
-  ): Promise<string> {
-    // 调用点在 ensureIndex() 之后，二者必然就绪；类型上仍是可选，故局部断言一次。
-    const index = this.index!;
-    const reader = this.reader!;
-    const targets: number[] = [line];
-    if (nextRecordWasValid === true && line + 1 < index.totalRecords) targets.push(line + 1);
-    for (const ln of targets) {
-      const r = await readRecordAt(ln, index, reader).catch((e: unknown) => ({
-        ok: false as const,
-        error: e instanceof Error ? e.message : String(e),
-      }));
-      if (!r.ok) return `第 ${ln + 1} 行：${r.error}`;
-    }
-    return '';
+    return this.runExclusive(() => replaceFieldInternal(this.write, path, from, to, opts));
   }
 
   /**
@@ -1512,61 +805,6 @@ export class DataService {
     this.hostDirty = false;
   }
 
-  /**
-   * 多行记录写坏时的回滚：用当前（重建后）索引重新定位该记录，把 `beforeText`
-   * （多行原文）按其尾行尾**原样**写回，再次重建索引。返回空串表示成功。
-   */
-  private async rollbackRecordEdit(
-    line: number,
-    beforeText: string,
-    tailEnding: LineEnding
-  ): Promise<string> {
-    try {
-      const li = this.index!;
-      const rr = li.recordRange(line);
-      const replacement = Buffer.concat([
-        Buffer.from(beforeText, 'utf8'),
-        lineEndingBytes(tailEnding),
-      ]);
-      await replaceRange(this.path, { start: rr.startOffset, end: rr.endOffset }, replacement, {});
-      await this.rebuildIndex();
-      return '';
-    } catch (e) {
-      return e instanceof Error ? e.message : String(e);
-    }
-  }
-
-  /**
-   * 编辑写坏时的回滚：用当前（新）索引重新定位该行，把 `beforeText` **原样**写回。
-   * 返回空串表示回滚成功；否则返回失败原因。
-   *
-   * 回滚 delta 恰为本次写入的相反数（`-previousDelta`）—— 行尾在写入与回滚间保持一致，
-   * 内容差就是全部差。
-   */
-  private async rollbackLineEdit(
-    line: number,
-    beforeText: string,
-    ending: LineEnding,
-    previousDelta: number
-  ): Promise<string> {
-    try {
-      const index = this.index!;
-      const reader = this.reader!;
-      let range: { start: number; end: number } | undefined;
-      for await (const r of index.scan(reader, line, line + 1)) {
-        if (r.error) throw new Error(r.error);
-        range = { start: r.start, end: r.end };
-        break;
-      }
-      if (!range) return '定位不到该行';
-      await replaceLine(this.path, range, Buffer.from(beforeText, 'utf8'), ending, {});
-      await this.commitIndex(index, [{ kind: 'replace', line, delta: -previousDelta }]);
-      return '';
-    } catch (e) {
-      return e instanceof Error ? e.message : String(e);
-    }
-  }
-
   /** 历史快照（对外视图，**不含**回退数据 —— 那是宿主内部事务）。 */
   getHistory(): HistoryPayload {
     return this.history.snapshot();
@@ -1574,445 +812,43 @@ export class DataService {
 
   /** 撤销一步（光标前移）。整体串行：回退本身也是写磁盘。 */
   async undoStep(): Promise<HistoryStepResult> {
-    return this.runExclusive(() => this.undoStepInternal());
-  }
-
-  private async undoStepInternal(): Promise<HistoryStepResult> {
-    const entry = this.history.undo();
-    if (!entry) {
-      return {
-        ok: false,
-        steps: 0,
-        cursor: this.history.cursorPos,
-        total: this.history.total,
-        error: '没有可撤销的操作',
-      };
-    }
-    const applied = await this.runHistoryOp(entry, false);
-    if (!applied.ok) {
-      // 失败时需要恢复游标（undo() 已经后退了）
-      this.history.stepForward();
-      return {
-        ok: false,
-        steps: 0,
-        cursor: this.history.cursorPos,
-        total: this.history.total,
-        error: applied.error,
-      };
-    }
-    return {
-      ok: true,
-      steps: 1,
-      cursor: this.history.cursorPos,
-      total: this.history.total,
-      label: entry.label,
-    };
+    return this.runExclusive(() => undoStepInternal(this.write));
   }
 
   /** 重做一步（光标后移）。整体串行。 */
   async redoStep(): Promise<HistoryStepResult> {
-    return this.runExclusive(() => this.redoStepInternal());
-  }
-
-  private async redoStepInternal(): Promise<HistoryStepResult> {
-    const entry = this.history.redo();
-    if (!entry) {
-      return {
-        ok: false,
-        steps: 0,
-        cursor: this.history.cursorPos,
-        total: this.history.total,
-        error: '没有可重做的操作',
-      };
-    }
-    const applied = await this.runHistoryOp(entry, true);
-    if (!applied.ok) {
-      // 失败时需要恢复游标（redo() 已经前进了）
-      this.history.stepBack();
-      return {
-        ok: false,
-        steps: 0,
-        cursor: this.history.cursorPos,
-        total: this.history.total,
-        error: applied.error,
-      };
-    }
-    return {
-      ok: true,
-      steps: 1,
-      cursor: this.history.cursorPos,
-      total: this.history.total,
-      label: entry.label,
-    };
+    return this.runExclusive(() => redoStepInternal(this.write));
   }
 
   /**
    * 把光标移到指定位置（历史浮层的「回退到此处」）。
-   *
-   * **逐条执行**而非「一步到位」：写操作之间有依赖（行号与偏移），跳着回退会让中间
-   * 条目的回退数据失效。只能沿着历史一步步走 —— 这正是它们被记成一条链的原因。
-   * 中途失败即停，并如实报告已走了几步（不假装全部成功）。
+   * 多步回退整体持锁：中途被别的写插入会让「已走到第 k 步」的结论失效。
    */
   async setHistoryCursor(target: number): Promise<HistoryStepResult> {
-    // 多步回退整体持锁：中途被别的写插入会让「已走到第 k 步」的结论失效。
-    return this.runExclusive(() => this.setHistoryCursorInternal(target));
+    return this.runExclusive(() => setHistoryCursorInternal(this.write, target));
   }
 
-  private async setHistoryCursorInternal(target: number): Promise<HistoryStepResult> {
-    const clamped = Math.max(0, Math.min(target, this.history.total));
-    const shrinking = clamped < this.history.cursorPos;
-    let steps = 0;
-    let error: string | undefined;
-
-    // 必须走 Internal：本方法可能已在调用方（revertTo）持有的写锁内，
-    // 再取一次锁就是自死锁（表现为请求永不 settle）。
-    while (this.history.cursorPos > clamped) {
-      const r = await this.undoStepInternal();
-      if (!r.ok) {
-        error = r.error;
-        break;
-      }
-      steps++;
-    }
-    while (this.history.cursorPos < clamped) {
-      const r = await this.redoStepInternal();
-      if (!r.ok) {
-        error = r.error;
-        break;
-      }
-      steps++;
-    }
-
-    return {
-      ok: this.history.cursorPos === clamped,
-      steps,
-      cursor: this.history.cursorPos,
-      total: this.history.total,
-      ...(error ? { error: `${error}（已${shrinking ? '撤销' : '重做'} ${steps} 步后中止）` } : {}),
-    };
-  }
-
-  /**
-   * 让某条历史成为**最新已应用**的操作（光标移到它之后）。
-   *
-   * 语义选「停在这一步」而非「撤销该条本身」：后者会让「点最新那一条」变成一次撤销，
-   * 与直觉相反 —— 点最上面那条应该什么都不发生。UI 的文案、按钮禁用态都依赖这个语义，
-   * 宿主与前端必须一致（差一步就会「想保留的那步被撤掉」）。
-   */
+  /** 让某条历史成为最新已应用的操作（语义见 historyReplay.ts）。整体串行。 */
   async revertTo(id: string): Promise<HistoryStepResult> {
-    // 跨多步的回退必须整体串行：中途被别的写插入会让「已回退 k 步」的结论失效。
-    return this.runExclusive(() => this.revertToInternal(id));
-  }
-
-  private async revertToInternal(id: string): Promise<HistoryStepResult> {
-    const idx = this.history.indexOfId(id);
-    if (idx < 0) {
-      return {
-        ok: false,
-        steps: 0,
-        cursor: this.history.cursorPos,
-        total: this.history.total,
-        error: '该历史记录已不存在（可能因超出上限被丢弃）',
-      };
-    }
-    return this.setHistoryCursorInternal(idx + 1);
-  }
-
-  /** 执行一条历史操作的正向或反向；期间 `history.push` 自动失效。 */
-  private async runHistoryOp(
-    entry: HistoryEntry,
-    forward: boolean
-  ): Promise<{ ok: boolean; error?: string }> {
-    this.history.applying = true;
-    try {
-      return await this.applyHistoryOp(entry.op, forward);
-    } finally {
-      this.history.applying = false;
-    }
-  }
-
-  /** 历史操作的双向执行（正向 = 用户当初的操作，反向 = 回退）。 */
-  private async applyHistoryOp(
-    op: HistoryOp,
-    forward: boolean
-  ): Promise<{ ok: boolean; error?: string }> {
-    const wrap = (r: { ok: boolean; error?: string }): { ok: boolean; error?: string } =>
-      r.ok ? { ok: true } : { ok: false, ...(r.error ? { error: r.error } : {}) };
-
-    switch (op.kind) {
-      // 一律调用 **Internal（不加锁）** 版本：本方法已在 undo/redo/revert 持有的写锁内，
-      // 再走对外入口会第二次索取同一把锁 —— 那是必然的自死锁。
-      case 'edit':
-        // 走无单行约束的 internal：op.before/after 是当初磁盘上真实存在过的原文，
-        // 多行记录的原样写回必须允许（写后验证与回滚仍在，安全性不受影响）。
-        return wrap(await this.editRecordInternal(op.line, forward ? op.after : op.before));
-      case 'insert':
-        return wrap(
-          forward
-            ? await this.insertRecordInternal(op.line, op.text)
-            : await this.deleteRecordInternal(op.line)
-        );
-      case 'delete':
-        return wrap(
-          forward
-            ? await this.deleteRecordInternal(op.line)
-            : await this.insertRecordInternal(op.line, op.before)
-        );
-      case 'deleteMany': {
-        const lines = op.ranges.flatMap((r) => r.lines);
-        return wrap(
-          forward
-            ? await this.deleteRecordsInternal(lines)
-            : await this.insertRangesInternal(op.ranges)
-        );
-      }
-      case 'replaceAll':
-        return wrap(
-          await this.applyLineTexts(
-            op.changes.map((c) => ({ line: c.line, text: forward ? c.after : c.before }))
-          )
-        );
-    }
+    return this.runExclusive(() => revertToInternal(this.write, id));
   }
 
   /* ------------------------- 多选批量操作（M2） ------------------------- */
 
-  /**
-   * 批量删除多行，一次原子落盘。
-   *
-   * 两个关键设计：
-   *   1. **相邻行合并成连续区间** —— 框选一整段连续行是最常见的多选场景，合并后
-   *      编辑数从 N 降到 1。这是本功能最有价值的优化（否则「框选 500 行删除」
-   *      会变成 500 个区间编辑）。
-   *   2. **回传区间（start/end/content）** —— 撤销正是「在同一组 start 处插入 content」。
-   *      删除不会改变「删除点之前」的任何偏移，故删除与撤销共用同一组区间，
-   *      完全可逆，且撤销同样是**一次原子重写**而非 N 次逐行插入。
-   *
-   * 索引必须**倒序**应用 `applyLineDelete`：其语义是「在现有索引上删第 line 行」，
-   * 倒序才能保证每次的行号都还未被后面的删除影响。
-   */
-  /** 对外入口：串行化批量删除。 */
+  /** 批量删除多行，一次原子落盘（对外入口：串行化；区间合并与索引倒序见 rangeWriter.ts）。 */
   async deleteRecords(
     lines: readonly number[],
     opts: ReplaceOpts = {}
   ): Promise<DeleteManyResultPayload> {
-    return this.runExclusive(() => this.deleteRecordsInternal(lines, opts));
+    return this.runExclusive(() => deleteRecordsInternal(this.write, lines, opts));
   }
 
-  private async deleteRecordsInternal(
-    lines: readonly number[],
-    opts: ReplaceOpts = {}
-  ): Promise<DeleteManyResultPayload> {
-    const li = await this.ensureIndex();
-    const reader = this.reader!;
-
-    const conflict = await this.detectWriteConflict(-1, opts.expectedTotalLines);
-    if (conflict) {
-      return DataService.deleteManyFailure(conflict.error ?? '文件已被外部修改', {
-        conflict: true,
-      });
-    }
-
-    const targets = DataService.normalizeLines(lines, li.totalRecords);
-    if (targets.length === 0) return DataService.deleteManyFailure('没有可删除的记录');
-    if (targets.length > MAX_SELECTION_LINES) {
-      return DataService.deleteManyFailure(
-        `一次最多删除 ${MAX_SELECTION_LINES} 行，当前选中 ${targets.length} 行。`
-      );
-    }
-
-    // 记录号 → 物理行集合（多行记录展开为连续行区间；紧凑文件下 == 记录号本身）
-    const wantedLines = new Set<number>();
-    for (const no of targets) {
-      const rr = li.recordRange(no);
-      for (let l = rr.startLine; l <= rr.endLine; l++) wantedLines.add(l);
-    }
-    const firstRecRange = li.recordRange(targets[0]);
-    const lastRecRange = li.recordRange(targets[targets.length - 1]);
-
-    // 一次顺序扫过目标区间，取每行的字节范围与原文（含行尾 —— 撤销要原样插回）
-    const wanted = wantedLines;
-    const rows: { line: number; start: number; end: number; bytes: number; content: string }[] = [];
-    let skipped = 0;
-    for await (const r of li.scan(reader, firstRecRange.startLine, lastRecRange.endLine + 1)) {
-      if (!wanted.has(r.line)) continue;
-      // 超长行（scan 以 error 标记）无法安全取出内容：跳过而非删一半。
-      if (r.error) {
-        skipped++;
-        continue;
-      }
-      const ending = detectLineEnding({ start: r.start, end: r.end }, r.bytes.length);
-      const eol = ending === 'crlf' ? '\r\n' : ending === 'lf' ? '\n' : '';
-      rows.push({
-        line: r.line,
-        start: r.start,
-        end: r.end,
-        bytes: r.end - r.start,
-        content: r.bytes.toString('utf8') + eol,
-      });
-    }
-    if (rows.length === 0) return DataService.deleteManyFailure('没有可删除的行（目标行过大）');
-
-    // 合并相邻行为连续区间（每行字节数逐行记录 —— 撤销要精确平移检查点）
-    const ranges: DeletedRange[] = [];
-    for (const row of rows) {
-      const tail = ranges[ranges.length - 1];
-      if (tail && tail.lines[tail.lines.length - 1] + 1 === row.line) {
-        tail.end = row.end;
-        tail.lines.push(row.line);
-        tail.lineBytes.push(row.bytes);
-        tail.content += row.content;
-      } else {
-        ranges.push({
-          start: row.start,
-          end: row.end,
-          content: row.content,
-          lines: [row.line],
-          lineBytes: [row.bytes],
-        });
-      }
-    }
-
-    const edits: ByteEdit[] = ranges.map((r) => ({
-      start: r.start,
-      end: r.end,
-      replacement: Buffer.alloc(0),
-    }));
-
-    this.editing = true;
-    try {
-      const res = await this.rewriteAtomic(edits, opts);
-      if (li.multiline) {
-        // 多行文件：删除改变行号结构，recordEndLines 无法增量平移 —— 全量重建。
-        await this.rebuildIndex();
-      } else {
-        // 倒序应用索引删除（见方法文档）
-        const ops: IndexDeltaOp[] = [];
-        for (let i = rows.length - 1; i >= 0; i--) {
-          ops.push({ kind: 'delete', line: rows[i].line, bytes: rows[i].end - rows[i].start });
-        }
-        await this.commitIndex(li, ops);
-        this.badLines.remapAfterDeletes(wanted);
-      }
-      const op: HistoryOp = { kind: 'deleteMany', ranges };
-      const { label, lines: affectedLines } = historyLabel(op);
-      this.history.execute({
-        id: this.history.nextId(),
-        op,
-        label,
-        lines: affectedLines,
-        bytesDelta: res.bytesDelta,
-        at: Date.now(),
-        bytes: historyOpBytes(op),
-      });
-
-      return {
-        ok: true,
-        deleted: rows.length,
-        ranges: ranges.length,
-        bytesDelta: res.bytesDelta,
-        costMs: Math.round(res.costMs * 100) / 100,
-        skipped,
-        changes: ranges,
-      };
-    } catch (e) {
-      if (e instanceof WriteCancelledError) {
-        return DataService.deleteManyFailure('已取消', { cancelled: true });
-      }
-      return DataService.deleteManyFailure(e instanceof Error ? e.message : String(e));
-    } finally {
-      this.editing = false;
-    }
-  }
-
-  /**
-   * 按字节区间批量插回内容（批量删除的**撤销 / 重做**专用）。
-   *
-   * 传入的区间来自 `deleteRecords` 回传的 `changes`。之所以能直接复用同一组 `start`：
-   * 删除不改变「删除点之前」的任何偏移，故原 `start` 在删除后的文件里仍是有效插入点。
-   * 于是撤销与删除完全对称 —— 都是一次原子重写，而不是 N 次逐行插入。
-   *
-   * 插入行号用 `原首行号 − 在此之前被删的行数` 推出，并**倒序**应用
-   * `applyLineInsert`：倒序时后面的插入不会影响前面待处理区间的行号。
-   */
-  /** 对外入口：串行化区间插回（批量删除的撤销 / 重做）。 */
+  /** 按字节区间批量插回内容（批量删除的撤销 / 重做；对外入口：串行化）。 */
   async insertRanges(
     ranges: readonly DeletedRange[],
     opts: ReplaceOpts = {}
   ): Promise<DeleteManyResultPayload> {
-    return this.runExclusive(() => this.insertRangesInternal(ranges, opts));
-  }
-
-  private async insertRangesInternal(
-    ranges: readonly DeletedRange[],
-    opts: ReplaceOpts = {}
-  ): Promise<DeleteManyResultPayload> {
-    const li = await this.ensureIndex();
-
-    if (ranges.length === 0) return DataService.deleteManyFailure('没有需要恢复的内容');
-
-    const conflict = await this.detectWriteConflict(-1, opts.expectedTotalLines);
-    if (conflict) {
-      return DataService.deleteManyFailure(conflict.error ?? '文件已被外部修改', {
-        conflict: true,
-      });
-    }
-
-    const sorted = [...ranges].toSorted((a, b) => a.start - b.start);
-    const allLines = sorted.flatMap((r) => r.lines).toSorted((a, b) => a - b);
-
-    const edits: ByteEdit[] = [];
-    for (const r of sorted) {
-      if (!Number.isInteger(r.start) || r.start < 0 || r.start > li.totalBytes) {
-        // 偏移越界说明文件已被别的编辑改动过：宁可拒绝，也不要在错误位置插入。
-        return DataService.deleteManyFailure(
-          '撤销数据已失效（文件已被其它编辑改动），请重新加载。',
-          {
-            conflict: true,
-          }
-        );
-      }
-      if (r.lines.length === 0 || !r.content) continue;
-      edits.push({ start: r.start, end: r.start, replacement: Buffer.from(r.content, 'utf8') });
-    }
-    if (edits.length === 0) return DataService.deleteManyFailure('没有需要恢复的内容');
-
-    this.editing = true;
-    try {
-      const res = await this.rewriteAtomic(edits, opts);
-      let restored = 0;
-      // 恢复的行内容已知合法（原本就在文件里），故从坏行集合中摘除。
-      const ops: IndexDeltaOp[] = [];
-      // 倒序：先插后面的区间，前面区间的行号推导才不受影响。
-      for (let i = sorted.length - 1; i >= 0; i--) {
-        const r = sorted[i];
-        if (r.lines.length === 0 || !r.content) continue;
-        const at = r.lines[0] - countLessThan(allLines, r.lines[0]);
-        // 逐行插入并**逐行给出精确字节数** —— 用平均字节平移检查点会错位（见 DeletedRange.lineBytes）。
-        for (let k = 0; k < r.lines.length; k++) {
-          ops.push({ kind: 'insert', line: at + k, bytes: r.lineBytes[k] ?? 0 });
-        }
-        restored += r.lines.length;
-      }
-      await this.commitIndex(li, ops);
-      this.badLines.deleteMany(allLines);
-
-      return {
-        ok: true,
-        deleted: restored,
-        ranges: edits.length,
-        bytesDelta: res.bytesDelta,
-        costMs: Math.round(res.costMs * 100) / 100,
-        skipped: 0,
-      };
-    } catch (e) {
-      if (e instanceof WriteCancelledError) {
-        return DataService.deleteManyFailure('已取消', { cancelled: true });
-      }
-      return DataService.deleteManyFailure(e instanceof Error ? e.message : String(e));
-    } finally {
-      this.editing = false;
-    }
+    return this.runExclusive(() => insertRangesInternal(this.write, ranges, opts));
   }
 
   /** 释放句柄 → 原子重写 → 拿回句柄（批量删除与批量重写共用同一时序）。 */
@@ -2031,31 +867,6 @@ export class DataService {
       // 无论成败都必须把句柄拿回来，否则后续所有读取都会失败。
       await this.acquireFileHandles();
     }
-  }
-
-  /** 归一化行号：去重、滤越界、升序（宿主对前端的最后一道防线）。 */
-  private static normalizeLines(lines: readonly number[], totalLines: number): number[] {
-    const seen = new Set<number>();
-    for (const l of lines) {
-      if (Number.isInteger(l) && l >= 0 && l < totalLines) seen.add(l);
-    }
-    return [...seen].toSorted((a, b) => a - b);
-  }
-
-  private static deleteManyFailure(
-    error: string,
-    extra?: Partial<DeleteManyResultPayload>
-  ): DeleteManyResultPayload {
-    return {
-      ok: false,
-      deleted: 0,
-      ranges: 0,
-      bytesDelta: 0,
-      costMs: 0,
-      skipped: 0,
-      error,
-      ...extra,
-    };
   }
 
   /**
@@ -2088,7 +899,7 @@ export class DataService {
     }
 
     const li = await this.ensureIndex();
-    const targets = DataService.normalizeLines(lines, li.totalRecords);
+    const targets = normalizeLines(lines, li.totalRecords);
     if (targets.length === 0) return fail('没有可导出的记录');
     if (targets.length > MAX_EXPORT_LINES) {
       return fail(`一次最多导出 ${MAX_EXPORT_LINES} 条记录，当前 ${targets.length} 条。`);
@@ -2155,28 +966,20 @@ export class DataService {
       text: '',
     });
 
-    const targets = DataService.normalizeLines(lines, li.totalRecords);
+    const targets = normalizeLines(lines, li.totalRecords);
     if (targets.length === 0) return empty('没有可复制的记录');
     if (targets.length > MAX_SELECTION_LINES) {
       return empty(`一次最多复制 ${MAX_SELECTION_LINES} 行，当前选中 ${targets.length} 行。`);
     }
 
     // 记录号 → 物理行集合（多行记录展开为连续行区间，复制得到完整的多行原文）
-    const wantedLines = new Set<number>();
-    for (const no of targets) {
-      const rr = li.recordRange(no);
-      for (let l = rr.startLine; l <= rr.endLine; l++) wantedLines.add(l);
-    }
-    const firstCopyRange = li.recordRange(targets[0]);
-    const lastCopyRange = li.recordRange(targets[targets.length - 1]);
-
-    const wanted = wantedLines;
+    const { wanted, firstLine, lastLine } = expandRecordLines(li, targets);
     const parts: string[] = [];
     let bytes = 0;
     let skipped = 0;
     let truncated = false;
 
-    for await (const r of li.scan(reader, firstCopyRange.startLine, lastCopyRange.endLine + 1)) {
+    for await (const r of li.scan(reader, firstLine, lastLine + 1)) {
       if (!wanted.has(r.line)) continue;
       if (r.error) {
         skipped++;
@@ -2188,80 +991,11 @@ export class DataService {
         break;
       }
       const ending = detectLineEnding({ start: r.start, end: r.end }, r.bytes.length);
-      const eol = ending === 'crlf' ? '\r\n' : ending === 'lf' ? '\n' : '';
-      parts.push(r.bytes.toString('utf8') + eol);
+      parts.push(r.bytes.toString('utf8') + eolText(ending));
       bytes += rawBytes;
     }
 
     return { ok: true, count: parts.length, bytes, truncated, skipped, text: parts.join('') };
-  }
-
-  /**
-   * 把规划好的编辑一次落盘，并同步索引与基线快照。
-   *
-   * 这是批量改写的**唯一落盘路径**：查找替换、撤销、重做都走它，避免各写一份
-   * 「释放句柄 → 原子重写 → 拿回句柄 → 更新索引 → 刷新基线」的时序（那是最易漏步的地方）。
-   */
-  private async applyEdits(
-    li: LineIndex,
-    edits: ByteEdit[],
-    deltas: { line: number; delta: number }[],
-    changes: ReplaceChange[],
-    total: number,
-    skippedInvalid: number,
-    unchanged: number,
-    opts: ReplaceOpts
-  ): Promise<ReplaceResultPayload> {
-    this.editing = true;
-    try {
-      const res = await this.rewriteAtomic(edits, opts);
-      // 索引增量更新：行数不变，逐行平移其后检查点（op 顺序自身无关，但与多种 op 混合时相关）
-      // 一次批量 op 走同一条路 —— 宿主侧会用同一函数、同一顺序应用，两侧不会漂移。
-      await this.commitIndex(
-        li,
-        deltas.map<IndexDeltaOp>((d) => ({ kind: 'replace', line: d.line, delta: d.delta }))
-      );
-      this.badLines.deleteMany(deltas.map((d) => d.line));
-
-      const undoBytes = changes.reduce((a, c) => a + c.before.length + c.after.length, 0);
-      const undoable =
-        changes.length <= MAX_REPLACE_UNDO_LINES && undoBytes <= MAX_REPLACE_UNDO_BYTES;
-
-      // 注：本方法也被 applyLineTexts 调用（历史回退的原语），那时的 `history.applying`
-      // 为真，history.execute 会自动跳过 —— 否则每撤销一次就会生成一条新记录。
-      const op: HistoryOp = { kind: 'replaceAll', changes };
-      const { label, lines } = historyLabel(op);
-      this.history.execute({
-        id: this.history.nextId(),
-        op,
-        label,
-        lines,
-        bytesDelta: res.bytesDelta,
-        at: Date.now(),
-        bytes: historyOpBytes(op),
-      });
-
-      return {
-        ok: true,
-        replaced: edits.length,
-        skippedInvalid,
-        unchanged,
-        total,
-        bytesDelta: res.bytesDelta,
-        costMs: Math.round(res.costMs * 100) / 100,
-        changes: undoable ? changes : undefined,
-        undoable,
-      };
-    } catch (e) {
-      // 取消与失败必须分开报：批量重写在 rename 之前中止是**零风险**的，
-      // 把它报成「失败」会让用户以为文件可能损坏 —— 那与事实相反。
-      if (e instanceof WriteCancelledError) {
-        return { ...DataService.replaceFailure('已取消'), cancelled: true };
-      }
-      return DataService.replaceFailure(e instanceof Error ? e.message : String(e));
-    } finally {
-      this.editing = false;
-    }
   }
 
   /**
@@ -2287,45 +1021,6 @@ export class DataService {
       }
     }
     await this.host?.reacquireFile(this.path).catch(() => {});
-  }
-
-  /** 查找替换的失败回执（统一填充字段，避免多处重复）。 */
-  private static replaceFailure(
-    error: string,
-    extra?: Partial<ReplaceResultPayload>
-  ): ReplaceResultPayload {
-    return {
-      ok: false,
-      replaced: 0,
-      skippedInvalid: 0,
-      unchanged: 0,
-      total: 0,
-      bytesDelta: 0,
-      costMs: 0,
-      undoable: false,
-      error,
-      ...extra,
-    };
-  }
-
-  private static replaceOk(
-    replaced: number,
-    skippedInvalid: number,
-    unchanged: number,
-    total: number,
-    bytesDelta: number,
-    undoable: boolean
-  ): ReplaceResultPayload {
-    return {
-      ok: true,
-      replaced,
-      skippedInvalid,
-      unchanged,
-      total,
-      bytesDelta,
-      costMs: 0,
-      undoable,
-    };
   }
 
   /** 抽样前 N 行推断字段（只扫前 sampleLines/count 行，绝不全文件）。 */
