@@ -5,6 +5,17 @@ All notable changes to the JSONL Viewer extension will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.3] - 2026-10-19
+
+### Fixed
+
+- 修复撤销「多段不相邻的批量删除」后记录被插到错误位置、顺序被静默打乱的问题（v1.11.2 及更早版本受影响）
+
+### Changed
+
+- `dataService.ts` 写路径拆分为 `recordWriter` / `textReplacer` / `rangeWriter` / `historyReplay`（2601 → 约 1200 行，对外 API 不变）
+- 三个浮层的头部与报告骨架抽成 `panelChrome`，Esc / 点遮罩关闭并入 `createPanelAnimation`；`indexHost` 的搜索 / 过滤取消轮询合并为一处
+
 ## [1.11.2] - 2026-10-19
 
 ### Changed
