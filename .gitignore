@@ -35,6 +35,8 @@ test_out.txt
 .scratch/
 # Oh My ClaudeCode 本地状态文件（会话、项目记忆等）
 .omc/
+# TRAE IDE 的历史功能规格（本地保留，不入库）
+.trae/
 # WorkBuddy 工作区记忆 / 技能数据（本地协作数据，非项目产物，不入库）
 .workbuddy/
 # 设计稿 / 原型产物：由设计工具导出，非运行时源码；重新导出会整体覆盖，
