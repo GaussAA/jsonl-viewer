@@ -127,14 +127,17 @@ export async function exportLinesToFile(
   }
 }
 
-/** 写一块（背压感知：返回 false 表示写入流出错，调用方应中止）。 */
+/**
+ * 写一块并**等它真正落到底层**（返回 false 表示写入流出错，调用方应中止）。
+ *
+ * 必须等写入回调而不是 `write()` 返回 true 就放行：返回 true 只表示缓冲区没满，
+ * 这一块可能还在途中。此时若取消触发 `stream.destroy()`，在途写入会在流已销毁后才完成，
+ * 以 `ERR_STREAM_DESTROYED` 冒成未捕获异常（CI 上偶发，见 error_ledger）。
+ * 每块都等回调后，取消时流上不会再有在途写入；背压也随之天然满足。
+ */
 function writeChunk(stream: ReturnType<typeof createWriteStream>, text: string): Promise<boolean> {
   return new Promise<boolean>((res) => {
-    const ok = stream.write(text, (err) => {
-      if (err) res(false);
-    });
-    if (ok) res(true);
-    else stream.once('drain', () => res(true));
+    stream.write(text, (err) => res(!err));
   });
 }
 
