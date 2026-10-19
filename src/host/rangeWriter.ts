@@ -168,15 +168,23 @@ export async function insertRangesInternal(
   const allLines = sorted.flatMap((r) => r.lines).toSorted((a, b) => a - b);
 
   const edits: ByteEdit[] = [];
+  // 此前各段已被删掉的字节数。`DeletedRange.start` 记的是**删除前**文件里的偏移，
+  // 而本次要在**删除后**的文件上插入：第 k 段的真正插入点 = start − 前 k−1 段的字节数。
+  // 只对第一段恰好等于 start，漏掉这个扣除会让后面的区间被插到更靠后的位置，
+  // 返回 ok、行数也对，记录顺序却被静默打乱。
+  let removedBefore = 0;
   for (const r of sorted) {
-    if (!Number.isInteger(r.start) || r.start < 0 || r.start > li.totalBytes) {
+    const at = r.start - removedBefore;
+    if (!Number.isInteger(r.start) || at < 0 || at > li.totalBytes) {
       // 偏移越界说明文件已被别的编辑改动过：宁可拒绝，也不要在错误位置插入。
       return deleteManyFailure('撤销数据已失效（文件已被其它编辑改动），请重新加载。', {
         conflict: true,
       });
     }
     if (r.lines.length === 0 || !r.content) continue;
-    edits.push({ start: r.start, end: r.start, replacement: Buffer.from(r.content, 'utf8') });
+    const replacement = Buffer.from(r.content, 'utf8');
+    edits.push({ start: at, end: at, replacement });
+    removedBefore += replacement.length;
   }
   if (edits.length === 0) return deleteManyFailure('没有需要恢复的内容');
 
