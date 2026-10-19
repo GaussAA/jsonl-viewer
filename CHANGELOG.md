@@ -5,7 +5,15 @@ All notable changes to the JSONL Viewer extension will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.4] - 2026-10-19
+
+### Fixed
+
+- 修复导出被取消时偶发的 `ERR_STREAM_DESTROYED`：每块都等写入回调完成再继续，取消时流上不再有在途写入
+
 ## [1.11.3] - 2026-10-19
+
+> 该版本的发布流程在单元测试步骤被上述导出竞态中断，**没有产出安装包**；其中的修复随 1.11.4 一并发布。
 
 ### Fixed
 
