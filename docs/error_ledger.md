@@ -5,6 +5,26 @@
 
 ---
 
+## [导出取消用例在 CI 上偶发 ERR_STREAM_DESTROYED（release 工作流因此中断）] → [writeChunk 在 write() 返回 true 时就放行，上一块写入仍在途中，取消触发 destroy() 后才完成] → [每块都等写入回调再继续]
+
+- **现象**：v1.11.3 打 tag 后 Release 工作流在 "Unit tests" 步失败，1010 个用例中仅
+  `exporter.test.ts` 的「F5：取消时目标文件从未被创建」一个未通过：
+  `uncaughtException: Cannot call write after a stream was destroyed (ERR_STREAM_DESTROYED)`。
+  同一提交在 main 上的 CI 是绿的，本地循环 140 次（含满 CPU 负载）也复现不了。
+  后续的构建 / 打包 / 上传步骤全部被跳过，所以该 tag 没有产出 VSIX。
+- **根因**：`writeChunk` 在 `stream.write()` 返回 true（缓冲区未满）时立刻 resolve，
+  并不等写入真正完成。取消发生在下一条记录前，`cleanup` 调 `stream.destroy()`，
+  此时上一块的 fs 写入回调（`FSReqCallback.oncomplete`）才到，在已销毁的流上冒出
+  `ERR_STREAM_DESTROYED`，没有 error 监听者，成为未捕获异常。Linux 上线程池调度更易触发。
+- **正解**：`writeChunk` 每块都等写入回调（`stream.write(text, cb)`）后再 resolve，
+  取消时流上不会再有在途写入；背压随之天然满足，不再需要单独监听 `drain`。
+- **诚实的边界**：这是依据 CI 堆栈做出的推断性修复，**没有稳定的回归用例** ——
+  竞态依赖 fs 线程池的完成时序，本地无法稳定复现。已有的 F5 用例仍在，用来在 CI 上持续观察。
+- **预防**：凡「cleanup 里 destroy 流」的路径，都要先确认流上没有在途写入；
+  `write()` 返回 true 不等于已写完。（2026-10-19）
+
+---
+
 ## [撤销多段不相邻的批量删除后，记录顺序被静默打乱] → [DeletedRange.start 是删除前的偏移，撤销时当成删除后的插入点直接用] → [逐段扣除此前各段已删的字节数]
 
 - **现象**：框选不相邻的几行（如第 1 行和第 4 行）批量删除，再撤销。撤销返回成功、行数也对，
