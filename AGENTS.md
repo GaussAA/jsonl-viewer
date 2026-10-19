@@ -35,7 +35,6 @@ Most source comments and docs are written in Chinese; keep new comments in the s
 | `media/`   | Extension icon (see `media/AGENTS.md`)                                                  |
 | `.github/` | CI and release workflows (see `.github/AGENTS.md`)                                      |
 | `.husky/`  | Git hooks: pre-commit lint/format, pre-push typecheck/test (see `.husky/AGENTS.md`)     |
-| `.trae/`   | Historical feature specs from the TRAE IDE (see `.trae/AGENTS.md`)                      |
 | `.vscode/` | F5 launch config and compile task (see `.vscode/AGENTS.md`)                             |
 
 ## For AI Agents
