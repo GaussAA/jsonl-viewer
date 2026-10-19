@@ -10,7 +10,7 @@
  * 一次点击可能撤销十几步，用户需要先知道代价。
  */
 
-import { setupFocusTrap } from './focusTrap.ts';
+import { createPanelAnimation } from './panelAnimation.ts';
 import { formatBytes } from './editLogic.ts';
 import type { HistoryEntryView, HistoryPayload, HistoryResultPayload } from '../protocol/rpc.ts';
 
@@ -52,9 +52,7 @@ const KIND_LABEL: Record<HistoryEntryView['kind'], string> = {
 };
 
 export function createHistoryPanel(deps: HistoryPanelDeps): HistoryPanelController {
-  let opened = false;
   let busy = false;
-  let trapDispose: (() => void) | undefined;
 
   const backdrop = document.createElement('div');
   backdrop.className = 'jlv-hist-backdrop';
@@ -107,6 +105,10 @@ export function createHistoryPanel(deps: HistoryPanelDeps): HistoryPanelControll
 
   panel.append(head, list, note);
   backdrop.append(panel);
+
+  const anim = createPanelAnimation({ panel, backdrop, onOpen: () => void refresh() });
+  const open = anim.open;
+  const close = anim.close;
 
   /* ---------------- 渲染 ---------------- */
 
@@ -224,7 +226,7 @@ export function createHistoryPanel(deps: HistoryPanelDeps): HistoryPanelControll
   /* ---------------- 开关 ---------------- */
 
   const onKeyDown = (e: KeyboardEvent): void => {
-    if (e.key === 'Escape' && opened) {
+    if (e.key === 'Escape' && anim.isOpen()) {
       e.preventDefault();
       close();
     }
@@ -234,45 +236,14 @@ export function createHistoryPanel(deps: HistoryPanelDeps): HistoryPanelControll
     if (e.target === backdrop) close();
   });
 
-  function open(): void {
-    if (opened) return;
-    opened = true;
-    backdrop.hidden = false;
-    // 下一帧再加类，保证过渡生效（与 editPanel 一致）
-    requestAnimationFrame(() => {
-      backdrop.classList.add('open');
-      panel.classList.add('open');
-      // 设置焦点陷阱
-      trapDispose?.();
-      trapDispose = setupFocusTrap({ container: panel, onClose: close }).dispose;
-    });
-    void refresh();
-  }
-
-  function close(): void {
-    if (!opened) return;
-    opened = false;
-    trapDispose?.();
-    trapDispose = undefined;
-    backdrop.classList.remove('open');
-    panel.classList.remove('open');
-    setTimeout(
-      () => {
-        if (!opened) backdrop.hidden = true;
-      },
-      // 与 CSS 的收起时长一致（设计体系 §3.6：收起走快速淡出）
-      120
-    );
-  }
-
   return {
     root: backdrop,
     open,
     close,
-    isOpen: () => opened,
+    isOpen: anim.isOpen,
     dispose: () => {
       document.removeEventListener('keydown', onKeyDown);
-      trapDispose?.();
+      anim.dispose();
     },
   };
 }

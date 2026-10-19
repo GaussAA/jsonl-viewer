@@ -18,7 +18,7 @@
  * 且列表加标记 —— 宁可显得啰嗦，也不让一份残缺结论被当成结论。
  */
 
-import { setupFocusTrap } from './focusTrap.ts';
+import { createPanelAnimation } from './panelAnimation.ts';
 import { formatBytes } from './editLogic.ts';
 import {
   fieldHasQualityIssue,
@@ -51,11 +51,8 @@ export interface ProfilePanelController {
 }
 
 export function createProfilePanel(deps: ProfilePanelDeps): ProfilePanelController {
-  let opened = false;
-  let trapDispose: (() => void) | undefined;
   let current: ProfileResult | undefined;
   let sortMode: ProfileSort = 'presence';
-  let closeTimer: ReturnType<typeof setTimeout> | undefined;
 
   const backdrop = document.createElement('div');
   backdrop.className = 'jlv-bad-backdrop';
@@ -122,6 +119,19 @@ export function createProfilePanel(deps: ProfilePanelDeps): ProfilePanelControll
 
   panel.append(head, status, note, list);
   backdrop.append(panel);
+
+  const anim = createPanelAnimation({
+    panel,
+    backdrop,
+    onOpen: () => {
+      // 首次打开自动扫一次：用户点「数据画像」就是想看数据长什么样，
+      // 再让他点一次「开始扫描」是多余的一道手续。
+      if (!current && !deps.isScanning()) void runScan();
+      else setBusy(deps.isScanning());
+    },
+  });
+  const open = anim.open;
+  const close = anim.close;
 
   /* ---------------- 渲染 ---------------- */
 
@@ -220,43 +230,6 @@ export function createProfilePanel(deps: ProfilePanelDeps): ProfilePanelControll
 
   /* ---------------- 开关 ---------------- */
 
-  function open(): void {
-    if (opened) return;
-    opened = true;
-    if (closeTimer) {
-      clearTimeout(closeTimer);
-      closeTimer = undefined;
-    }
-    backdrop.hidden = false;
-    // 下一帧再加类，保证过渡生效（与 editPanel / historyPanel / badLinesPanel 一致）。
-    requestAnimationFrame(() => {
-      backdrop.classList.add('open');
-      panel.classList.add('open');
-      // 设置焦点陷阱
-      trapDispose?.();
-      trapDispose = setupFocusTrap({ container: panel, onClose: close }).dispose;
-    });
-    // 首次打开自动扫一次：用户点「数据画像」就是想看数据长什么样，
-    // 再让他点一次「开始扫描」是多余的一道手续。
-    if (!current && !deps.isScanning()) void runScan();
-    else setBusy(deps.isScanning());
-  }
-
-  function close(): void {
-    if (!opened) return;
-    opened = false;
-    trapDispose?.();
-    trapDispose = undefined;
-    backdrop.classList.remove('open');
-    panel.classList.remove('open');
-    if (closeTimer) clearTimeout(closeTimer);
-    closeTimer = setTimeout(() => {
-      // 过渡期间用户可能又打开了它 —— 关闭定时器不得把新开的浮层藏掉。
-      if (!opened) backdrop.hidden = true;
-      closeTimer = undefined;
-    }, 120);
-  }
-
   backdrop.addEventListener('pointerdown', (e) => {
     if (e.target === backdrop) close();
   });
@@ -268,17 +241,16 @@ export function createProfilePanel(deps: ProfilePanelDeps): ProfilePanelControll
     root: backdrop,
     open,
     close,
-    isOpen: () => opened,
+    isOpen: anim.isOpen,
     setProgress(processedBytes, totalBytes) {
-      if (!opened) return;
+      if (!anim.isOpen()) return;
       const pct =
         totalBytes > 0 ? Math.min(100, Math.round((processedBytes / totalBytes) * 100)) : 0;
       // 只改文案：进度回调每次重建节点的话，「取消」按钮会跟着闪。
       status.textContent = `正在扫描整个文件… ${pct}%（已读 ${formatBytes(processedBytes)} / ${formatBytes(totalBytes)}）`;
     },
     dispose() {
-      trapDispose?.();
-      if (closeTimer) clearTimeout(closeTimer);
+      anim.dispose();
       backdrop.remove();
     },
   };

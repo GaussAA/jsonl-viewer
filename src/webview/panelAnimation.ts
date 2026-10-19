@@ -1,116 +1,77 @@
 /**
- * 面板打开/关闭动画管理工具
- * 用于消除 badLinesPanel、historyPanel、profilePanel 等面板中的重复代码
+ * panelAnimation.ts — 浮层开合的共用状态机。
+ *
+ * badLinesPanel / historyPanel / profilePanel / fieldPanel 原先各自抄了一份
+ * 「opened 标志 + 下一帧加 open 类 + 焦点陷阱 + 延迟隐藏」，改一处漏三处。
+ * 这里收口；各面板只保留自己的业务（刷新、扫描等）。
  */
 
-import { setupFocusTrap } from './focusTrap.js';
+import { setupFocusTrap } from './focusTrap.ts';
 
 export interface PanelAnimationConfig {
-  /** 面板容器元素 */
   panel: HTMLElement;
-  /** 背景遮罩元素 */
   backdrop: HTMLElement;
-  /** 关闭回调（可选） */
-  onClose?: () => void;
-  /** 打开后的刷新回调（可选） */
-  onRefresh?: () => void | Promise<void>;
+  /** 收起过渡时长（ms），须与 CSS 一致（设计体系 §3.6）。默认 120。 */
+  closeDelayMs?: number;
+  /** 已进入打开状态后调用（刷新、自动扫描等面板自己的事）。 */
+  onOpen?: () => void;
 }
 
 export interface PanelAnimationController {
-  /** 打开面板 */
-  open: () => void;
-  /** 关闭面板 */
-  close: () => void;
-  /** 是否已打开 */
-  isOpened: () => boolean;
-  /** 销毁控制器 */
-  dispose: () => void;
+  open(): void;
+  close(): void;
+  isOpen(): boolean;
+  dispose(): void;
 }
 
-/**
- * 创建面板动画控制器
- *
- * 统一处理：
- * - 打开/关闭状态管理
- * - CSS 过渡动画（open 类）
- * - 焦点陷阱设置
- * - 延迟隐藏（关闭动画完成后）
- */
 export function createPanelAnimation(config: PanelAnimationConfig): PanelAnimationController {
-  const { panel, backdrop, onClose, onRefresh } = config;
+  const { panel, backdrop, onOpen } = config;
+  const closeDelayMs = config.closeDelayMs ?? 120;
 
   let opened = false;
   let trapDispose: (() => void) | undefined;
   let closeTimer: ReturnType<typeof setTimeout> | undefined;
 
+  function clearCloseTimer(): void {
+    if (closeTimer) clearTimeout(closeTimer);
+    closeTimer = undefined;
+  }
+
   function open(): void {
     if (opened) return;
     opened = true;
-
-    // 清除关闭定时器（如果正在关闭过程中被重新打开）
-    if (closeTimer) {
-      clearTimeout(closeTimer);
-      closeTimer = undefined;
-    }
-
+    clearCloseTimer();
     backdrop.hidden = false;
-
-    // 下一帧再加类，保证 CSS 过渡生效
+    // 下一帧再加类，保证过渡生效
     requestAnimationFrame(() => {
       backdrop.classList.add('open');
       panel.classList.add('open');
-
-      // 设置焦点陷阱
       trapDispose?.();
-      trapDispose = setupFocusTrap({
-        container: panel,
-        onClose: close,
-      }).dispose;
+      trapDispose = setupFocusTrap({ container: panel, onClose: close }).dispose;
     });
-
-    // 触发刷新回调
-    if (onRefresh) {
-      void onRefresh();
-    }
+    onOpen?.();
   }
 
   function close(): void {
     if (!opened) return;
     opened = false;
-
-    // 释放焦点陷阱
     trapDispose?.();
     trapDispose = undefined;
-
-    // 移除 open 类，触发关闭动画
     backdrop.classList.remove('open');
     panel.classList.remove('open');
-
-    // 清除旧定时器
-    if (closeTimer) clearTimeout(closeTimer);
-
-    // 动画结束后隐藏元素（节省 GPU 资源）
+    clearCloseTimer();
     closeTimer = setTimeout(() => {
-      backdrop.hidden = true;
+      // 过渡期间用户可能又打开了它 —— 关闭定时器不得把新开的浮层藏掉。
+      if (!opened) backdrop.hidden = true;
       closeTimer = undefined;
-    }, 300); // 与 CSS transition 时长一致
-
-    // 触发关闭回调
-    onClose?.();
-  }
-
-  function isOpened(): boolean {
-    return opened;
+    }, closeDelayMs);
   }
 
   function dispose(): void {
     trapDispose?.();
     trapDispose = undefined;
-    if (closeTimer) {
-      clearTimeout(closeTimer);
-      closeTimer = undefined;
-    }
+    clearCloseTimer();
   }
 
-  return { open, close, isOpened, dispose };
+  return { open, close, isOpen: () => opened, dispose };
 }
